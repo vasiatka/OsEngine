@@ -10,7 +10,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace OsEngine.RoboMarketer.Common.Helpers
+namespace OsEngine.RoboMarketer.Lib.Helpers
 {
     public class VolumeHelper
     {

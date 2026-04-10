@@ -13,9 +13,9 @@ using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
 
-using OsEngine.RoboMarketer.Common.Settings;
+using OsEngine.RoboMarketer.Lib.Helpers;
 
-namespace OsEngine.RoboMarketer.Common
+namespace OsEngine.RoboMarketer.Lib
 {
     public abstract class BasePanel : BotPanel 
     {

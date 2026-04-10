@@ -7,7 +7,7 @@ using System.Threading.Tasks;
 using System.Drawing;
 using OsEngine.Entity;
 
-namespace OsEngine.RoboMarketer.Common.Indicators
+namespace OsEngine.RoboMarketer.Indicators
 {
     [Indicator("KopTr")]
     public class KopTr : Aindicator

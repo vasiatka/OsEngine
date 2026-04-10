@@ -9,7 +9,7 @@ using System.Threading.Tasks;
 
 //Формирует настройки для режима торгов и времени торговли
 
-namespace OsEngine.RoboMarketer.Common.Helpers
+namespace OsEngine.RoboMarketer.Lib.Helpers
 {
     public class TradingRegimeHelper
     {

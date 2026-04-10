@@ -5,7 +5,7 @@ using OsEngine.Charts.CandleChart.Indicators;
 using OsEngine.Entity;
 using OsEngine.Indicators;
 
-namespace OsEngine.RoboMarketer.Common.Indicators
+namespace OsEngine.RoboMarketer.Indicators
 {
     [Indicator("BbATR")]
     public class BbATR : Aindicator

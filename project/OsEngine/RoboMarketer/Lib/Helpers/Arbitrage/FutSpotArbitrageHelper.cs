@@ -5,7 +5,7 @@ using OsEngine.Market.Servers;
 using OsEngine.Market.Servers.GateIo.GateIoFutures.Entities;
 using OsEngine.OsTrader.Panels;
 using OsEngine.OsTrader.Panels.Tab;
-using OsEngine.RoboMarketer.Common.Indicators;
+using OsEngine.RoboMarketer.Indicators;
 using System;
 using System.Collections.Generic;
 using System.Linq;

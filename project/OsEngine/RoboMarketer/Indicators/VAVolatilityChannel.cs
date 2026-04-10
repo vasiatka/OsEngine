@@ -4,8 +4,9 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
 using System.Reflection;
+using OsEngine.Indicators;
 
-namespace OsEngine.Indicators
+namespace OsEngine.RoboMarketer.Indicators
 {
     [Indicator("VAVolatilityChanel")]
     public class VAVolatilityChanel : Aindicator

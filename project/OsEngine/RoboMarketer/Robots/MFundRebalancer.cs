@@ -22,7 +22,7 @@ using System.Threading.Tasks;
 
  */
 
-namespace OsEngine.RoboMarketer
+namespace OsEngine.RoboMarketer.Robots
 {
     [Bot("MFundRebalancer")]
     public class MFundRebalancer : BotPanel

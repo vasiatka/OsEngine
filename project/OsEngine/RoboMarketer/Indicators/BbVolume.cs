@@ -4,7 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 
-namespace OsEngine.RoboMarketer.Common.Indicators
+namespace OsEngine.RoboMarketer.Indicators
 {
     [Indicator("BbVolume")]
     public class BbVolume : Aindicator
