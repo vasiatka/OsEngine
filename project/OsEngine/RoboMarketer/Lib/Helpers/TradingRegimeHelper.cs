@@ -115,7 +115,7 @@ namespace OsEngine.RoboMarketer.Lib.Helpers
             return false;
         }
 
-        public bool IsShortLong()
+        public bool IsOnlyShort()
         {
             if (_isRegimeUsed && (_regime.ValueString == "OnlyShort")) { return true; }
 

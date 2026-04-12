@@ -22,6 +22,9 @@ namespace OsEngine.RoboMarketer.Lib.Helpers
         private StrategyParameterInt _icebergCount;
         private StrategyParameterInt _icebergTimeDelta;
 
+        private bool isMaxPositionsUsed = false;
+        private StrategyParameterInt _maxPositions;
+
         public EnterPositionHelper(BotPanel bot)
         {
             _bot = bot;
@@ -31,9 +34,32 @@ namespace OsEngine.RoboMarketer.Lib.Helpers
             _icebergTimeDelta = _bot.CreateParameter("Интервалы между заявками в айсберге", 1000, 1000, 10000, 500, "Торги");
         }
 
+        public StrategyParameterInt MaxPositions
+        {
+            get
+            {// возвращаем значение поля
+                if(isMaxPositionsUsed)
+                { return _maxPositions; }
+                else { return null;}
+            }
+            set
+            { // устанавливаем новое значение поля
+                _maxPositions = value;
+                isMaxPositionsUsed = true;
+            }
+        }
+        public EnterPositionHelper UseMaxPositions()
+        {
+            MaxPositions =  _bot.CreateParameter("Максимальное число позиций", 10, 0, 20, 1, "Торги");
+            return this;
+        }
+
+
         public Position BuyAtMarket(BotTabSimple tab, decimal volume)
         {
-            if(_tradeEnterType.ValueString== "Всем объемом")
+            if (MaxPositions != null && _bot.OpenPositions.Count>= MaxPositions.ValueInt) return null;
+
+            if (_tradeEnterType.ValueString== "Всем объемом")
             {
                return tab.BuyAtMarket(volume);
             }
@@ -47,6 +73,8 @@ namespace OsEngine.RoboMarketer.Lib.Helpers
 
         public Position SellAtMarket(BotTabSimple tab, decimal volume)
         {
+            if (MaxPositions != null && _bot.OpenPositions.Count >= MaxPositions.ValueInt) return null;
+
             if (_tradeEnterType.ValueString == "Всем объемом")
             {
                 return tab.SellAtMarket(volume);
