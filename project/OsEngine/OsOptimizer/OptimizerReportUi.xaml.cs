@@ -480,6 +480,20 @@ namespace OsEngine.OsOptimizer
             column21.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
             _gridResults.Columns.Add(column21);
 
+            DataGridViewColumn column22 = new DataGridViewColumn();
+            column22.CellTemplate = cell0;
+            column22.HeaderText = "Profit Pos %";
+            column22.ReadOnly = false;
+            column22.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+            _gridResults.Columns.Add(column22);
+
+            DataGridViewColumn column23 = new DataGridViewColumn();
+            column23.CellTemplate = cell0;
+            column23.HeaderText = "Average Time";
+            column23.ReadOnly = false;
+            column23.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+            _gridResults.Columns.Add(column23);
+
             DataGridViewColumn column2 = new DataGridViewColumn();
             column2.CellTemplate = cell0;
             column2.HeaderText = "Total Profit";
@@ -558,7 +572,6 @@ namespace OsEngine.OsOptimizer
 
         private void UpdateHeaders()
         {
-
             _gridResults.Columns[0].HeaderText = "Bot Name \n \n \n";
 
             if (_sortBotsType == SortBotsType.BotName)
@@ -581,61 +594,77 @@ namespace OsEngine.OsOptimizer
                 _gridResults.Columns[2].HeaderCell.Style.BackColor = cellColor;
             }
 
-            _gridResults.Columns[3].HeaderText = "Total Profit";
+            _gridResults.Columns[3].HeaderText = "Profit Pos %";
 
-            if (_sortBotsType == SortBotsType.TotalProfit)
+            if (_sortBotsType == SortBotsType.ProfitPositionPercent)
             {
                 _gridResults.Columns[3].HeaderText += " vvv";
                 _gridResults.Columns[3].HeaderCell.Style.BackColor = cellColor;
             }
 
-            _gridResults.Columns[4].HeaderText = "Max Drow Dawn %";
-            if (_sortBotsType == SortBotsType.MaxDrawDawn)
+            _gridResults.Columns[4].HeaderText = "Average Time";
+
+            if (_sortBotsType == SortBotsType.AverageTime)
             {
                 _gridResults.Columns[4].HeaderText += " vvv";
                 _gridResults.Columns[4].HeaderCell.Style.BackColor = cellColor;
             }
 
-            _gridResults.Columns[5].HeaderText = "Average Profit";
-            if (_sortBotsType == SortBotsType.AverageProfit)
+            _gridResults.Columns[5].HeaderText = "Total Profit";
+
+            if (_sortBotsType == SortBotsType.TotalProfit)
             {
                 _gridResults.Columns[5].HeaderText += " vvv";
                 _gridResults.Columns[5].HeaderCell.Style.BackColor = cellColor;
             }
 
-            _gridResults.Columns[6].HeaderText = "Average Profit %";
-            if (_sortBotsType == SortBotsType.AverageProfitPercent)
+            _gridResults.Columns[6].HeaderText = "Max Drow Dawn %";
+            if (_sortBotsType == SortBotsType.MaxDrawDawn)
             {
                 _gridResults.Columns[6].HeaderText += " vvv";
                 _gridResults.Columns[6].HeaderCell.Style.BackColor = cellColor;
             }
 
-            _gridResults.Columns[7].HeaderText = "Profit Factor";
-            if (_sortBotsType == SortBotsType.ProfitFactor)
+            _gridResults.Columns[7].HeaderText = "Average Profit";
+            if (_sortBotsType == SortBotsType.AverageProfit)
             {
                 _gridResults.Columns[7].HeaderText += " vvv";
                 _gridResults.Columns[7].HeaderCell.Style.BackColor = cellColor;
             }
 
-            _gridResults.Columns[8].HeaderText = "Pay Off Ratio";
-            if (_sortBotsType == SortBotsType.PayOffRatio)
+            _gridResults.Columns[8].HeaderText = "Average Profit %";
+            if (_sortBotsType == SortBotsType.AverageProfitPercent)
             {
                 _gridResults.Columns[8].HeaderText += " vvv";
                 _gridResults.Columns[8].HeaderCell.Style.BackColor = cellColor;
             }
 
-            _gridResults.Columns[9].HeaderText = "Recovery";
-            if (_sortBotsType == SortBotsType.Recovery)
+            _gridResults.Columns[9].HeaderText = "Profit Factor";
+            if (_sortBotsType == SortBotsType.ProfitFactor)
             {
                 _gridResults.Columns[9].HeaderText += " vvv";
                 _gridResults.Columns[9].HeaderCell.Style.BackColor = cellColor;
             }
 
-            _gridResults.Columns[10].HeaderText = "Sharpe Ratio";
-            if (_sortBotsType == SortBotsType.SharpRatio)
+            _gridResults.Columns[10].HeaderText = "Pay Off Ratio";
+            if (_sortBotsType == SortBotsType.PayOffRatio)
             {
                 _gridResults.Columns[10].HeaderText += " vvv";
                 _gridResults.Columns[10].HeaderCell.Style.BackColor = cellColor;
+            }
+
+            _gridResults.Columns[11].HeaderText = "Recovery";
+            if (_sortBotsType == SortBotsType.Recovery)
+            {
+                _gridResults.Columns[11].HeaderText += " vvv";
+                _gridResults.Columns[11].HeaderCell.Style.BackColor = cellColor;
+            }
+
+            _gridResults.Columns[12].HeaderText = "Sharpe Ratio";
+            if (_sortBotsType == SortBotsType.SharpRatio)
+            {
+                _gridResults.Columns[12].HeaderText += " vvv";
+                _gridResults.Columns[12].HeaderCell.Style.BackColor = cellColor;
             }
 
             _gridResults.ColumnHeadersHeight = 50;
@@ -719,6 +748,23 @@ namespace OsEngine.OsOptimizer
                     cell3.Value = report.PositionsCount;
                     row.Cells.Add(cell3);
 
+                    DataGridViewTextBoxCell cell33 = new DataGridViewTextBoxCell();
+                    cell33.Value = Math.Round(report.ProfitPositionPercent,2);
+                    row.Cells.Add(cell33);
+
+                    DataGridViewTextBoxCell cell34 = new DataGridViewTextBoxCell();
+
+                    if (report.AverageTimeInPositionTimeSpan.TotalHours > 1)
+                    {
+                        cell34.Value = "h:" + Math.Truncate(report.AverageTimeInPositionTimeSpan.TotalHours) + "m:" + report.AverageTimeInPositionTimeSpan.Minutes;
+                    }
+                    else
+                    {
+                        cell34.Value = "m:" + report.AverageTimeInPositionTimeSpan.Minutes + "s:" + report.AverageTimeInPositionTimeSpan.Seconds;
+                    }
+
+                    row.Cells.Add(cell34);
+
                     DataGridViewTextBoxCell cell4 = new DataGridViewTextBoxCell();
                     cell4.Value = Math.Round(report.TotalProfit, 5).ToStringWithNoEndZero() + " (" + report.TotalProfitPercent.ToStringWithNoEndZero() + "%)";
                     row.Cells.Add(cell4);
@@ -787,12 +833,12 @@ namespace OsEngine.OsOptimizer
                 return;
             }
 
-            if (e.ColumnIndex == 11)
+            if (e.ColumnIndex == 13)
             {
                 ShowBotChartDialog(e);
             }
 
-            if (e.ColumnIndex == 12)
+            if (e.ColumnIndex == 14)
             {
                 ShowParametersDialog(e);
             }
@@ -825,33 +871,41 @@ namespace OsEngine.OsOptimizer
             }
             else if (columnSelect == 3)
             {
-                currentSelection = SortBotsType.TotalProfit;
+                currentSelection = SortBotsType.ProfitPositionPercent;
             }
             else if (columnSelect == 4)
             {
-                currentSelection = SortBotsType.MaxDrawDawn;
+                currentSelection = SortBotsType.AverageTime;
             }
             else if (columnSelect == 5)
             {
-                currentSelection = SortBotsType.AverageProfit;
+                currentSelection = SortBotsType.TotalProfit;
             }
             else if (columnSelect == 6)
             {
-                currentSelection = SortBotsType.AverageProfitPercent;
+                currentSelection = SortBotsType.MaxDrawDawn;
             }
             else if (columnSelect == 7)
             {
-                currentSelection = SortBotsType.ProfitFactor;
+                currentSelection = SortBotsType.AverageProfit;
             }
             else if (columnSelect == 8)
             {
-                currentSelection = SortBotsType.PayOffRatio;
+                currentSelection = SortBotsType.AverageProfitPercent;
             }
             else if (columnSelect == 9)
             {
-                currentSelection = SortBotsType.Recovery;
+                currentSelection = SortBotsType.ProfitFactor;
             }
             else if (columnSelect == 10)
+            {
+                currentSelection = SortBotsType.PayOffRatio;
+            }
+            else if (columnSelect == 11)
+            {
+                currentSelection = SortBotsType.Recovery;
+            }
+            else if (columnSelect == 12)
             {
                 currentSelection = SortBotsType.SharpRatio;
             }
@@ -1077,6 +1131,14 @@ namespace OsEngine.OsOptimizer
                     {
                         curReport.Value = report.PositionsCount;
                     }
+                    else if (_sortBotsType == SortBotsType.ProfitPositionPercent)
+                    {
+                        curReport.Value = Math.Round(report.ProfitPositionPercent,2);
+                    }
+                    else if (_sortBotsType == SortBotsType.AverageTime)
+                    {
+                        curReport.Value = report.AverageTimeInPositionTimeSpan.TotalSeconds.ToDecimal();
+                    }
                     else if (_sortBotsType == SortBotsType.TotalProfit)
                     {
                         curReport.Value = Math.Round(report.TotalProfitPercent, 5);
@@ -1232,6 +1294,69 @@ namespace OsEngine.OsOptimizer
                     resultValues[i].Color = Color.Gray;
                 }
             }
+        }
+
+        #endregion
+
+        #region Save profit variants
+
+        private OptimizerProfitStagesSaveUi _saveProfitStagesUi;
+
+        private void ButtonSaveStages_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (_saveProfitStagesUi == null)
+                {
+
+                    if (_reports == null)
+                    {
+                        return;
+                    }
+
+                    if (_gridFazesEnd.CurrentCell == null)
+                    {
+                        return;
+                    }
+
+                    int num = 0;
+                    num = _gridFazesEnd.CurrentCell.RowIndex;
+
+                    if (num >= _reports.Count)
+                    {
+                        return;
+                    }
+
+                    OptimizerFazeReport fazeReport = _reports[num];
+
+                    if (fazeReport == null)
+                    {
+                        return;
+                    }
+
+                    _saveProfitStagesUi = new OptimizerProfitStagesSaveUi(fazeReport);
+                    _saveProfitStagesUi.Closed += _saveProfitStagesUi_Closed;
+                    _saveProfitStagesUi.Show();
+                }
+                else
+                {
+                    if (_saveProfitStagesUi.WindowState == WindowState.Minimized)
+                    {
+                        _saveProfitStagesUi.WindowState = WindowState.Normal;
+                    }
+                    _saveProfitStagesUi.Activate();
+                }
+            }
+            catch (Exception ex)
+            {
+                _master.SendLogMessage(ex.ToString(), LogMessageType.Error);
+            }
+        }
+
+        private void _saveProfitStagesUi_Closed(object sender, EventArgs e)
+        {
+            _saveProfitStagesUi.Closed -= _saveProfitStagesUi_Closed;
+            _saveProfitStagesUi = null;
         }
 
         #endregion

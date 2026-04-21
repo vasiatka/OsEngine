@@ -33,49 +33,56 @@ namespace OsEngine.OsTrader.Panels.Tab.SyntheticBondTab
 
         private ChartCandleMaster _chartSec2;
 
-        public SyntheticBondChartUi(SyntheticBondSeries synteticBondSeries, ref SyntheticBond modificationFuturesSyntheticBond)
+        public SyntheticBondChartUi(SyntheticBondSeries synteticBondSeries, ref SyntheticBond syntheticBond)
         {
             InitializeComponent();
 
             _syntheticBondSeries = synteticBondSeries;
-            _syntheticBond = modificationFuturesSyntheticBond;
+            _syntheticBond = syntheticBond;
 
             Title = OsLocalization.Trader.Label699;
 
             LastSec1Label.Content = OsLocalization.Trader.Label717 + ":";
             LastSec2Label.Content = OsLocalization.Trader.Label717 + ":";
-            LastContangoLabel.Content = OsLocalization.Trader.Label717 + ":";
+            LastSeparationLabel.Content = OsLocalization.Trader.Label717 + ":";
             LastCointegrationLabel.Content = OsLocalization.Trader.Label717 + ":";
+            CheckBoxCointegrationAutoIsOn.Content = OsLocalization.Trader.Label744;
+            CointegrationLabel.Content = OsLocalization.Trader.Label238;
+            SeparationLabel.Content = OsLocalization.Trader.Label745;
 
-            if (_syntheticBond.BaseIcebergParameters != null
-                && _syntheticBond.BaseIcebergParameters.BotTab != null
-                && _syntheticBond.BaseIcebergParameters.BotTab.Connector != null
-                && _syntheticBond.BaseIcebergParameters.BotTab.Connector.SecurityName != null)
+            if (_syntheticBond.PatternBaseTab != null
+                && _syntheticBond.PatternBaseTab.Connector != null
+                && _syntheticBond.PatternBaseTab.Connector.SecurityName != null)
             {
-                Security1Label.Content = _syntheticBond.BaseIcebergParameters.BotTab.Connector.SecurityName;
+                Security1Label.Content = _syntheticBond.PatternBaseTab.Connector.SecurityName;
             }
             else
             {
                 Security1Label.Content = "None";
             }
 
-            if (_syntheticBond != null && _syntheticBond.FuturesIcebergParameters != null && _syntheticBond.FuturesIcebergParameters.BotTab != null &&
-                _syntheticBond.FuturesIcebergParameters.BotTab.Connector != null && _syntheticBond.FuturesIcebergParameters.BotTab.Connector.SecurityName != null)
+            if (_syntheticBond != null &&
+                _syntheticBond.PatternFuturesTab != null &&
+                _syntheticBond.PatternFuturesTab.Connector != null &&
+                _syntheticBond.PatternFuturesTab.Connector.SecurityName != null)
             {
-                Security2Label.Content = _syntheticBond.FuturesIcebergParameters.BotTab.Connector.SecurityName;
+                Security2Label.Content = _syntheticBond.PatternFuturesTab.Connector.SecurityName;
             }
             else
             {
                 Security2Label.Content = "None";
             }
 
+            CheckBoxCointegrationAutoIsOn.IsChecked = _syntheticBond.CalculateCointegration;
+            CheckBoxCointegrationAutoIsOn.Click += CheckBoxCointegrationAutoIsOn_Click;
+
             CreateContangoChart();
             CreateCointegrationChart();
 
             PaintCandles();
 
-            BotTabSimple baseTab = _syntheticBond.BaseIcebergParameters.BotTab;
-            BotTabSimple futuresTab = _syntheticBond.FuturesIcebergParameters.BotTab;
+            BotTabSimple baseTab = _syntheticBond.SelectedScenario.ArbitrationIceberg.MainLegs[0].BotTab;
+            BotTabSimple futuresTab = _syntheticBond.SelectedScenario.ArbitrationIceberg.SecondaryLegs[0].BotTab;
 
             baseTab.CandleUpdateEvent += Tab_CandleUpdateEvent;
             futuresTab.CandleUpdateEvent += Tab_CandleUpdateEvent;
@@ -119,8 +126,8 @@ namespace OsEngine.OsTrader.Panels.Tab.SyntheticBondTab
 
         private void PaintCandles()
         {
-            BotTabSimple baseTabForChart = _syntheticBond.BaseIcebergParameters.BotTab;
-            BotTabSimple futuresTabForChart = _syntheticBond.FuturesIcebergParameters.BotTab;
+            BotTabSimple baseTabForChart = _syntheticBond.SelectedScenario.ArbitrationIceberg.MainLegs[0].BotTab;
+            BotTabSimple futuresTabForChart = _syntheticBond.SelectedScenario.ArbitrationIceberg.SecondaryLegs[0].BotTab;
 
             _chartSec1 = new ChartCandleMaster(baseTabForChart.TabName + "sec1", baseTabForChart.StartProgram);
             _chartSec1.StartPaint(null, HostSec1, null);
@@ -150,28 +157,34 @@ namespace OsEngine.OsTrader.Panels.Tab.SyntheticBondTab
                 _chartSec2.SetCandles(futuresTabForChart.CandlesAll);
             }
 
-            for (int i = 0; i < baseTabForChart.Indicators.Count; i++)
-            {
-                if (_chartSec1.IndicatorIsCreate(baseTabForChart.Indicators[i].Name) == false)
-                {
-                    _chartSec1.CreateIndicator(baseTabForChart.Indicators[i], baseTabForChart.Indicators[i].NameArea);
-                }
-            }
+            //for (int i = 0; i < baseTabForChart.Indicators.Count; i++)
+            //{
+            //    if (_chartSec1.IndicatorIsCreate(baseTabForChart.Indicators[i].Name) == false)
+            //    {
+            //        _chartSec1.CreateIndicator(baseTabForChart.Indicators[i], baseTabForChart.Indicators[i].NameArea);
+            //    }
+            //}
 
-            for (int i = 0; i < futuresTabForChart.Indicators.Count; i++)
-            {
-                if (_chartSec2.IndicatorIsCreate(futuresTabForChart.Indicators[i].Name) == false)
-                {
-                    _chartSec2.CreateIndicator(futuresTabForChart.Indicators[i], futuresTabForChart.Indicators[i].NameArea);
-                }
-            }
+            //for (int i = 0; i < futuresTabForChart.Indicators.Count; i++)
+            //{
+            //    if (_chartSec2.IndicatorIsCreate(futuresTabForChart.Indicators[i].Name) == false)
+            //    {
+            //        _chartSec2.CreateIndicator(futuresTabForChart.Indicators[i], futuresTabForChart.Indicators[i].NameArea);
+            //    }
+            //}
+        }
+
+        private void CheckBoxCointegrationAutoIsOn_Click(object sender, RoutedEventArgs e)
+        {
+            _syntheticBond.CalculateCointegration = CheckBoxCointegrationAutoIsOn.IsChecked.Value;
+            _syntheticBond.Save();
         }
 
         public string Key
         {
             get
             {
-                return _syntheticBond.FuturesIcebergParameters.BotTab.TabName;
+                return _syntheticBond.SelectedScenario.ArbitrationIceberg.MainLegs[0].BotTab.TabName;
             }
         }
 
@@ -243,13 +256,13 @@ namespace OsEngine.OsTrader.Panels.Tab.SyntheticBondTab
             List<Candle> processedSec2;
             _syntheticBondSeries.GetProcessedCandles(_syntheticBond, out processedSec1, out processedSec2);
 
-            if (processedSec1 != null && processedSec1.Count > 0)
+            if (_chartSec1 != null && processedSec1 != null && processedSec1.Count > 0)
             {
                 _chartSec1.SetCandles(processedSec1);
                 UpdateLastPriceLabel(LastSec1TextBox, processedSec1);
             }
 
-            if (processedSec2 != null && processedSec2.Count > 0)
+            if (_chartSec2 != null && processedSec2 != null && processedSec2.Count > 0)
             {
                 _chartSec2.SetCandles(processedSec2);
                 UpdateLastPriceLabel(LastSec2TextBox, processedSec2);
@@ -288,8 +301,8 @@ namespace OsEngine.OsTrader.Panels.Tab.SyntheticBondTab
                 return;
             }
 
-            BotTabSimple baseTabPos = _syntheticBond.BaseIcebergParameters.BotTab;
-            BotTabSimple futuresTabPos = _syntheticBond.FuturesIcebergParameters.BotTab;
+            BotTabSimple baseTabPos = _syntheticBond.SelectedScenario.ArbitrationIceberg.MainLegs[0].BotTab;
+            BotTabSimple futuresTabPos = _syntheticBond.SelectedScenario.ArbitrationIceberg.SecondaryLegs[0].BotTab;
 
             if (baseTabPos != null && baseTabPos.PositionsAll != null)
             {
@@ -443,6 +456,12 @@ namespace OsEngine.OsTrader.Panels.Tab.SyntheticBondTab
 
         private void UpdateContangoChart()
         {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.Invoke(UpdateContangoChart);
+                return;
+            }
+
             if (_chartContango == null)
             {
                 return;
@@ -722,8 +741,10 @@ namespace OsEngine.OsTrader.Panels.Tab.SyntheticBondTab
             {
                 Closed -= SyntheticBondOffsetUi_Closed;
 
-                BotTabSimple baseTab = _syntheticBond.BaseIcebergParameters.BotTab;
-                BotTabSimple futuresTab = _syntheticBond.FuturesIcebergParameters.BotTab;
+                CheckBoxCointegrationAutoIsOn.Click -= CheckBoxCointegrationAutoIsOn_Click;
+
+                BotTabSimple baseTab = _syntheticBond.SelectedScenario.ArbitrationIceberg.MainLegs[0].BotTab;
+                BotTabSimple futuresTab = _syntheticBond.SelectedScenario.ArbitrationIceberg.SecondaryLegs[0].BotTab;
 
                 if (baseTab != null)
                 {
@@ -770,6 +791,7 @@ namespace OsEngine.OsTrader.Panels.Tab.SyntheticBondTab
                         _chartSec1.Indicators.Clear();
                     }
 
+                    _chartSec1.StopPaint();
                     _chartSec1.Delete();
                     _chartSec1 = null;
                 }
@@ -781,6 +803,7 @@ namespace OsEngine.OsTrader.Panels.Tab.SyntheticBondTab
                         _chartSec2.Indicators.Clear();
                     }
 
+                    _chartSec2.StopPaint();
                     _chartSec2.Delete();
                     _chartSec2 = null;
                 }
