@@ -21,6 +21,10 @@ namespace OsEngine.OsTrader.SystemAnalyze
     {
         #region Service
 
+        private DispatcherTimer _blinkTimer;
+        private int _blinkCount;
+        private bool _isGreenVisible = true;
+
         public SystemAnalyzeUi()
         {
             InitializeComponent();
@@ -138,45 +142,10 @@ namespace OsEngine.OsTrader.SystemAnalyze
         {
             try
             {
-                DispatcherTimer timer = new DispatcherTimer();
-                int blinkCount = 0;
-                bool isGreenVisible = true;
-
-                timer.Interval = TimeSpan.FromMilliseconds(300);
-                timer.Tick += (s, e) =>
-                {
-                    try
-                    {
-                        if (blinkCount >= 20)
-                        {
-                            timer.Stop();
-                            PostGreenSystemAnalyze.Opacity = 1;
-                            PostWhiteSystemAnalyze.Opacity = 0;
-                            return;
-                        }
-
-                        if (isGreenVisible)
-                        {
-                            PostGreenSystemAnalyze.Opacity = 0;
-                            PostWhiteSystemAnalyze.Opacity = 1;
-                        }
-                        else
-                        {
-                            PostGreenSystemAnalyze.Opacity = 1;
-                            PostWhiteSystemAnalyze.Opacity = 0;
-                        }
-
-                        isGreenVisible = !isGreenVisible;
-                        blinkCount++;
-                    }
-                    catch (Exception ex)
-                    {
-                        ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
-                        timer.Stop();
-                    }
-                };
-
-                timer.Start();
+                _blinkTimer = new DispatcherTimer();
+                _blinkTimer.Interval = TimeSpan.FromMilliseconds(300);
+                _blinkTimer.Tick += _blinkTimer_Tick;
+                _blinkTimer.Start();
             }
             catch (Exception ex)
             {
@@ -184,46 +153,149 @@ namespace OsEngine.OsTrader.SystemAnalyze
             }
         }
 
+        private void _blinkTimer_Tick(object sender, EventArgs e)
+        {
+            if (_blinkTimer == null)
+            {
+                return;
+            }
+
+            try
+            {
+                if (_blinkCount >= 20)
+                {
+                    _blinkTimer.Stop();
+                    _blinkTimer.Tick -= _blinkTimer_Tick;
+                    _blinkTimer = null;
+                    PostGreenSystemAnalyze.Opacity = 1;
+                    PostWhiteSystemAnalyze.Opacity = 0;
+                    return;
+                }
+
+                if (_isGreenVisible)
+                {
+                    PostGreenSystemAnalyze.Opacity = 0;
+                    PostWhiteSystemAnalyze.Opacity = 1;
+                }
+                else
+                {
+                    PostGreenSystemAnalyze.Opacity = 1;
+                    PostWhiteSystemAnalyze.Opacity = 0;
+                }
+
+                _isGreenVisible = !_isGreenVisible;
+                _blinkCount++;
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+                if (_blinkTimer != null)
+                {
+                    _blinkTimer.Stop();
+                    _blinkTimer.Tick -= _blinkTimer_Tick;
+                    _blinkTimer = null;
+                }
+            }
+        }
+
         private void SystemAnalyzeUi_Closed(object sender, EventArgs e)
         {
-            SystemUsageAnalyzeMaster.RamUsageCollectionChange -= SystemUsageAnalyzeMaster_RamUsageCollectionChange;
-            SystemUsageAnalyzeMaster.CpuUsageCollectionChange -= SystemUsageAnalyzeMaster_CpuUsageCollectionChange;
-            SystemUsageAnalyzeMaster.EcqUsageCollectionChange -= SystemUsageAnalyzeMaster_EcqUsageCollectionChange;
-            SystemUsageAnalyzeMaster.MoqUsageCollectionChange -= SystemUsageAnalyzeMaster_MoqUsageCollectionChange;
+            try
+            {
+                SystemUsageAnalyzeMaster.RamUsageCollectionChange -= SystemUsageAnalyzeMaster_RamUsageCollectionChange;
+                SystemUsageAnalyzeMaster.CpuUsageCollectionChange -= SystemUsageAnalyzeMaster_CpuUsageCollectionChange;
+                SystemUsageAnalyzeMaster.EcqUsageCollectionChange -= SystemUsageAnalyzeMaster_EcqUsageCollectionChange;
+                SystemUsageAnalyzeMaster.MoqUsageCollectionChange -= SystemUsageAnalyzeMaster_MoqUsageCollectionChange;
 
-            CheckBoxRamCollectDataIsOn.Checked -= CheckBoxRamCollectDataIsOn_Checked;
-            CheckBoxRamCollectDataIsOn.Unchecked -= CheckBoxRamCollectDataIsOn_Checked;
+                CheckBoxRamCollectDataIsOn.Checked -= CheckBoxRamCollectDataIsOn_Checked;
+                CheckBoxRamCollectDataIsOn.Unchecked -= CheckBoxRamCollectDataIsOn_Checked;
 
-            CheckBoxCpuCollectDataIsOn.Checked -= CheckBoxCpuCollectDataIsOn_Checked;
-            CheckBoxCpuCollectDataIsOn.Unchecked -= CheckBoxCpuCollectDataIsOn_Checked;
+                CheckBoxCpuCollectDataIsOn.Checked -= CheckBoxCpuCollectDataIsOn_Checked;
+                CheckBoxCpuCollectDataIsOn.Unchecked -= CheckBoxCpuCollectDataIsOn_Checked;
 
-            CheckBoxEcqCollectDataIsOn.Checked -= CheckBoxEcqCollectDataIsOn_Checked;
-            CheckBoxEcqCollectDataIsOn.Unchecked -= CheckBoxEcqCollectDataIsOn_Checked;
+                CheckBoxEcqCollectDataIsOn.Checked -= CheckBoxEcqCollectDataIsOn_Checked;
+                CheckBoxEcqCollectDataIsOn.Unchecked -= CheckBoxEcqCollectDataIsOn_Checked;
 
-            CheckBoxMoqCollectDataIsOn.Checked -= CheckBoxMoqCollectDataIsOn_Checked;
-            CheckBoxMoqCollectDataIsOn.Unchecked -= CheckBoxMoqCollectDataIsOn_Checked;
+                CheckBoxMoqCollectDataIsOn.Checked -= CheckBoxMoqCollectDataIsOn_Checked;
+                CheckBoxMoqCollectDataIsOn.Unchecked -= CheckBoxMoqCollectDataIsOn_Checked;
 
-            ComboBoxRamPeriodSavePoint.SelectionChanged -= ComboBoxRamPeriodSavePoint_SelectionChanged;
-            ComboBoxCpuPeriodSavePoint.SelectionChanged -= ComboBoxCpuPeriodSavePoint_SelectionChanged;
-            ComboBoxEcqPeriodSavePoint.SelectionChanged -= ComboBoxEcqPeriodSavePoint_SelectionChanged;
-            ComboBoxMoqPeriodSavePoint.SelectionChanged -= ComboBoxMoqPeriodSavePoint_SelectionChanged;
+                ComboBoxRamPeriodSavePoint.SelectionChanged -= ComboBoxRamPeriodSavePoint_SelectionChanged;
+                ComboBoxCpuPeriodSavePoint.SelectionChanged -= ComboBoxCpuPeriodSavePoint_SelectionChanged;
+                ComboBoxEcqPeriodSavePoint.SelectionChanged -= ComboBoxEcqPeriodSavePoint_SelectionChanged;
+                ComboBoxMoqPeriodSavePoint.SelectionChanged -= ComboBoxMoqPeriodSavePoint_SelectionChanged;
 
-            TextBoxRamPointsMax.TextChanged -= TextBoxRamPointsMax_TextChanged;
-            TextBoxCpuPointsMax.TextChanged -= TextBoxCpuPointsMax_TextChanged;
-            TextBoxEcqPointsMax.TextChanged -= TextBoxEcqPointsMax_TextChanged;
-            TextBoxMoqPointsMax.TextChanged -= TextBoxMoqPointsMax_TextChanged;
+                TextBoxRamPointsMax.TextChanged -= TextBoxRamPointsMax_TextChanged;
+                TextBoxCpuPointsMax.TextChanged -= TextBoxCpuPointsMax_TextChanged;
+                TextBoxEcqPointsMax.TextChanged -= TextBoxEcqPointsMax_TextChanged;
+                TextBoxMoqPointsMax.TextChanged -= TextBoxMoqPointsMax_TextChanged;
 
-            HostCpu.Child = null;
-            HostEcq.Child = null;
-            HostMoq.Child = null;
-            HostRam.Child = null;
+                if (_blinkTimer != null)
+                {
+                    _blinkTimer.Stop();
+                    _blinkTimer.Tick -= _blinkTimer_Tick;
+                    _blinkTimer = null;
+                }
 
-            _chartCpu = null;
-            _chartRam = null;
-            _chartMoq = null;
-            _chartEcq = null;
+                HostCpu.Child = null;
+                HostEcq.Child = null;
+                HostMoq.Child = null;
+                HostRam.Child = null;
 
-            this.Closed -= SystemAnalyzeUi_Closed;
+                if (_chartRam != null)
+                {
+                    try
+                    {
+                        _chartRam.Dispose();
+                    }
+                    catch (Exception ex)
+                    {
+                        ServerMaster.SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+                    }
+                    _chartRam = null;
+                }
+                if (_chartCpu != null)
+                {
+                    try
+                    {
+                        _chartCpu.Dispose();
+                    }
+                    catch (Exception ex)
+                    {
+                        ServerMaster.SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+                    }
+                    _chartCpu = null;
+                }
+                if (_chartEcq != null)
+                {
+                    try
+                    {
+                        _chartEcq.Dispose();
+                    }
+                    catch (Exception ex)
+                    {
+                        ServerMaster.SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+                    }
+                    _chartEcq = null;
+                }
+                if (_chartMoq != null)
+                {
+                    try
+                    {
+                        _chartMoq.Dispose();
+                    }
+                    catch (Exception ex)
+                    {
+                        ServerMaster.SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+                    }
+                    _chartMoq = null;
+                }
+
+                this.Closed -= SystemAnalyzeUi_Closed;
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+            }
         }
 
         private void CheckBoxCpuCollectDataIsOn_Checked(object sender, RoutedEventArgs e)
@@ -471,7 +543,7 @@ namespace OsEngine.OsTrader.SystemAnalyze
             seriesTotalRam.Color = Color.Green;
             seriesTotalRam.YAxisType = AxisType.Secondary;
             seriesTotalRam.ChartArea = "ChartAreaSystemValues";
-            seriesTotalRam.ShadowOffset = 2;
+            seriesTotalRam.ShadowOffset = Themes.ThemeManager.GetChartSeriesShadow();
             _chartRam.Series.Add(seriesTotalRam);
 
             // 3 series free ram
@@ -481,7 +553,7 @@ namespace OsEngine.OsTrader.SystemAnalyze
             seriesFreeRam.Color = Color.Red;
             seriesFreeRam.YAxisType = AxisType.Secondary;
             seriesFreeRam.ChartArea = "ChartAreaSystemValues";
-            seriesFreeRam.ShadowOffset = 2;
+            seriesFreeRam.ShadowOffset = Themes.ThemeManager.GetChartSeriesShadow();
             _chartRam.Series.Add(seriesFreeRam);
 
             // 4 chart area my values
@@ -501,24 +573,25 @@ namespace OsEngine.OsTrader.SystemAnalyze
             seriesMyRam.YAxisType = AxisType.Secondary;
             seriesMyRam.Color = Color.DarkOrange;
             seriesMyRam.ChartArea = "ChartAreaMyValues";
-            seriesMyRam.ShadowOffset = 2;
+            seriesMyRam.ShadowOffset = Themes.ThemeManager.GetChartSeriesShadow();
             _chartRam.Series.Add(seriesMyRam);
 
             // 6 colors
 
-            _chartRam.BackColor = Color.FromArgb(-15395563);
+            _chartRam.BackColor = Themes.ThemeManager.GetColorWinForms("ChartBackColor");
 
             for (int i = 0; _chartRam.ChartAreas != null && i < _chartRam.ChartAreas.Count; i++)
             {
-                _chartRam.ChartAreas[i].BackColor = Color.FromArgb(-15395563);
-                _chartRam.ChartAreas[i].BorderColor = Color.FromArgb(-16701360);
-                _chartRam.ChartAreas[i].CursorY.LineColor = Color.DimGray;
-                _chartRam.ChartAreas[i].CursorX.LineColor = Color.DimGray;
-                _chartRam.ChartAreas[i].AxisX.TitleForeColor = Color.DimGray;
+                _chartRam.ChartAreas[i].BackColor = Themes.ThemeManager.GetColorWinForms("ChartBackColor");
+                _chartRam.ChartAreas[i].BorderColor = Themes.ThemeManager.GetColorWinForms("ChartBorderColor");
+                _chartRam.ChartAreas[i].CursorY.LineColor = Themes.ThemeManager.GetColorWinForms("ChartTextColor");
+                _chartRam.ChartAreas[i].CursorX.LineColor = Themes.ThemeManager.GetColorWinForms("ChartTextColor");
+                _chartRam.ChartAreas[i].AxisX.TitleForeColor = Themes.ThemeManager.GetColorWinForms("ChartTextColor");
 
                 foreach (var axe in _chartRam.ChartAreas[i].Axes)
                 {
-                    axe.LabelStyle.ForeColor = Color.DimGray;
+                    axe.LabelStyle.ForeColor = Themes.ThemeManager.GetColorWinForms("ChartTextColor");
+                    axe.LabelStyle.Font = Themes.ThemeManager.GetChartAxisFont();
                 }
             }
         }
@@ -620,7 +693,7 @@ namespace OsEngine.OsTrader.SystemAnalyze
             seriesTotalCpu.Color = Color.Green;
             seriesTotalCpu.YAxisType = AxisType.Secondary;
             seriesTotalCpu.ChartArea = "ChartAreaSystemValues";
-            seriesTotalCpu.ShadowOffset = 2;
+            seriesTotalCpu.ShadowOffset = Themes.ThemeManager.GetChartSeriesShadow();
             _chartCpu.Series.Add(seriesTotalCpu);
 
             // 3 series osEngine cpu
@@ -631,22 +704,23 @@ namespace OsEngine.OsTrader.SystemAnalyze
             seriesOsEngineCpu.Color = Color.Red;
             seriesOsEngineCpu.YAxisType = AxisType.Secondary;
             seriesOsEngineCpu.ChartArea = "ChartAreaSystemValues";
-            seriesOsEngineCpu.ShadowOffset = 2;
+            seriesOsEngineCpu.ShadowOffset = Themes.ThemeManager.GetChartSeriesShadow();
             _chartCpu.Series.Add(seriesOsEngineCpu);
 
-            _chartCpu.BackColor = Color.FromArgb(-15395563);
+            _chartCpu.BackColor = Themes.ThemeManager.GetColorWinForms("ChartBackColor");
 
             for (int i = 0; _chartCpu.ChartAreas != null && i < _chartCpu.ChartAreas.Count; i++)
             {
-                _chartCpu.ChartAreas[i].BackColor = Color.FromArgb(-15395563);
-                _chartCpu.ChartAreas[i].BorderColor = Color.FromArgb(-16701360);
-                _chartCpu.ChartAreas[i].CursorY.LineColor = Color.DimGray;
-                _chartCpu.ChartAreas[i].CursorX.LineColor = Color.DimGray;
-                _chartCpu.ChartAreas[i].AxisX.TitleForeColor = Color.DimGray;
+                _chartCpu.ChartAreas[i].BackColor = Themes.ThemeManager.GetColorWinForms("ChartBackColor");
+                _chartCpu.ChartAreas[i].BorderColor = Themes.ThemeManager.GetColorWinForms("ChartBorderColor");
+                _chartCpu.ChartAreas[i].CursorY.LineColor = Themes.ThemeManager.GetColorWinForms("ChartTextColor");
+                _chartCpu.ChartAreas[i].CursorX.LineColor = Themes.ThemeManager.GetColorWinForms("ChartTextColor");
+                _chartCpu.ChartAreas[i].AxisX.TitleForeColor = Themes.ThemeManager.GetColorWinForms("ChartTextColor");
 
                 foreach (var axe in _chartCpu.ChartAreas[i].Axes)
                 {
-                    axe.LabelStyle.ForeColor = Color.DimGray;
+                    axe.LabelStyle.ForeColor = Themes.ThemeManager.GetColorWinForms("ChartTextColor");
+                    axe.LabelStyle.Font = Themes.ThemeManager.GetChartAxisFont();
                 }
             }
         }
@@ -757,7 +831,7 @@ namespace OsEngine.OsTrader.SystemAnalyze
             seriesTotalCpu.Color = Color.DarkOrange;
             seriesTotalCpu.YAxisType = AxisType.Secondary;
             seriesTotalCpu.ChartArea = "ChartAreaSystemValues";
-            seriesTotalCpu.ShadowOffset = 2;
+            seriesTotalCpu.ShadowOffset = Themes.ThemeManager.GetChartSeriesShadow();
             _chartEcq.Series.Add(seriesTotalCpu);
 
             // 3 series bid ask
@@ -768,22 +842,23 @@ namespace OsEngine.OsTrader.SystemAnalyze
             seriesOsEngineCpu.Color = Color.Red;
             seriesOsEngineCpu.YAxisType = AxisType.Secondary;
             seriesOsEngineCpu.ChartArea = "ChartAreaSystemValues";
-            seriesOsEngineCpu.ShadowOffset = 2;
+            seriesOsEngineCpu.ShadowOffset = Themes.ThemeManager.GetChartSeriesShadow();
             _chartEcq.Series.Add(seriesOsEngineCpu);
 
-            _chartEcq.BackColor = Color.FromArgb(-15395563);
+            _chartEcq.BackColor = Themes.ThemeManager.GetColorWinForms("ChartBackColor");
 
             for (int i = 0; _chartEcq.ChartAreas != null && i < _chartEcq.ChartAreas.Count; i++)
             {
-                _chartEcq.ChartAreas[i].BackColor = Color.FromArgb(-15395563);
-                _chartEcq.ChartAreas[i].BorderColor = Color.FromArgb(-16701360);
-                _chartEcq.ChartAreas[i].CursorY.LineColor = Color.DimGray;
-                _chartEcq.ChartAreas[i].CursorX.LineColor = Color.DimGray;
-                _chartEcq.ChartAreas[i].AxisX.TitleForeColor = Color.DimGray;
+                _chartEcq.ChartAreas[i].BackColor = Themes.ThemeManager.GetColorWinForms("ChartBackColor");
+                _chartEcq.ChartAreas[i].BorderColor = Themes.ThemeManager.GetColorWinForms("ChartBorderColor");
+                _chartEcq.ChartAreas[i].CursorY.LineColor = Themes.ThemeManager.GetColorWinForms("ChartTextColor");
+                _chartEcq.ChartAreas[i].CursorX.LineColor = Themes.ThemeManager.GetColorWinForms("ChartTextColor");
+                _chartEcq.ChartAreas[i].AxisX.TitleForeColor = Themes.ThemeManager.GetColorWinForms("ChartTextColor");
 
                 foreach (var axe in _chartEcq.ChartAreas[i].Axes)
                 {
-                    axe.LabelStyle.ForeColor = Color.DimGray;
+                    axe.LabelStyle.ForeColor = Themes.ThemeManager.GetColorWinForms("ChartTextColor");
+                    axe.LabelStyle.Font = Themes.ThemeManager.GetChartAxisFont();
                 }
             }
         }
@@ -907,22 +982,23 @@ namespace OsEngine.OsTrader.SystemAnalyze
             seriesTotalCpu.Color = Color.DarkOrange;
             seriesTotalCpu.YAxisType = AxisType.Secondary;
             seriesTotalCpu.ChartArea = "ChartAreaSystemValues";
-            seriesTotalCpu.ShadowOffset = 2;
+            seriesTotalCpu.ShadowOffset = Themes.ThemeManager.GetChartSeriesShadow();
             _chartMoq.Series.Add(seriesTotalCpu);
 
-            _chartMoq.BackColor = Color.FromArgb(-15395563);
+            _chartMoq.BackColor = Themes.ThemeManager.GetColorWinForms("ChartBackColor");
 
             for (int i = 0; _chartMoq.ChartAreas != null && i < _chartMoq.ChartAreas.Count; i++)
             {
-                _chartMoq.ChartAreas[i].BackColor = Color.FromArgb(-15395563);
-                _chartMoq.ChartAreas[i].BorderColor = Color.FromArgb(-16701360);
-                _chartMoq.ChartAreas[i].CursorY.LineColor = Color.DimGray;
-                _chartMoq.ChartAreas[i].CursorX.LineColor = Color.DimGray;
-                _chartMoq.ChartAreas[i].AxisX.TitleForeColor = Color.DimGray;
+                _chartMoq.ChartAreas[i].BackColor = Themes.ThemeManager.GetColorWinForms("ChartBackColor");
+                _chartMoq.ChartAreas[i].BorderColor = Themes.ThemeManager.GetColorWinForms("ChartBorderColor");
+                _chartMoq.ChartAreas[i].CursorY.LineColor = Themes.ThemeManager.GetColorWinForms("ChartTextColor");
+                _chartMoq.ChartAreas[i].CursorX.LineColor = Themes.ThemeManager.GetColorWinForms("ChartTextColor");
+                _chartMoq.ChartAreas[i].AxisX.TitleForeColor = Themes.ThemeManager.GetColorWinForms("ChartTextColor");
 
                 foreach (var axe in _chartMoq.ChartAreas[i].Axes)
                 {
-                    axe.LabelStyle.ForeColor = Color.DimGray;
+                    axe.LabelStyle.ForeColor = Themes.ThemeManager.GetColorWinForms("ChartTextColor");
+                    axe.LabelStyle.Font = Themes.ThemeManager.GetChartAxisFont();
                 }
             }
         }

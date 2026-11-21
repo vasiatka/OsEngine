@@ -50,6 +50,11 @@ namespace OsEngine.Entity
         /// <param name="openOrder"></param>
         public void AddNewOpenOrder(Order openOrder)
         {
+            if (openOrder.PositionAddTime == DateTime.MinValue)
+            {
+                openOrder.PositionAddTime = DateTime.Now;
+            }
+
             if (_openOrders == null)
             {
                 _openOrders = new List<Order>();
@@ -147,6 +152,11 @@ namespace OsEngine.Entity
         /// <param name="closeOrder"></param>
         public void AddNewCloseOrder(Order closeOrder)
         {
+            if (closeOrder.PositionAddTime == DateTime.MinValue)
+            {
+                closeOrder.PositionAddTime = DateTime.Now;
+            }
+
             if (CloseOrders == null)
             {
                 _closeOrders = new List<Order>();
@@ -169,6 +179,162 @@ namespace OsEngine.Entity
             }
 
             State = PositionStateType.Closing;
+        }
+
+        /// <summary>
+        /// Remove an order from the position by reference and recalculate the state.
+        /// Used to drop an unconfirmed (State=None) order that never reached the exchange.
+        /// Returns true only when the order was actually removed.
+        /// </summary>
+        public bool RemoveOrder(Order order)
+        {
+            if (order == null)
+            {
+                return false;
+            }
+
+            // Never drop an order that has executed volume or trades:
+            // that would lose the fills from the position.
+            if (order.VolumeExecute > 0)
+            {
+                return false;
+            }
+
+            if (order.MyTrades != null
+                && order.MyTrades.Count > 0)
+            {
+                return false;
+            }
+
+            bool removed = false;
+
+            if (_openOrders != null)
+            {
+                for (int i = 0; i < _openOrders.Count; i++)
+                {
+                    if (ReferenceEquals(_openOrders[i], order))
+                    {
+                        _openOrders.RemoveAt(i);
+                        removed = true;
+                        break;
+                    }
+                }
+            }
+
+            if (_closeOrders != null)
+            {
+                for (int i = 0; i < _closeOrders.Count; i++)
+                {
+                    if (ReferenceEquals(_closeOrders[i], order))
+                    {
+                        _closeOrders.RemoveAt(i);
+                        removed = true;
+                        break;
+                    }
+                }
+            }
+
+            if (removed == false)
+            {
+                return false;
+            }
+
+            _myTrades = null;
+
+            RecheckState();
+
+            return true;
+        }
+
+        /// <summary>
+        /// Recalculate the position state from the actual orders/volumes.
+        /// Mirrors the settled branches of SetOrder: the final branch gives Done
+        /// (as in SetOrder :868-873), without the MaxVolume classification.
+        /// Does not downgrade already settled fail states.
+        /// </summary>
+        public void RecheckState()
+        {
+            if (State == PositionStateType.Done
+                || State == PositionStateType.OpeningFail
+                || State == PositionStateType.ClosingFail
+                || State == PositionStateType.ClosingSurplus)
+            {
+                return;
+            }
+
+            if (OpenVolume == 0)
+            {
+                if (CloseActive == false
+                    && OpenActive == false)
+                {
+                    if (MaxVolume == 0
+                        && OpenOrdersNeverExecuted())
+                    {
+                        State = PositionStateType.OpeningFail;
+                    }
+                    else
+                    {
+                        State = PositionStateType.Done;
+
+                        if (CloseOrders != null)
+                        {
+                            CalculateProfitToPosition();
+                        }
+                    }
+                }
+                return;
+            }
+
+            if (CloseActive)
+            {
+                State = PositionStateType.Closing;
+                return;
+            }
+
+            if (OpenActive)
+            {
+                State = PositionStateType.Opening;
+                return;
+            }
+
+            State = PositionStateType.Open;
+        }
+
+        /// <summary>
+        /// True when opening orders are absent or all ended without execution
+        /// (Cancel / Fail, zero executed volume, no trades)
+        /// </summary>
+        private bool OpenOrdersNeverExecuted()
+        {
+            if (_openOrders == null
+                || _openOrders.Count == 0)
+            {
+                return true;
+            }
+
+            for (int i = 0; i < _openOrders.Count; i++)
+            {
+                Order order = _openOrders[i];
+
+                if (order == null)
+                {
+                    continue;
+                }
+
+                if (order.VolumeExecute != 0
+                    || (order.MyTrades != null && order.MyTrades.Count != 0))
+                {
+                    return false;
+                }
+
+                if (order.State != OrderStateType.Cancel
+                    && order.State != OrderStateType.Fail)
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         /// <summary>
@@ -323,11 +489,21 @@ namespace OsEngine.Entity
         {
             get
             {
-                if (_openOrders != null 
-                    && _openOrders.Count != 0
-                    && _openOrders[0] != null)
+                try
                 {
-                    return _openOrders[0].SecurityNameCode;
+                    if (_openOrders != null 
+                        && _openOrders.Count != 0
+                        && _openOrders[0] != null)
+                    {
+                        return _openOrders[0].SecurityNameCode;
+                    }
+                }
+                catch (ArgumentOutOfRangeException error)
+                {
+                    // _openOrders can shrink to empty between the Count guard and the indexer
+                    // (Iceberg and UI add/remove paths without lock(_dealsLocker)).
+                    // Degrade to _securityName, the same value as the no-orders case.
+                    ServerMaster.SendNewLogMessage("SecurityName read race on position " + Number + ". " + error.ToString(), OsEngine.Logging.LogMessageType.Error);
                 }
                 return _securityName;
             }
@@ -360,16 +536,26 @@ namespace OsEngine.Entity
         {
             get
             {
-                if(OpenOrders == null 
-                    || OpenOrders.Count == 0
-                    || OpenOrders[0] == null)
+                try
                 {
-                    return null;
+                    if(OpenOrders == null 
+                        || OpenOrders.Count == 0
+                        || OpenOrders[0] == null)
+                    {
+                        return null;
+                    }
+                    else
+                    {
+                        return OpenOrders[0].ServerName;
+                    }
                 }
-                else
+                catch (ArgumentOutOfRangeException error)
                 {
-                    return OpenOrders[0].ServerName;
+                    // BUG-0300: OpenOrders can shrink to empty between the Count guard and the indexer
+                    // (UI/timer readers vs order remove paths without lock). Degrade to null, as no-orders.
+                    ServerMaster.SendNewLogMessage("ServerName read race on position " + Number + ". " + error.ToString(), OsEngine.Logging.LogMessageType.Error);
                 }
+                return null;
             }
         }
 
@@ -531,37 +717,48 @@ namespace OsEngine.Entity
         {
             get
             {
-                if (_openOrders == null ||
-                    _openOrders.Count == 0)
+                try
                 {
-                    return 0;
-                }
-
-                decimal price = 0;
-                decimal volume = 0;
-                for (int i = 0; i < _openOrders.Count; i++)
-                {
-                    Order order = _openOrders[i];
-
-                    if (order == null)
+                    if (_openOrders == null ||
+                        _openOrders.Count == 0)
                     {
-                        continue;
+                        return 0;
                     }
 
-                    decimal volumeEx = order.VolumeExecute;
-                    if (volumeEx != 0)
+                    decimal price = 0;
+                    decimal volume = 0;
+                    for (int i = 0; i < _openOrders.Count; i++)
                     {
-                        volume += volumeEx;
-                        price += volumeEx * order.PriceReal;
-                    }
-                }
-                if (volume == 0
-                    && _openOrders[0] != null)
-                {
-                    return _openOrders[0].Price;
-                }
+                        Order order = _openOrders[i];
 
-                return price/volume;
+                        if (order == null)
+                        {
+                            continue;
+                        }
+
+                        decimal volumeEx = order.VolumeExecute;
+                        if (volumeEx != 0)
+                        {
+                            volume += volumeEx;
+                            price += volumeEx * order.PriceReal;
+                        }
+                    }
+                    if (volume == 0
+                        && _openOrders[0] != null)
+                    {
+                        return _openOrders[0].Price;
+                    }
+
+                    return price/volume;
+                }
+                catch (ArgumentOutOfRangeException error)
+                {
+                    // BUG-0300: _openOrders can shrink between the Count guard and the indexer
+                    // (UI/timer readers vs order remove/replace paths without lock).
+                    // Degrade to 0, the same value as the no-orders case.
+                    ServerMaster.SendNewLogMessage("EntryPrice read race on position " + Number + ". " + error.ToString(), OsEngine.Logging.LogMessageType.Error);
+                }
+                return 0;
             }
         }
 
@@ -659,11 +856,21 @@ namespace OsEngine.Entity
         {
             get
             {
-                if (_timeCreate == DateTime.MinValue &&
-                    _openOrders != null
-                    && _openOrders.Count > 0)
+                try
                 {
-                    _timeCreate = _openOrders[0].GetLastTradeTime();
+                    if (_timeCreate == DateTime.MinValue &&
+                        _openOrders != null
+                        && _openOrders.Count > 0
+                        && _openOrders[0] != null)
+                    {
+                        _timeCreate = _openOrders[0].GetLastTradeTime();
+                    }
+                }
+                catch (ArgumentOutOfRangeException error)
+                {
+                    // BUG-0300: _openOrders can shrink between the Count guard and the indexer.
+                    // Degrade to cached _timeCreate (MinValue), the same value as the no-orders case.
+                    ServerMaster.SendNewLogMessage("TimeCreate read race on position " + Number + ". " + error.ToString(), OsEngine.Logging.LogMessageType.Error);
                 }
 
                 return _timeCreate;
@@ -679,30 +886,39 @@ namespace OsEngine.Entity
         {
             get
             {
-                if (CloseOrders != null
-                    && CloseOrders.Count != 0)
+                try
                 {
-                    for (int i = CloseOrders.Count - 1; i > -1 && i < CloseOrders.Count; i--)
+                    if (CloseOrders != null
+                        && CloseOrders.Count != 0)
                     {
-                        Order closeOrder = CloseOrders[i];
-
-                        if (closeOrder == null)
+                        for (int i = CloseOrders.Count - 1; i > -1 && i < CloseOrders.Count; i--)
                         {
-                            continue;
-                        }
+                            Order closeOrder = CloseOrders[i];
 
-                        if (closeOrder.State != OrderStateType.Done
-                            && closeOrder.State != OrderStateType.Partial)
-                        {
-                            continue;
-                        }
+                            if (closeOrder == null)
+                            {
+                                continue;
+                            }
 
-                        DateTime time = closeOrder.GetLastTradeTime();
-                        if (time != DateTime.MinValue)
-                        {
-                            return time;
+                            if (closeOrder.State != OrderStateType.Done
+                                && closeOrder.State != OrderStateType.Partial)
+                            {
+                                continue;
+                            }
+
+                            DateTime time = closeOrder.GetLastTradeTime();
+                            if (time != DateTime.MinValue)
+                            {
+                                return time;
+                            }
                         }
                     }
+                }
+                catch (ArgumentOutOfRangeException error)
+                {
+                    // BUG-0300: _closeOrders can shrink during the scan (remove path without lock).
+                    // Degrade to TimeCreate, the same value as the no-Done-orders case.
+                    ServerMaster.SendNewLogMessage("TimeClose read race on position " + Number + ". " + error.ToString(), OsEngine.Logging.LogMessageType.Error);
                 }
                 return TimeCreate;
             }
@@ -802,6 +1018,16 @@ namespace OsEngine.Entity
                 }
 
                 openOrder.NumberMarket = newOrder.NumberMarket;
+
+                if (string.IsNullOrEmpty(newOrder.ParentOrderNumberMarket) == false)
+                {
+                    openOrder.ParentOrderNumberMarket = newOrder.ParentOrderNumberMarket;
+                }
+
+                if (string.IsNullOrEmpty(newOrder.ChildOrderNumberMarket) == false)
+                {
+                    openOrder.ChildOrderNumberMarket = newOrder.ChildOrderNumberMarket;
+                }
 
                 if (openOrder.TimeCallBack == DateTime.MinValue)
                 {
@@ -903,6 +1129,16 @@ namespace OsEngine.Entity
                 }
 
                 closeOrder.NumberMarket = newOrder.NumberMarket;
+
+                if (string.IsNullOrEmpty(newOrder.ParentOrderNumberMarket) == false)
+                {
+                    closeOrder.ParentOrderNumberMarket = newOrder.ParentOrderNumberMarket;
+                }
+
+                if (string.IsNullOrEmpty(newOrder.ChildOrderNumberMarket) == false)
+                {
+                    closeOrder.ChildOrderNumberMarket = newOrder.ChildOrderNumberMarket;
+                }
 
                 if (closeOrder.TimeCallBack == DateTime.MinValue)
                 {
@@ -1172,7 +1408,8 @@ namespace OsEngine.Entity
    
             if (Comment != null)
             {
-                Comment = Comment.RemoveExcessFromSecurityName().Replace("#","").Replace("^", "");
+                // CR/LF would split the line-based journal record (PositionController.GetSaveString)
+                Comment = Comment.RemoveExcessFromSecurityName().Replace("#","").Replace("^", "").Replace("\r", " ").Replace("\n", " ");
             }
 
             commentString += Comment + "^";
@@ -1258,7 +1495,7 @@ namespace OsEngine.Entity
 
             result.Append("#" + StopIsMarket);
             result.Append("#" + ProfitIsMarket);
-            result.Append("#" + SecurityName);
+            result.Append("#" + EscapeSecurityName(SecurityName));
 
             return result;
         }
@@ -1398,23 +1635,78 @@ namespace OsEngine.Entity
 
                 Order newOrder = new Order();
                 newOrder.SetOrderFromString(saveOrd);
-                AddNewCloseOrder(newOrder);
+                // BUG-0054: add directly, not through AddNewCloseOrder: this is restore from file,
+                // PositionAddTime must stay MinValue (age unknown -> stale-order sweep must never drop it).
+                // SecurityName guard of the adder is intentionally not replicated: it is dead here,
+                // SecurityName is assigned after this loop. State is taken from the journal below.
+                if (_closeOrders == null)
+                {
+                    _closeOrders = new List<Order>();
+                }
+                _closeOrders.Add(newOrder);
             }
 
-            if(arraySave[arraySave.Length - 3] == "True" 
-                || arraySave[arraySave.Length - 3] == "False"
-                || arraySave[arraySave.Length - 3] == "true"
-                || arraySave[arraySave.Length - 3] == "false")
+            // StopIsMarket/ProfitIsMarket is the last pair of bool literals before the tail. Legacy
+            // journals wrote SecurityName raw, so a literal '#' in the name (MOEX Class#Board)
+            // shifted the pair: scan down to the CloseOrders floor (index 22) and rejoin the tail.
+            // Escaped names (new format) match on the first iteration — behaviour unchanged.
+            int pairIndex = arraySave.Length - 3;
+            while (pairIndex > 21 && !(IsBoolLiteral(arraySave[pairIndex]) && IsBoolLiteral(arraySave[pairIndex + 1])))
             {
-                StopIsMarket = Convert.ToBoolean(arraySave[arraySave.Length - 3]);
-                ProfitIsMarket = Convert.ToBoolean(arraySave[arraySave.Length - 2]);
+                pairIndex--;
             }
 
-            SecurityName = arraySave[arraySave.Length - 1];
+            if (pairIndex > 21)
+            {
+                StopIsMarket = Convert.ToBoolean(arraySave[pairIndex]);
+                ProfitIsMarket = Convert.ToBoolean(arraySave[pairIndex + 1]);
+                SecurityName = UnescapeSecurityName(string.Join("#", arraySave, pairIndex + 2, arraySave.Length - pairIndex - 2));
+            }
+            else
+            {
+                // No bool pair anywhere (junk record): keep the pre-bug-0458 positional behaviour verbatim.
+                if(arraySave[arraySave.Length - 3] == "True" 
+                    || arraySave[arraySave.Length - 3] == "False"
+                    || arraySave[arraySave.Length - 3] == "true"
+                    || arraySave[arraySave.Length - 3] == "false")
+                {
+                    StopIsMarket = Convert.ToBoolean(arraySave[arraySave.Length - 3]);
+                    ProfitIsMarket = Convert.ToBoolean(arraySave[arraySave.Length - 2]);
+                }
+
+                SecurityName = arraySave[arraySave.Length - 1];
+            }
 
             PositionStateType state;
             Enum.TryParse(arraySave[1], true, out state);
             State = state;
+        }
+
+        // CONTEXT_ESCAPING.md §2.2/§2.3, reversible %XX escaping of the SecurityName tail.
+        // Set: '%' escape char (escaped first on save, '%25' decoded last on load), '#' journal
+        // field delimiter, CR/LF record boundary. Home pattern: PositionOpenerToStop.EscapeField (PR 2155).
+        private static string EscapeSecurityName(string value)
+        {
+            if (value == null)
+            {
+                return "";
+            }
+            return value.Replace("%", "%25").Replace("#", "%23").Replace("\r", "%0D").Replace("\n", "%0A");
+        }
+
+        private static string UnescapeSecurityName(string value)
+        {
+            if (value == null)
+            {
+                return "";
+            }
+            return value.Replace("%0A", "\n").Replace("%0D", "\r").Replace("%23", "#").Replace("%25", "%");
+        }
+
+        // Same literal set the positional reader used before bug-0458.
+        private static bool IsBoolLiteral(string value)
+        {
+            return value == "True" || value == "False" || value == "true" || value == "false";
         }
 
         public string PositionSpecification
@@ -1593,33 +1885,43 @@ namespace OsEngine.Entity
         /// </summary>
         private bool IsLotServer()
         {
-            if (OpenOrders != null && OpenOrders.Count > 0)
+            try
             {
-                ServerType serverType = OpenOrders[0].ServerType;
-
-                if(serverType == ServerType.Tester ||
-                    serverType == ServerType.None ||
-                    serverType == ServerType.Optimizer ||
-                    serverType == ServerType.Miner)
+                if (OpenOrders != null && OpenOrders.Count > 0)
                 {
-                    return true;
+                    ServerType serverType = OpenOrders[0].ServerType;
+
+                    if(serverType == ServerType.Tester ||
+                        serverType == ServerType.None ||
+                        serverType == ServerType.Optimizer ||
+                        serverType == ServerType.Miner)
+                    {
+                        return true;
+                    }
+
+                    if(serverType == ServerType.QuikLua
+                        || serverType == ServerType.Plaza)
+                    {
+                        return true;
+                    }
+
+                    IServerPermission permission = ServerMaster.GetServerPermission(serverType);
+
+                    if(permission == null)
+                    {
+                        return false;
+                    }
+
+                    return permission.IsUseLotToCalculateProfit;
+
                 }
-
-                if(serverType == ServerType.QuikLua
-                    || serverType == ServerType.Plaza)
-                {
-                    return true;
-                }
-
-                IServerPermission permission = ServerMaster.GetServerPermission(serverType);
-
-                if(permission == null)
-                {
-                    return false;
-                }
-
-                return permission.IsUseLotToCalculateProfit;
-
+            }
+            catch (ArgumentOutOfRangeException error)
+            {
+                // BUG-0300: OpenOrders can shrink between the Count guard and the indexer.
+                // Degrade to false, the same value as the no-orders case. Callers CommissionTotal
+                // and ProfitPortfolioAbs may under-count profit for one tick, self-heals on next read.
+                ServerMaster.SendNewLogMessage("IsLotServer read race on position " + Number + ". " + error.ToString(), OsEngine.Logging.LogMessageType.Error);
             }
             return false;
         }
@@ -1713,10 +2015,20 @@ namespace OsEngine.Entity
         {
             get
             {
-                if( OpenOrders!= null 
-                    && OpenOrders.Count> 0)
+                try
                 {
-                    return OpenOrders[0].PortfolioNumber;
+                    if( OpenOrders!= null 
+                        && OpenOrders.Count> 0
+                        && OpenOrders[0] != null)
+                    {
+                        return OpenOrders[0].PortfolioNumber;
+                    }
+                }
+                catch (ArgumentOutOfRangeException error)
+                {
+                    // BUG-0300: OpenOrders can shrink between the Count guard and the indexer.
+                    // Null head is tolerated too (was an NRE). Degrade to null, as no-orders.
+                    ServerMaster.SendNewLogMessage("PortfolioName read race on position " + Number + ". " + error.ToString(), OsEngine.Logging.LogMessageType.Error);
                 }
 
                 return null;

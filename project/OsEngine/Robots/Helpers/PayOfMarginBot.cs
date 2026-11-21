@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Your rights to use code governed by this license https://github.com/AlexWan/OsEngine/blob/master/LICENSE
  * Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
 */
@@ -46,6 +46,7 @@ namespace OsEngine.Robots.Helpers
         private StartProgram _startProgram;
         List<BotPanel> _bots;
         private StrategyParameterBool _fullLogIsOn;
+        private Dictionary<string, Security> _testerSecurities = new();
 
         public PayOfMarginBot(string name, StartProgram startProgram) : base(name, startProgram)
         {
@@ -108,6 +109,53 @@ namespace OsEngine.Robots.Helpers
         private void Server_TestingStartEvent()
         {
             _bots = OsTraderMaster.Master.PanelsArray;
+            LoadTesterSecurities();
+        }
+
+        private void LoadTesterSecurities()
+        {
+            try
+            {
+                _testerSecurities.Clear();
+
+                List<IServer> servers = ServerMaster.GetServers();
+
+                if (servers == null)
+                {
+                    return;
+                }
+
+                for (int i = 0; i < servers.Count; i++)
+                {
+                    if (servers[i].ServerType != ServerType.Tester)
+                    {
+                        continue;
+                    }
+
+                    TesterServer testerServer = (TesterServer)servers[i];
+
+                    if (testerServer.Securities == null)
+                    {
+                        continue;
+                    }
+
+                    for (int j = 0; j < testerServer.Securities.Count; j++)
+                    {
+                        Security sec = testerServer.Securities[j];
+
+                        if (string.IsNullOrEmpty(sec.Name))
+                        {
+                            continue;
+                        }
+
+                        _testerSecurities[sec.Name] = sec;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
         }
 
         #region Table Summ
@@ -169,7 +217,7 @@ namespace OsEngine.Robots.Helpers
             }
             catch (Exception ex)
             {
-                //SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+                SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
             }
         }
 
@@ -581,7 +629,7 @@ namespace OsEngine.Robots.Helpers
                     return;
                 }
 
-                if (candle[^1].TimeStart.Day > candle[^2].TimeStart.Day)
+                if (candle[^1].TimeStart.Day != candle[^2].TimeStart.Day)
                 {
                     MainLogic(candle[^2].TimeStart);
                 }
@@ -632,26 +680,31 @@ namespace OsEngine.Robots.Helpers
                     {
                         Position position = curJournal.OpenPositions[i2];
 
+                        _testerSecurities.TryGetValue(position.SecurityName, out Security security);
+
+                        bool isFutures = security != null && security.SecurityType == SecurityType.Futures;
+                        decimal marginRate = isFutures ? 0.2m : 1m;
+
                         if (position.Direction == Side.Buy)
                         {
                             if (position.Lots != 0)
                             {
-                                volumeLongBot += position.EntryPrice * position.OpenVolume * position.Lots;
+                                volumeLongBot += position.EntryPrice * position.OpenVolume * position.Lots * marginRate;
                             }
                             else
                             {
-                                volumeLongBot += position.EntryPrice * position.OpenVolume;
+                                volumeLongBot += position.EntryPrice * position.OpenVolume * marginRate;
                             }
                         }
                         else if (position.Direction == Side.Sell)
                         {
                             if (position.Lots != 0)
                             {
-                                volumeShortBot += position.EntryPrice * position.OpenVolume * position.Lots;
+                                volumeShortBot += position.EntryPrice * position.OpenVolume * position.Lots * marginRate;
                             }
                             else
                             {
-                                volumeShortBot += position.EntryPrice * position.OpenVolume;
+                                volumeShortBot += position.EntryPrice * position.OpenVolume * marginRate;
                             }
                         }
 
@@ -1053,18 +1106,5 @@ namespace OsEngine.Robots.Helpers
                 ServerMaster.Log?.ProcessMessage(ex.ToString(), Logging.LogMessageType.Error);
             }
         }
-    }
-
-    public class ListTableSumm
-    {
-        public int Summ;
-        public TypeValueTableSumm TypeValue;
-        public decimal Rate;
-    }
-
-    public enum TypeValueTableSumm
-    {
-        Absolute,
-        Percent
     }
 }

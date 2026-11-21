@@ -47,57 +47,66 @@ namespace OsEngine.Entity
 
         private void PositionUi_Closed(object sender, EventArgs e)
         {
-            _position = null;
-
-            //main grid
-            if (_mainPosGrid != null)
+            try
             {
-                FormsHostMainGrid.Child = null;
-                DataGridFactory.ClearLinks(_mainPosGrid);
-                _mainPosGrid.DataError -= _mainPosGrid_DataError;
-                _mainPosGrid.Rows.Clear();
-                _mainPosGrid.DataSource = null;
-                _mainPosGrid.Dispose();
-                _mainPosGrid = null;
+                _position = null;
+
+                //main grid
+                if (_mainPosGrid != null)
+                {
+                    FormsHostMainGrid.Child = null;
+                    DataGridFactory.ClearLinks(_mainPosGrid);
+                    _mainPosGrid.DataError -= _mainPosGrid_DataError;
+                    _mainPosGrid.Rows.Clear();
+                    _mainPosGrid.DataSource = null;
+                    _mainPosGrid.Dispose();
+                    _mainPosGrid = null;
+                }
+
+                // orders grid
+                if (_openOrdersGrid != null)
+                {
+                    FormsHostOpenDealGrid.Child = null;
+                    DataGridFactory.ClearLinks(_openOrdersGrid);
+                    _openOrdersGrid.Click -= OpenOrdersGrid_Click;
+                    _openOrdersGrid.DataError -= _mainPosGrid_DataError;
+                    _openOrdersGrid.Rows.Clear();
+                    _openOrdersGrid.DataSource = null;
+                    _openOrdersGrid.Dispose();
+                    _openOrdersGrid = null;
+                }
+
+                if (_closeOrdersGrid != null)
+                {
+                    FormsHostCloseDealGrid.Child = null;
+                    DataGridFactory.ClearLinks(_closeOrdersGrid);
+                    _closeOrdersGrid.Click -= CloseOrdersGrid_Click;
+                    _closeOrdersGrid.DataError -= _mainPosGrid_DataError;
+                    _closeOrdersGrid.Rows.Clear();
+                    _closeOrdersGrid.DataSource = null;
+                    _closeOrdersGrid.Dispose();
+                    _closeOrdersGrid = null;
+                }
+
+                // trade grid
+
+                if (_tradesGrid != null)
+                {
+                    FormsHostTreid.Child = null;
+                    DataGridFactory.ClearLinks(_tradesGrid);
+                    _tradesGrid.Click -= _tradesGrid_Click;
+                    _tradesGrid.DataError -= _mainPosGrid_DataError;
+                    _tradesGrid.Rows.Clear();
+                    _tradesGrid.DataSource = null;
+                    _tradesGrid.Dispose();
+                    _tradesGrid = null;
+                }
+
+                Closed -= PositionUi_Closed;
             }
-
-            // orders grid
-            if (_openOrdersGrid != null)
+            catch (Exception ex)
             {
-                FormsHostOpenDealGrid.Child = null;
-                DataGridFactory.ClearLinks(_openOrdersGrid);
-                _openOrdersGrid.Click -= OpenOrdersGrid_Click;
-                _openOrdersGrid.DataError -= _mainPosGrid_DataError;
-                _openOrdersGrid.Rows.Clear();
-                _openOrdersGrid.DataSource = null;
-                _openOrdersGrid.Dispose();
-                _openOrdersGrid = null;
-            }
-
-            if (_closeOrdersGrid != null)
-            {
-                FormsHostCloseDealGrid.Child = null;
-                DataGridFactory.ClearLinks(_closeOrdersGrid);
-                _closeOrdersGrid.Click -= CloseOrdersGrid_Click;
-                _closeOrdersGrid.DataError -= _mainPosGrid_DataError;
-                _closeOrdersGrid.Rows.Clear();
-                _closeOrdersGrid.DataSource = null;
-                _closeOrdersGrid.Dispose();
-                _closeOrdersGrid = null;
-            }
-
-            // trade grid
-
-            if (_tradesGrid != null)
-            {
-                FormsHostTreid.Child = null;
-                DataGridFactory.ClearLinks(_tradesGrid);
-                _tradesGrid.Click -= _tradesGrid_Click;
-                _tradesGrid.DataError -= _mainPosGrid_DataError;
-                _tradesGrid.Rows.Clear();
-                _tradesGrid.DataSource = null;
-                _tradesGrid.Dispose();
-                _tradesGrid = null;
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
             }
         }
 
@@ -127,7 +136,11 @@ namespace OsEngine.Entity
 
         private void _mainPosGrid_DataError(object sender, DataGridViewDataErrorEventArgs e)
         {
-            ServerMaster.SendNewLogMessage(e.ToString(), Logging.LogMessageType.Error);
+            string errorMessage = e.Exception != null
+                ? "DataGridViewDataError: " + e.Exception
+                : "DataGridViewDataError: " + e.ToString();
+
+            ServerMaster.SendNewLogMessage(errorMessage, Logging.LogMessageType.Error);
         }
 
         private void PaintPosTable()
@@ -323,6 +336,8 @@ namespace OsEngine.Entity
             typeCell.Items.Add(OrderPriceType.Limit.ToString());
             typeCell.Items.Add(OrderPriceType.Market.ToString());
             typeCell.Items.Add(OrderPriceType.Iceberg.ToString());
+            typeCell.Items.Add(OrderPriceType.StopLimit.ToString());
+            typeCell.Items.Add(OrderPriceType.StopMarket.ToString());
             nRow.Cells.Add(typeCell);
             nRow.Cells[10].Value = order.TypeOrder.ToString();
 
@@ -352,6 +367,7 @@ namespace OsEngine.Entity
         private void CloseOrdersGrid_Click(object sender, EventArgs e)
         {
             MouseEventArgs mouse = (MouseEventArgs)e;
+
             if (mouse.Button != MouseButtons.Right)
             {
                 CheckOrdersTimeButtonClick(_position.CloseOrders, _closeOrdersGrid);
@@ -408,7 +424,9 @@ namespace OsEngine.Entity
                 _position.AddNewCloseOrder(newOrder);
 
                 SyncPositionWithOrdersAndMyTrades();
-                PaintOrderTable();
+                _position.RecheckState();
+                RePaint();
+                PositionChanged = true;
             }
             catch (Exception ex)
             {
@@ -450,7 +468,9 @@ namespace OsEngine.Entity
                 }
 
                 _position.CloseOrders.RemoveAt(number);
+                _position.RecheckState();
                 RePaint();
+                PositionChanged = true;
             }
             catch (Exception ex)
             {
@@ -532,6 +552,7 @@ namespace OsEngine.Entity
                         myOrder.TimeCallBack = dialog.Time;
                         myOrder.TimeCreate = dialog.Time;
                         grid.Rows[tabRow].Cells[tabColumn].Value = myOrder.TimeCallBack.ToString(_currentCulture);
+                        PositionChanged = true;
                     }
                 }
             }
@@ -561,7 +582,9 @@ namespace OsEngine.Entity
                 _position.AddNewOpenOrder(newOrder);
 
                 SyncPositionWithOrdersAndMyTrades();
-                PaintOrderTable();
+                _position.RecheckState();
+                RePaint();
+                PositionChanged = true;
             }
             catch (Exception ex)
             {
@@ -598,7 +621,9 @@ namespace OsEngine.Entity
                 }
 
                 _position.OpenOrders.RemoveAt(number);
+                _position.RecheckState();
                 RePaint();
+                PositionChanged = true;
             }
             catch (Exception ex)
             {
@@ -725,6 +750,7 @@ namespace OsEngine.Entity
                     {
                         myOrder.Time = dialog.Time;
                         grid.Rows[tabRow].Cells[tabColumn].Value = myOrder.Time.ToString(_currentCulture);
+                        PositionChanged = true;
                     }
                 }
             }
@@ -868,7 +894,9 @@ namespace OsEngine.Entity
                 myOrd.SetTrade(trade);
 
                 SyncPositionWithOrdersAndMyTrades();
+                _position.RecheckState();
                 RePaint();
+                PositionChanged = true;
             }
             catch (Exception ex)
             {
@@ -905,7 +933,9 @@ namespace OsEngine.Entity
                 myOrd.SetTrade(trade);
 
                 SyncPositionWithOrdersAndMyTrades();
+                _position.RecheckState();
                 RePaint();
+                PositionChanged = true;
             }
             catch (Exception ex)
             {
@@ -999,6 +1029,8 @@ namespace OsEngine.Entity
                     curOrd.ReCalculateVolume();
                 }
 
+                _position.RecheckState();
+                PositionChanged = true;
                 RePaint();
             }
             catch (Exception ex)
@@ -1101,6 +1133,8 @@ namespace OsEngine.Entity
         {
             try
             {
+                PositionChanged = true;
+
                 if (ActionSaveIsAccepted() == false)
                 {
                     return;
@@ -1116,12 +1150,26 @@ namespace OsEngine.Entity
                 }
 
 
+                bool stateChangedByUser = false;
+
+                object stateCellValue = _mainPosGrid.Rows[0].Cells[6].Value;
+
+                if (stateCellValue != null
+                    && stateCellValue.ToString() != _position.State.ToString())
+                {
+                    stateChangedByUser = true;
+                }
+
                 SyncPositionWithOrdersAndMyTrades();
                 SavePosition();
                 SaveMyTrades();
                 SaveOrders(_position.OpenOrders, _openOrdersGrid.Rows);
                 SaveOrders(_position.CloseOrders, _closeOrdersGrid.Rows);
-              
+
+                if (stateChangedByUser == false)
+                {
+                    _position.RecheckState();
+                }
 
                 PositionChanged = true;
 

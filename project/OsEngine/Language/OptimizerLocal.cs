@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Your rights to use code governed by this license http://o-s-a.net/doc/license_simple_engine.pdf
  * Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
 */
@@ -186,6 +186,10 @@ namespace OsEngine.Language
         public string Message44 => OsLocalization.ConvertToLocString(
             "Eng:Unable to start optimization. Wait for parameters to load._" +
             "Ru:Не возможно запустить оптимизацию. Подождите загрузки параметров_");
+
+        public string Message45 => OsLocalization.ConvertToLocString(
+            "Eng:Increment type_" +
+            "Ru:Тип приращения_");
 
         public string Label1 => OsLocalization.ConvertToLocString(
             "Eng:Index securities_" +
@@ -478,5 +482,17 @@ namespace OsEngine.Language
         public string Label73 => OsLocalization.ConvertToLocString(
            "Eng:Cache indicators_" +
            "Ru:Кэшировать индикаторы_");
+
+        public string LabelReportTitle => OsLocalization.ConvertToLocString(
+           "Eng:Optimizer Report_" +
+           "Ru:Отчёт оптимизатора_");
+
+        public string LabelRemovePassedTrades => OsLocalization.ConvertToLocString(
+           "Eng:Remove passed trades_" +
+           "Ru:Удалять пройденные трейды_");
+
+        public string LabelTradesInMemory => OsLocalization.ConvertToLocString(
+           "Eng:Trades in memory_" +
+           "Ru:Трейдов в памяти_");
     }
 }

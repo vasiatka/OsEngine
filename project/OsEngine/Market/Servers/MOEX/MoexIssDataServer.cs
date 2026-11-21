@@ -10,6 +10,7 @@ using OsEngine.Market.Servers.Entity;
 using RestSharp;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Net;
 using System.Windows;
 
@@ -21,12 +22,49 @@ namespace OsEngine.Market.Servers.MOEX
         {
             MoexDataServerRealization realization = new MoexDataServerRealization();
             ServerRealization = realization;
-            NeedToHideParameters = true;
+            NeedToHideParameters = false;
+            NeedToHideStandardParameters = true;
+
+            CreateParameterEnum(MoexDataServerRealization.TimeZoneParamName,
+                MoexDataServerRealization.TimeZoneDefault,
+                MoexDataServerRealization.GetTimeZones());
         }
     }
 
     public class MoexDataServerRealization : IServerRealization
     {
+        public const string TimeZoneParamName = "Time zone of candles";
+
+        public static readonly string TimeZoneDefault = "UTC+3 (Moscow, St. Petersburg, Minsk)";
+
+        public static List<string> GetTimeZones()
+        {
+            return new List<string>
+            {
+                "UTC+0 (Accra, Dakar)",
+                TimeZoneDefault
+            };
+        }
+
+        private int GetTimeShiftHours()
+        {
+            for (int i = 0; i < ServerParameters.Count; i++)
+            {
+                if (ServerParameters[i].Name == TimeZoneParamName
+                    && ServerParameters[i] is ServerParameterEnum enumParam)
+                {
+                    if (enumParam.Value == "UTC+0 (Accra, Dakar)")
+                    {
+                        return -3;
+                    }
+
+                    return 0;
+                }
+            }
+
+            return 0;
+        }
+
         #region 1 Constructor, Status, Connection
 
         public MoexDataServerRealization()
@@ -50,9 +88,9 @@ namespace OsEngine.Market.Servers.MOEX
 
         public void Connect(WebProxy proxy)
         {
-            string result = GetRequest("http://iss.moex.com/iss/engines/");
+            string result = GetRequest("https://iss.moex.com/iss/engines/");
 
-            if (result == null)
+            if (string.IsNullOrEmpty(result))
             {
                 ServerStatus = ServerConnectStatus.Disconnect;
             }
@@ -86,23 +124,42 @@ namespace OsEngine.Market.Servers.MOEX
 
         public void GetSecurities()
         {
-            List<Security> securities = new List<Security>();
+            try
+            {
+                List<Security> securities = new List<Security>();
 
-            SendLogMessage("Securities downloading...", LogMessageType.System);
+                SendLogMessage("Securities downloading...", LogMessageType.System);
 
-            List<string> engines = GetEngines();
+                List<string> engines = GetEngines();
 
-            List<string> markets = GetMarkets(engines);
+                List<string> markets = GetMarkets(engines);
 
-            List<string> classes = GetClasses(markets);
+                List<string> classes = GetClasses(markets);
 
-            securities = GetSecurities(classes);
+                securities = GetSecurities(classes);
 
-            securities = CreateFuturesSection(securities);
+                securities = CreateFuturesSection(securities);
 
-            SecurityEvent?.Invoke(securities);
+                HashSet<string> seenSecurities = new HashSet<string>();
 
-            SendLogMessage("Securities downloaded. Count: " + securities.Count, LogMessageType.System);
+                for (int i = securities.Count - 1; i >= 0; i--)
+                {
+                    string key = securities[i].Name + "|" + securities[i].NameClass;
+
+                    if (seenSecurities.Add(key) == false)
+                    {
+                        securities.RemoveAt(i);
+                    }
+                }
+
+                SecurityEvent?.Invoke(securities);
+
+                SendLogMessage("Securities downloaded. Count: " + securities.Count, LogMessageType.System);
+            }
+            catch (Exception ex)
+            {
+                SendLogMessage("Securities downloading error: " + ex.ToString(), LogMessageType.Error);
+            }
         }
 
         private List<Security> CreateFuturesSection(List<Security> securities)
@@ -119,8 +176,17 @@ namespace OsEngine.Market.Servers.MOEX
 
             List<string> names = new List<string>();
 
+            // F3: анкету синтетики истёкших берём у фьючерса той же базы, шаблон — первое вхождение базы
+            Dictionary<string, Security> templates = new Dictionary<string, Security>();
+
             for (int i = 0; i < allFutures.Count; i++)
             {
+                if (allFutures[i].Name.Length == 0
+                    || char.IsDigit(allFutures[i].Name[allFutures[i].Name.Length - 1]) == false)
+                {
+                    continue; // бессрочный фьючерс (тикер заканчивается маркером F, а не годом) — историю не генерируем
+                }
+
                 string name = allFutures[i].Name.Substring(0, allFutures[i].Name.Length - 2);
 
                 bool isInArray = false;
@@ -139,11 +205,32 @@ namespace OsEngine.Market.Servers.MOEX
                 }
 
                 names.Add(name);
+                templates[name] = allFutures[i];
             }
 
             for (int i = 0; i < names.Count; i++)
             {
-                securities.AddRange(GetFutNamesForTenYears(names[i], allFutures[0].NameId));
+                Security template;
+                if (templates.TryGetValue(names[i], out template) == false)
+                {
+                    template = allFutures[0]; // шаблона базы нет — явный фолбэк на первый фьючерс
+                }
+
+                List<Security> synthSecurities = GetFutNamesForTenYears(names[i], template.NameId);
+
+                foreach (Security synth in synthSecurities)
+                {
+                    synth.PriceStep = template.PriceStep;
+                    synth.PriceStepCost = template.PriceStepCost;
+                    synth.Decimals = template.Decimals;
+                    synth.Lot = template.Lot;
+                    synth.VolumeStep = 1m;
+                    synth.SecurityType = template.SecurityType;
+                    synth.Exchange = template.Exchange;
+                    synth.State = SecurityStateType.Close; // истёкший контракт — Close безусловно
+                }
+
+                securities.AddRange(synthSecurities);
             }
 
             return securities;
@@ -158,13 +245,209 @@ namespace OsEngine.Market.Servers.MOEX
 
             for (int i = 0; i < 8; i++)
             {
-                newSecurities.AddRange(GetFuturesForOneYear(futName, idEnding, DateTime.Now.Year - i - 2000));
-            }
+                if(futName == "BR"
+                    || futName == "NG"
+                    || futName == "BT"
+                    || futName == "CC"
+                    || futName == "KC"
+                    || futName == "W4")
+                {
+                    newSecurities.AddRange(GetFuturesForOneYearOncePerMonth(futName, idEnding, DateTime.Now.Year - i - 2000));
+                }
+                else
+                {
+                    newSecurities.AddRange(GetFuturesForOneYearOncePerQuarter(futName, idEnding, DateTime.Now.Year - i - 2000));
+                }
+             }
 
             return newSecurities;
         }
 
-        private List<Security> GetFuturesForOneYear(string futName, string idEnding, int year)
+        private List<Security> GetFuturesForOneYearOncePerMonth(string futName, string idEnding, int year)
+        {
+            int futEnd = Convert.ToInt32(year.ToString().Substring(1, 1));
+
+            List<Security> sec = new List<Security>();
+
+            // 1 BRF6
+            // 2 BRG6
+            // 3 BRH6
+            // 4 BRJ6
+            // 5 BRK6
+            // 6 BRM6
+            // 7 BRN6
+            // 8 BRQ6
+            // 9 BRU6
+            // 10 BRV6
+            // 11 BRX6
+            // 12 BRZ6
+
+            // 1 BRF6
+            Security month1 = new Security();
+            month1.Name = futName + "F" + futEnd;
+            month1.NameId = month1.Name + "#" + idEnding;
+            month1.NameClass = "Фьючерсы истёкшие#RFUD";
+            month1.NameFull = futName + "-1." + year;
+            sec.Add(month1);
+
+            if (DateTime.Now.Year == 2000 + year &&
+                DateTime.Now.Month < 2)
+            {
+                return sec;
+            }
+
+            // 2 BRG6
+            Security month2 = new Security();
+            month2.Name = futName + "G" + futEnd;
+            month2.NameId = month2.Name + "#" + idEnding;
+            month2.NameClass = "Фьючерсы истёкшие#RFUD";
+            month2.NameFull = futName + "-2." + year;
+            sec.Add(month2);
+
+            if (DateTime.Now.Year == 2000 + year &&
+                DateTime.Now.Month < 3)
+            {
+                return sec;
+            }
+
+            // 3 BRH6
+            Security month3 = new Security();
+            month3.Name = futName + "H" + futEnd;
+            month3.NameId = month3.Name + "#" + idEnding;
+            month3.NameClass = "Фьючерсы истёкшие#RFUD";
+            month3.NameFull = futName + "-3." + year;
+            sec.Add(month3);
+
+            if (DateTime.Now.Year == 2000 + year &&
+                DateTime.Now.Month < 4)
+            {
+                return sec;
+            }
+
+            // 4 BRJ6
+            Security month4 = new Security();
+            month4.Name = futName + "J" + futEnd;
+            month4.NameId = month4.Name + "#" + idEnding;
+            month4.NameClass = "Фьючерсы истёкшие#RFUD";
+            month4.NameFull = futName + "-4." + year;
+            sec.Add(month4);
+
+            if (DateTime.Now.Year == 2000 + year &&
+                DateTime.Now.Month < 5)
+            {
+                return sec;
+            }
+
+            // 5 BRK6
+            Security month5 = new Security();
+            month5.Name = futName + "K" + futEnd;
+            month5.NameId = month5.Name + "#" + idEnding;
+            month5.NameClass = "Фьючерсы истёкшие#RFUD";
+            month5.NameFull = futName + "-5." + year;
+            sec.Add(month5);
+
+            if (DateTime.Now.Year == 2000 + year &&
+                DateTime.Now.Month < 6)
+            {
+                return sec;
+            }
+
+            // 6 BRM6
+            Security month6 = new Security();
+            month6.Name = futName + "M" + futEnd;
+            month6.NameId = month6.Name + "#" + idEnding;
+            month6.NameClass = "Фьючерсы истёкшие#RFUD";
+            month6.NameFull = futName + "-6." + year;
+            sec.Add(month6);
+
+            if (DateTime.Now.Year == 2000 + year &&
+                DateTime.Now.Month < 7)
+            {
+                return sec;
+            }
+
+            // 7 BRN6
+            Security month7 = new Security();
+            month7.Name = futName + "N" + futEnd;
+            month7.NameId = month7.Name + "#" + idEnding;
+            month7.NameClass = "Фьючерсы истёкшие#RFUD";
+            month7.NameFull = futName + "-7." + year;
+            sec.Add(month7);
+
+            if (DateTime.Now.Year == 2000 + year &&
+                DateTime.Now.Month < 8)
+            {
+                return sec;
+            }
+
+            // 8 BRQ6
+            Security month8 = new Security();
+            month8.Name = futName + "Q" + futEnd;
+            month8.NameId = month8.Name + "#" + idEnding;
+            month8.NameClass = "Фьючерсы истёкшие#RFUD";
+            month8.NameFull = futName + "-8." + year;
+            sec.Add(month8);
+
+            if (DateTime.Now.Year == 2000 + year &&
+                DateTime.Now.Month < 9)
+            {
+                return sec;
+            }
+
+            // 9 BRU6
+            Security month9 = new Security();
+            month9.Name = futName + "U" + futEnd;
+            month9.NameId = month9.Name + "#" + idEnding;
+            month9.NameClass = "Фьючерсы истёкшие#RFUD";
+            month9.NameFull = futName + "-9." + year;
+            sec.Add(month9);
+
+            if (DateTime.Now.Year == 2000 + year &&
+                DateTime.Now.Month < 10)
+            {
+                return sec;
+            }
+
+            // 10 BRV6
+            Security month10 = new Security();
+            month10.Name = futName + "V" + futEnd;
+            month10.NameId = month10.Name + "#" + idEnding;
+            month10.NameClass = "Фьючерсы истёкшие#RFUD";
+            month10.NameFull = futName + "-10." + year;
+            sec.Add(month10);
+
+            if (DateTime.Now.Year == 2000 + year &&
+                DateTime.Now.Month < 11)
+            {
+                return sec;
+            }
+
+            // 11 BRX6
+            Security month11 = new Security();
+            month11.Name = futName + "X" + futEnd;
+            month11.NameId = month11.Name + "#" + idEnding;
+            month11.NameClass = "Фьючерсы истёкшие#RFUD";
+            month11.NameFull = futName + "-11." + year;
+            sec.Add(month11);
+
+            if (DateTime.Now.Year == 2000 + year &&
+                DateTime.Now.Month < 11)
+            {
+                return sec;
+            }
+
+            // 12 BRZ6
+            Security month12 = new Security();
+            month12.Name = futName + "Z" + futEnd;
+            month12.NameId = month12.Name + "#" + idEnding;
+            month12.NameClass = "Фьючерсы истёкшие#RFUD";
+            month12.NameFull = futName + "-12." + year;
+            sec.Add(month12);
+
+            return sec;
+        }
+
+        private List<Security> GetFuturesForOneYearOncePerQuarter(string futName, string idEnding, int year)
         {
             int futEnd = Convert.ToInt32(year.ToString().Substring(1, 1));
 
@@ -229,9 +512,9 @@ namespace OsEngine.Market.Servers.MOEX
 
         private List<string> GetEngines()
         {
-            // запрос типов площадок http://iss.moex.com/iss/engines.json
+            // запрос типов площадок https://iss.moex.com/iss/engines.json
 
-            string request = GetRequest("http://iss.moex.com/iss/engines.json");
+            string request = GetRequest("https://iss.moex.com/iss/engines.json");
 
             List<string> result = new List<string>();
 
@@ -247,7 +530,11 @@ namespace OsEngine.Market.Servers.MOEX
                 if (str == "state" ||
                     str == "interventions" ||
                     str == "offboard" ||
-                    str == "commodity")
+                    str == "commodity" ||
+                    str == "agro" ||
+                    str == "otc" ||
+                    str == "quotes" ||
+                    str == "money")
                 {
                     continue;
                 }
@@ -264,7 +551,7 @@ namespace OsEngine.Market.Servers.MOEX
 
             for (int i = 0; i < engines.Count; i++)
             {
-                string str = "http://iss.moex.com/iss/engines/";
+                string str = "https://iss.moex.com/iss/engines/";
                 str += engines[i];
                 str += "/markets.json";
                 requests.Add(str);
@@ -296,7 +583,7 @@ namespace OsEngine.Market.Servers.MOEX
 
             return result;
 
-            // запрос типов торгов по площадке http://iss.moex.com/iss/engines/stock/markets.json
+            // запрос типов торгов по площадке https://iss.moex.com/iss/engines/stock/markets.json
         }
 
         private List<string> GetClasses(List<string> markets)
@@ -305,9 +592,9 @@ namespace OsEngine.Market.Servers.MOEX
 
             for (int i = 0; i < markets.Count; i++)
             {
-                // запрос классов бумаг по площадке и типу торгов http://iss.moex.com/iss/engines/stock/markets/shares/boards.json
+                // запрос классов бумаг по площадке и типу торгов https://iss.moex.com/iss/engines/stock/markets/shares/boards.json
 
-                string str = "http://iss.moex.com/iss/engines/";
+                string str = "https://iss.moex.com/iss/engines/";
                 str += markets[i].Split('#')[0];
                 str += "/markets/";
                 str += markets[i].Split('#')[1];
@@ -386,8 +673,8 @@ namespace OsEngine.Market.Servers.MOEX
 
             for (int i = 0; i < classes.Count; i++)
             {
-                // запрос всех бумаг по классу http://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities.json
-                string str = "http://iss.moex.com/iss/engines/";
+                // запрос всех бумаг по классу https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities.json
+                string str = "https://iss.moex.com/iss/engines/";
                 str += classes[i].Split('#')[0];
                 str += "/markets/";
                 str += classes[i].Split('#')[1];
@@ -411,16 +698,30 @@ namespace OsEngine.Market.Servers.MOEX
             {
                 JObject json = JObject.Parse(responses[i]);
 
+                JArray columnsArray = json["securities"]["columns"] as JArray;
                 JArray dataArray = (JArray)json["securities"]["data"];
 
                 for (int j = 0; j < dataArray.Count; j++)
                 {
                     JArray innerArray = (JArray)dataArray[j];
 
-                    Security newSec = new Security();
+                    Security newSec = MapIssSecurity(columnsArray, innerArray, classes[i]);
                     newSec.Name = innerArray[0].ToString();
                     newSec.NameId = newSec.Name + "#" + classes[i];
-                    newSec.NameClass = classes[i].Split('#')[3] + "#" + classes[i].Split('#')[2];
+
+                    string boardCode = classes[i].Split('#')[2];
+
+                    if (boardCode == "RFUD"
+                        && newSec.Name.Length > 0
+                        && char.IsDigit(newSec.Name[newSec.Name.Length - 1]) == false)
+                    {
+                        newSec.NameClass = "Фьючерсы бессрочные#RFUD";
+                    }
+                    else
+                    {
+                        newSec.NameClass = classes[i].Split('#')[3] + "#" + boardCode;
+                    }
+
                     newSec.NameFull = innerArray[2].ToString();
 
                     result.Add(newSec);
@@ -428,6 +729,173 @@ namespace OsEngine.Market.Servers.MOEX
             }
 
             return result;
+        }
+
+        // bug-0530 (BUG-0529): анкетные поля строки store `securities`. Маппинг по ИМЕНАМ колонок
+        // из `securities.columns` — состав колонок различен по рынкам, позиции использовать нельзя.
+        // Дефолты по ТЗ-ред.2 (F1/F2/F4); бросать запрещено: нет колонки (ColIndex -1) -> дефолт.
+        private static Security MapIssSecurity(JArray columns, JArray row, string classParam)
+        {
+            Security sec = new Security();
+            sec.Exchange = "MOEX";
+
+            string board = "";
+            string[] classParts = classParam == null ? new string[0] : classParam.Split('#');
+            if (classParts.Length > 2)
+            {
+                board = classParts[2];
+            }
+
+            int minStepIndex = ColIndex(columns, "MINSTEP");
+            string minStepValue = IssCell(row, minStepIndex);
+            decimal priceStep = 0m;
+            // NumberStyles.Float, не Number: JValue-токен может отдать шаг с экспонентой
+            // ("1E-05") или ведущей точкой (".5") — Number молча сливал в фолбэк (U-13/U-15)
+            bool stepFromColumn = minStepValue != null
+                && decimal.TryParse(minStepValue, NumberStyles.Float, CultureInfo.InvariantCulture, out priceStep)
+                && priceStep > 0;
+
+            if (stepFromColumn == false)
+            {
+                priceStep = 1m; // индексы/CETS и пропавшая колонка — фолбэк шаг
+            }
+
+            sec.PriceStep = priceStep;
+
+            // F1 (ТЗ-ред.3b, R-08): V1 Error 16 — точное равенство Decimals и числа
+            // дробных знаков PriceStep (Var_1_Securities.IsCompairDecimalsAndStep),
+            // S-01/U-03 пинят оракул. Decimals при шаге из колонки — всегда знаки шага:
+            // сеттер Security (Security.cs:68-93) не совпадает с оракулом на шаге >=1
+            // ("1.5" -> 0) и на длинных дробях. Колонка DECIMALS ISS не используется:
+            // на фактических данных она согласована со знаком (tr293), а при рассогласовании
+            // (39 бумаг CETS, tr270) оракул требует именно знаки шага. Фолбэк шаг >=1 -> 0.
+            if (stepFromColumn)
+            {
+                sec.Decimals = StepFractionDigits(priceStep);
+            }
+
+            if (board == "TQBR")
+            {
+                sec.State = IssCell(row, ColIndex(columns, "STATUS")) == "A"
+                    ? SecurityStateType.Activ : SecurityStateType.Close;
+            }
+            else if (board == "RFUD")
+            {
+                DateTime lastTradeDate;
+                string lastTradeDateValue = IssCell(row, ColIndex(columns, "LASTTRADEDATE"));
+                sec.State = lastTradeDateValue != null
+                    && DateTime.TryParse(lastTradeDateValue, CultureInfo.InvariantCulture, DateTimeStyles.None, out lastTradeDate)
+                    && lastTradeDate.Date >= DateTime.Today
+                    ? SecurityStateType.Activ : SecurityStateType.Close;
+            }
+            else
+            {
+                sec.State = SecurityStateType.Activ; // индексы и валюта — доска не протухает
+            }
+
+            sec.PriceStepCost = priceStep;
+
+            if (board == "RFUD")
+            {
+                // F2: у фьючерсов стоимость шага — колонка STEPPRICE, нет/ноль — сам шаг
+                decimal stepCost;
+                string stepCostValue = IssCell(row, ColIndex(columns, "STEPPRICE"));
+                if (stepCostValue != null
+                    && decimal.TryParse(stepCostValue, NumberStyles.Float, CultureInfo.InvariantCulture, out stepCost)
+                    && stepCost > 0)
+                {
+                    sec.PriceStepCost = stepCost;
+                }
+            }
+
+            // LOTSIZE читаем, где колонка есть в columns ответа (TQBR, CETS — факт дампа runs#350);
+            // нет/ноль/null -> 1
+            sec.Lot = 1m;
+
+            decimal lotSize;
+            string lotSizeValue = IssCell(row, ColIndex(columns, "LOTSIZE"));
+            if (lotSizeValue != null
+                && decimal.TryParse(lotSizeValue, NumberStyles.Float, CultureInfo.InvariantCulture, out lotSize)
+                && lotSize > 0)
+            {
+                sec.Lot = lotSize;
+            }
+
+            sec.VolumeStep = 1m;
+
+            if (board == "RFUD")
+            {
+                // SECTYPE в RFUD — код базового актива ("BR"), тип из него брать нельзя
+                sec.SecurityType = SecurityType.Futures;
+            }
+            else if (board == "CETS")
+            {
+                sec.SecurityType = SecurityType.CurrencyPair;
+            }
+            else if (board == "TQBR")
+            {
+                sec.SecurityType = SecurityType.Stock;
+                string secType = IssCell(row, ColIndex(columns, "SECTYPE"));
+                // F4: ветка Fund работает, только пока в columns ответа есть SECTYPE; без колонки мертва
+                if (secType == "ETF" || secType == "J")
+                {
+                    sec.SecurityType = SecurityType.Fund;
+                }
+            }
+            else
+            {
+                sec.SecurityType = SecurityType.Index; // RTSI/SNDX и прочие индексные доски
+            }
+
+            return sec;
+        }
+
+        // Число дробных знаков шага без хвостовых нулей — та же мерка, что у V1
+        // Error 16 (Var_1_Securities.IsCompairDecimalsAndStep, tr270).
+        private static int StepFractionDigits(decimal step)
+        {
+            string stepText = step.ToString(CultureInfo.InvariantCulture).TrimEnd('0');
+            int dotIndex = stepText.IndexOf('.');
+            return dotIndex < 0 ? 0 : stepText.Length - dotIndex - 1;
+        }
+
+        // Индекс колонки по имени в securities.columns; колонки нет — -1 (вызывающий даёт дефолт).
+        private static int ColIndex(JArray columns, string columnName)
+        {
+            if (columns == null)
+            {
+                return -1;
+            }
+
+            for (int i = 0; i < columns.Count; i++)
+            {
+                if (string.Equals(IssCell(columns, i), columnName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return i;
+                }
+            }
+
+            return -1;
+        }
+
+        // Ячейка строки/колонок в инвариантном формате; за границами или JSON null — null.
+        private static string IssCell(JArray array, int index)
+        {
+            if (array == null || index < 0 || index >= array.Count)
+            {
+                return null;
+            }
+
+            JToken token = array[index];
+
+            if (token == null || token.Type == JTokenType.Null)
+            {
+                return null;
+            }
+
+            return token is IFormattable formattable
+                ? formattable.ToString(null, CultureInfo.InvariantCulture)
+                : token.ToString();
         }
 
         public event Action<List<Security>> SecurityEvent;
@@ -640,7 +1108,7 @@ namespace OsEngine.Market.Servers.MOEX
         {
             string[] classes = security.NameId.Split('#');
 
-            string str = "http://iss.moex.com/iss/engines/";
+            string str = "https://iss.moex.com/iss/engines/";
             str += classes[1];
             str += "/markets/";
             str += classes[2];
@@ -686,6 +1154,8 @@ namespace OsEngine.Market.Servers.MOEX
 
             JArray dataArray = (JArray)json["candles"]["data"];
 
+            int timeShift = GetTimeShiftHours();
+
             for (int j = 0; j < dataArray.Count; j++)
             {
                 JArray innerArray = (JArray)dataArray[j];
@@ -696,7 +1166,7 @@ namespace OsEngine.Market.Servers.MOEX
                 candle.High = innerArray[2].ToString().ToDecimal();
                 candle.Low = innerArray[3].ToString().ToDecimal();
                 candle.Volume = innerArray[5].ToString().ToDecimal();
-                candle.TimeStart = Convert.ToDateTime(innerArray[6].ToString());
+                candle.TimeStart = Convert.ToDateTime(innerArray[6].ToString()).AddHours(timeShift);
 
                 result.Add(candle);
             }
@@ -706,8 +1176,8 @@ namespace OsEngine.Market.Servers.MOEX
             // ТФ которые есть: 1 минута, 10 минут, 60 минут
             // за раз 500 свечек
 
-            // "http://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/SBER/candles.json?from=2014-01-01&interval=60&start=0";
-            //  http://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/LKOH/candles.json?from=2014-04-01-&interval=1&start=500
+            // "https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/SBER/candles.json?from=2014-01-01&interval=60&start=0";
+            //  https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/LKOH/candles.json?from=2014-04-01-&interval=1&start=500
         }
 
         #endregion
@@ -726,8 +1196,8 @@ namespace OsEngine.Market.Servers.MOEX
             }
             catch (Exception error)
             {
-                SendLogMessage(error.ToString(), LogMessageType.Error);
-                return null;
+                SendLogMessage("GetRequest error. Url: " + url + ". " + error.ToString(), LogMessageType.Error);
+                return string.Empty;
             }
         }
 
@@ -743,7 +1213,7 @@ namespace OsEngine.Market.Servers.MOEX
             }
             else
             {
-                MessageBox.Show(message);
+                ServerMaster.SendNewLogMessage(message, type);
             }
         }
 

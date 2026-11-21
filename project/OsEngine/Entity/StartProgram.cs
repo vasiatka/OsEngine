@@ -34,5 +34,15 @@ namespace OsEngine.Entity
         /// ticks to candles converter
         /// </summary>
         IsOsConverter,
+
+        /// <summary>
+        /// capital allocation
+        /// </summary>
+        IsOsCapitalAllocation,
+
+        /// <summary>
+        /// main menu window is open, no mode selected yet
+        /// </summary>
+        IsMainWindow,
     }
 }

@@ -1,5 +1,6 @@
 ﻿using OsEngine.Entity;
 using OsEngine.Language;
+using OsEngine.Market;
 using System;
 using System.Diagnostics;
 using System.Globalization;
@@ -48,49 +49,58 @@ namespace OsEngine.OsData
             Task.Run(PainterThreadArea);
         }
 
+        private void OsDataSetDetailUi_Closed(object sender, EventArgs e)
+        {
+            try
+            {
+                _isDeleted = true;
+
+                if (_blinkTimer != null)
+                {
+                    _blinkTimer.Stop();
+                    _blinkTimer.Tick -= _blinkTimer_Tick;
+                    _blinkTimer = null;
+                }
+
+                ButtonDataSetDetail.Click -= ButtonDataSetDetail_Click;
+
+                if (_grid != null)
+                {
+                    HostDataPiesDetails.Child = null;
+                    DataGridFactory.ClearLinks(_grid);
+                    _grid.CellClick -= _grid_CellClick;
+                    _grid.DataError -= _grid_DataError;
+                    _grid.Rows.Clear();
+                    _grid.Columns.Clear();
+                    _grid.DataSource = null;
+                    _grid.Dispose();
+                    _grid = null;
+                }
+
+                _loader = null;
+
+                Closed -= OsDataSetDetailUi_Closed;
+            }
+            catch (Exception ex)
+            {
+                _loader?.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private DispatcherTimer _blinkTimer;
+
+        private int _blinkCount;
+
+        private bool _isGreenVisible = true;
+
         private void StartButtonBlinkAnimation()
         {
             try
             {
-                DispatcherTimer timer = new DispatcherTimer();
-                int blinkCount = 0;
-                bool isGreenVisible = true;
-
-                timer.Interval = TimeSpan.FromMilliseconds(300);
-                timer.Tick += (s, e) =>
-                {
-                    try
-                    {
-                        if (blinkCount >= 20)
-                        {
-                            timer.Stop();
-                            PostGreenDataSetDetail.Opacity = 1;
-                            PostWhiteDataSetDetail.Opacity = 0;
-                            return;
-                        }
-
-                        if (isGreenVisible)
-                        {
-                            PostGreenDataSetDetail.Opacity = 0;
-                            PostWhiteDataSetDetail.Opacity = 1;
-                        }
-                        else
-                        {
-                            PostGreenDataSetDetail.Opacity = 1;
-                            PostWhiteDataSetDetail.Opacity = 0;
-                        }
-
-                        isGreenVisible = !isGreenVisible;
-                        blinkCount++;
-                    }
-                    catch (Exception ex)
-                    {
-                        _loader.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
-                        timer.Stop();
-                    }
-                };
-
-                timer.Start();
+                _blinkTimer = new DispatcherTimer();
+                _blinkTimer.Interval = TimeSpan.FromMilliseconds(300);
+                _blinkTimer.Tick += _blinkTimer_Tick;
+                _blinkTimer.Start();
             }
             catch (Exception ex)
             {
@@ -98,29 +108,44 @@ namespace OsEngine.OsData
             }
         }
 
-        private void OsDataSetDetailUi_Closed(object sender, EventArgs e)
+        private void _blinkTimer_Tick(object sender, EventArgs e)
         {
+            if (_blinkTimer == null)
+            {
+                return;
+            }
+
             try
             {
-                _isDeleted = true;
-                _loader = null;
-
-                if (HostDataPiesDetails != null)
+                if (_blinkCount >= 20)
                 {
-                    HostDataPiesDetails.Child = null;
+                    _blinkTimer.Stop();
+                    PostGreenDataSetDetail.Opacity = 1;
+                    PostWhiteDataSetDetail.Opacity = 0;
+                    return;
                 }
 
-                if (_grid != null)
+                if (_isGreenVisible)
                 {
-                    _grid.CellClick -= _grid_CellClick;
-                    _grid.DataError -= _grid_DataError;
-                    DataGridFactory.ClearLinks(_grid);
-                    _grid = null;
+                    PostGreenDataSetDetail.Opacity = 0;
+                    PostWhiteDataSetDetail.Opacity = 1;
                 }
+                else
+                {
+                    PostGreenDataSetDetail.Opacity = 1;
+                    PostWhiteDataSetDetail.Opacity = 0;
+                }
+
+                _isGreenVisible = !_isGreenVisible;
+                _blinkCount++;
             }
-            catch
+            catch (Exception ex)
             {
-                // ignore
+                _loader.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+                if (_blinkTimer != null)
+                {
+                    _blinkTimer.Stop();
+                }
             }
         }
 
@@ -128,14 +153,21 @@ namespace OsEngine.OsData
         {
             while (true)
             {
-                await Task.Delay(10000);
-
-                if (_isDeleted)
+                try
                 {
-                    return;
-                }
+                    await Task.Delay(10000);
 
-                RePaintAll();
+                    if (_isDeleted)
+                    {
+                        return;
+                    }
+
+                    RePaintAll();
+                }
+                catch(Exception error)
+                {
+                    ServerMaster.SendNewLogMessage(error.ToString(), Logging.LogMessageType.Error);
+                }
             }
         }
 
@@ -143,18 +175,24 @@ namespace OsEngine.OsData
 
         private void RePaintAll()
         {
-            if (_grid == null)
-            {
-                return;
-            }
-
-            if (_grid.InvokeRequired)
-            {
-                _grid.Invoke(new Action(RePaintAll));
-                return;
-            }
             try
             {
+                if (_isDeleted)
+                {
+                    return;
+                }
+
+                if (_grid == null || _grid.IsDisposed)
+                {
+                    return;
+                }
+
+                if (_grid.InvokeRequired)
+                {
+                    _grid.Invoke(new Action(RePaintAll));
+                    return;
+                }
+
                 LabelStatusValue.Content = _loader.Status.ToString();
                 LabelExchangeValue.Content = _loader.Exchange;
                 LabelSecurityValue.Content = _loader.SecName;
@@ -167,9 +205,13 @@ namespace OsEngine.OsData
 
                 PaintTable();
             }
+            catch (ObjectDisposedException)
+            {
+                // окно закрыто, контрол задиспожен. перерисовку останавливаем
+            }
             catch (Exception error)
             {
-                System.Windows.MessageBox.Show(error.Message);
+                ServerMaster.SendNewLogMessage(error.ToString(), Logging.LogMessageType.Error);
             }
         }
 
@@ -347,31 +389,49 @@ namespace OsEngine.OsData
 
         public void PaintTable()
         {
-            if (_grid == null)
+            try
             {
-                return;
-            }
-
-            if (_grid.InvokeRequired)
-            {
-                _grid.Invoke(new Action(PaintTable));
-                return;
-            }
-
-            if (_grid.Rows.Count != _loader.DataPies.Count)
-            {
-                _grid.Rows.Clear();
-
-                for (int i = 0; i < _loader.DataPies.Count; i++)
+                if (_grid == null || _grid.IsDisposed)
                 {
-                    _grid.Rows.Add(GetRow(_loader.DataPies[i]));
+                    return;
+                }
+
+                if (_grid.InvokeRequired)
+                {
+                    _grid.Invoke(new Action(PaintTable));
+                    return;
+                }
+
+                if (_grid.Rows.Count != _loader.DataPies.Count)
+                {
+                    _grid.Rows.Clear();
+
+                    for (int i = 0; i < _loader.DataPies.Count; i++)
+                    {
+                        _grid.Rows.Add(GetRow(_loader.DataPies[i]));
+                    }
+                }
+                else
+                {
+                    for (int i = 0; i < _loader.DataPies.Count; i++)
+                    {
+                        UpDateRow(_grid.Rows[i], _loader.DataPies[i]);
+                    }
                 }
             }
-            else
+            catch (ObjectDisposedException)
             {
-                for (int i = 0; i < _loader.DataPies.Count; i++)
+                // окно закрыто, контрол задиспожен
+            }
+            catch (Exception ex)
+            {
+                if (_loader != null)
                 {
-                    UpDateRow(_grid.Rows[i], _loader.DataPies[i]);
+                    _loader.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+                }
+                else
+                {
+                    ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
                 }
             }
         }

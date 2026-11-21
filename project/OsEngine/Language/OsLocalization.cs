@@ -267,13 +267,15 @@ namespace OsEngine.Language
             }
             catch (Exception e)
             {
-                MessageBox.Show(e.Message);
+                OsEngine.Market.ServerMaster.SendNewLogMessage(e.ToString(), OsEngine.Logging.LogMessageType.Error);
                 return "error";
             }
 
         }
 
         public static MainWindowLocal MainWindow = new MainWindowLocal();
+
+        public static McpApiLocal McpApi = new McpApiLocal();
 
         public static PrimeSettingsMasterUiLocal PrimeSettings = new PrimeSettingsMasterUiLocal();
 
@@ -302,5 +304,7 @@ namespace OsEngine.Language
         public static DescriptionRobotsLocal Description = new DescriptionRobotsLocal();
 
         public static UpdaterLocal Updater = new UpdaterLocal();
+
+        public static CapitalAllocationLocal CapitalAllocation = new CapitalAllocationLocal();
     }
 }

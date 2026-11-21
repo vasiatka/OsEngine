@@ -52,18 +52,28 @@ namespace OsEngine.Market.AutoFollow
                 {
                     _uis[i].LogMessageEvent -= _master.SendLogMessage;
                     _uis[i].NeedToUpdateCopyTradersGridEvent -= Ui_NeedToUpdateCopyTradersGridEvent;
+                    _uis[i].Closed -= Ui_Closed;
                 }
                 _uis.Clear();
 
                 _master.LogCopyMaster.StopPaint();
                 _master = null;
 
-                _grid.CellClick -= _grid_CellClick;
-                _grid.CellValueChanged -= _grid_CellValueChanged;
-                _grid.DataError -= _grid_DataError;
-                _grid.Rows.Clear();
-                DataGridFactory.ClearLinks(_grid);
-                HostCopyTraders.Child = null;
+                if (_grid != null)
+                {
+                    _grid.CellClick -= _grid_CellClick;
+                    _grid.CellValueChanged -= _grid_CellValueChanged;
+                    _grid.DataError -= _grid_DataError;
+                    HostCopyTraders.Child = null;
+                    DataGridFactory.ClearLinks(_grid);
+                    _grid.Rows.Clear();
+                    _grid.Columns.Clear();
+                    _grid.DataSource = null;
+                    _grid.Dispose();
+                    _grid = null;
+                }
+
+                Closed -= CopyMasterUi_Closed;
             }
             catch (Exception ex)
             {
@@ -249,17 +259,7 @@ namespace OsEngine.Market.AutoFollow
                 row.Cells.Add(imageCell);
                 imageCell.Style.Alignment = DataGridViewContentAlignment.MiddleCenter;
 
-                string altPath = Path.Combine(System.Windows.Forms.Application.StartupPath, @"Images\InstructionPosts\GreenPostCollection.png");
-
-                if (File.Exists(altPath))
-                {
-                    using (FileStream fs = new FileStream(altPath, FileMode.Open, FileAccess.Read))
-                    {
-                        Image originalImage = Image.FromStream(fs);
-                        Image resizedImage = new Bitmap(originalImage, new System.Drawing.Size(25, 20));
-                        row.Cells[1].Value = resizedImage;
-                    }
-                }
+                row.Cells[1].Value = DataGridFactory.GetInstructionPostImage(); // общий кэш; null -> пустая ячейка, как при отсутствии файла
             }
             catch (Exception ex)
             {

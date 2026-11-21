@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Windows.Forms.Integration;
 using OsEngine.Entity;
+using OsEngine.IndicatorMarketDepth;
 using OsEngine.Indicators;
 using OsEngine.Logging;
 using OsEngine.Market;
@@ -124,15 +125,18 @@ namespace OsEngine.OsTrader.Panels.Tab
 
                         if (curScreener._host != null)
                         {
-                            for (int i2 = 0; curScreener.Tabs != null &&
-                                 curScreener.Tabs.Count != 0 &&
-                                 i2 < curScreener.Tabs.Count; i2++)
+                            // snapshot: PaintLastBidAsk runs on the screener worker while
+                            // MCP TryReLoadTabs may mutate Tabs from another thread
+                            List<BotTabSimple> tabsSnapshot = new List<BotTabSimple>();
+                            curScreener.CopyTabsInto(tabsSnapshot);
+
+                            for (int i2 = 0; i2 < tabsSnapshot.Count; i2++)
                             {
                                 if(_screeners[i].LastTimeClick.AddSeconds(2) > DateTime.Now)
                                 {
                                     continue;
                                 }
-                                PaintLastBidAsk(_screeners[i].Tabs[i2], _screeners[i].SecuritiesDataGrid);
+                                PaintLastBidAsk(tabsSnapshot[i2], _screeners[i].SecuritiesDataGrid);
                             }
                         }
 
@@ -295,6 +299,9 @@ namespace OsEngine.OsTrader.Panels.Tab
             LoadIndicators();
             ReloadIndicatorsOnTabs();
 
+            LoadMarketDepthIndicators();
+            ReloadMarketDepthIndicatorsOnTabs();
+
             if (startProgram != StartProgram.IsOsOptimizer)
             {
                 AddNewTabToWatch(this);
@@ -363,6 +370,28 @@ namespace OsEngine.OsTrader.Panels.Tab
         /// Storage location for all simple tabs owned by the screener
         /// </summary>
         public List<BotTabSimple> Tabs = new List<BotTabSimple>();
+
+        /// <summary>
+        /// Blocker of multi-threaded access to Tabs: the screener worker and MCP mutate it,
+        /// external readers must take an atomic snapshot via CopyTabsInto
+        /// </summary>
+        private readonly object _tabsLocker = new object();
+
+        /// <summary>
+        /// Atomic snapshot of Tabs into destination (for readers outside the screener)
+        /// </summary>
+        public void CopyTabsInto(List<BotTabSimple> destination)
+        {
+            if (destination == null)
+            {
+                return;
+            }
+
+            lock (_tabsLocker)
+            {
+                destination.AddRange(Tabs);
+            }
+        }
 
         /// <summary>
         /// Unique robot name
@@ -512,14 +541,23 @@ namespace OsEngine.OsTrader.Panels.Tab
                         BotTabSimple newTab = new BotTabSimple(save2[i], _startProgram);
                         newTab.Connector.SaveTradesInCandles = false;
 
-                        Tabs.Add(newTab);
+                        // lock only the list mutation; Subscribe/Update/Paint/raise stay outside (W-2)
+                        lock (_tabsLocker)
+                        {
+                            Tabs.Add(newTab);
+                        }
                         SubscribeOnTab(newTab);
-                        UpdateTabSettings(Tabs[Tabs.Count - 1]);
+                        UpdateTabSettings(newTab);
                         PaintNewRow();
 
                         if (NewTabCreateEvent != null)
                         {
                             NewTabCreateEvent(newTab);
+                        }
+
+                        if (NewTabCreateWithScreenerEvent != null)
+                        {
+                            NewTabCreateWithScreenerEvent(newTab, this);
                         }
 
                         if (Tabs.Count == 1)
@@ -538,7 +576,41 @@ namespace OsEngine.OsTrader.Panels.Tab
                 SendNewLogMessage(error.ToString(), LogMessageType.Error);
             }
 
+            if (NeedToReloadTabs == false)
+            {
+                List<ActivatedSecurity> activeSecurities = SecuritiesNames.FindAll(s => s.IsOn);
+
+                if (Tabs.Count != activeSecurities.Count)
+                {
+                    NeedToReloadTabs = true;
+                }
+                else
+                {
+                    for (int i = 0; i < activeSecurities.Count; i++)
+                    {
+                        bool found = false;
+
+                        for (int i2 = 0; i2 < Tabs.Count; i2++)
+                        {
+                            if (Tabs[i2].Connector.SecurityName == activeSecurities[i].SecurityName
+                                && Tabs[i2].Connector.SecurityClass == activeSecurities[i].SecurityClass)
+                            {
+                                found = true;
+                                break;
+                            }
+                        }
+
+                        if (found == false)
+                        {
+                            NeedToReloadTabs = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
             ReloadIndicatorsOnTabs();
+            ReloadMarketDepthIndicatorsOnTabs();
             SetJournalsInPosViewer();
         }
 
@@ -547,6 +619,14 @@ namespace OsEngine.OsTrader.Panels.Tab
         /// </summary>
         public void SaveSettings()
         {
+            if (_isLoadingSettings)
+            {
+                // LoadSettings assigns CandleCreateMethodType, whose setter saves: that would rewrite the file it is
+                // still reading, before the securities are read. On Windows the open reader blocks the write; on
+                // Linux it does not, and every start wiped the securities list from the file.
+                return;
+            }
+
             try
             {
                 using (StreamWriter writer = new StreamWriter(@"Engine\" + TabName + @"ScreenerSet.txt", false))
@@ -583,6 +663,8 @@ namespace OsEngine.OsTrader.Panels.Tab
         /// <summary>
         /// Load settings
         /// </summary>
+        private bool _isLoadingSettings;
+
         public void LoadSettings()
         {
             if (!File.Exists(@"Engine\" + TabName + @"ScreenerSet.txt"))
@@ -592,6 +674,9 @@ namespace OsEngine.OsTrader.Panels.Tab
                 CandleSeriesRealization.Init(_startProgram);
                 return;
             }
+
+            _isLoadingSettings = true;
+
             try
             {
                 using (StreamReader reader = new StreamReader(@"Engine\" + TabName + @"ScreenerSet.txt"))
@@ -671,6 +756,10 @@ namespace OsEngine.OsTrader.Panels.Tab
 
                 // ignore
             }
+            finally
+            {
+                _isLoadingSettings = false;
+            }
         }
 
         //// <summary>
@@ -739,6 +828,7 @@ namespace OsEngine.OsTrader.Panels.Tab
                 {
                     ((TesterServer)servers[0]).TestingStartEvent -= BotTabScreener_TestingStartEvent;
                     ((TesterServer)servers[0]).TestingEndEvent -= BotTabScreener_TestingEndEvent;
+                    ((TesterServer)servers[0]).EndNextMinuteWithCandlesEvent -= BotTabScreener_EndNextMinuteWithCandlesEvent;
                 }
             }
 
@@ -768,9 +858,13 @@ namespace OsEngine.OsTrader.Panels.Tab
             {
                 List<Journal.Journal> journals = new List<Journal.Journal>();
 
-                for (int i = 0; i < Tabs.Count; i++)
+                // Tabs is mutated by the screener worker under _tabsLocker: snapshot via CopyTabsInto (BUG-0359)
+                List<BotTabSimple> tabs = new List<BotTabSimple>();
+                CopyTabsInto(tabs);
+
+                for (int i = 0; i < tabs.Count; i++)
                 {
-                    journals.Add(Tabs[i].GetJournal());
+                    journals.Add(tabs[i].GetJournal());
                 }
 
                 return journals;
@@ -789,13 +883,14 @@ namespace OsEngine.OsTrader.Panels.Tab
         {
             get
             {
-                if (Tabs == null ||
-                    Tabs.Count == 0)
+                // Tabs is mutated by the screener worker under _tabsLocker: snapshot via CopyTabsInto (BUG-0359)
+                List<BotTabSimple> tabs = new List<BotTabSimple>();
+                CopyTabsInto(tabs);
+
+                if (tabs.Count == 0)
                 {
                     return false;
                 }
-
-                List<BotTabSimple> tabs = Tabs;
 
                 for (int i2 = 0; i2 < tabs.Count; i2++)
                 {
@@ -983,6 +1078,115 @@ namespace OsEngine.OsTrader.Panels.Tab
         /// </summary>
         public void TryReLoadTabs()
         {
+            // called from the screener worker thread and from MCP; without the lock both
+            // run "create missing tabs" at once and TryCreateTab adds the same security twice.
+            // NeedToReloadTabs is re-checked inside, so the second caller exits after the first finishes
+            // The lock serializes data work only (BUG-0335). Synchronous UI marshalling under it
+            // deadlocks with the UI thread entering this method (Closed-callback in OptimizerUi):
+            // the holder waits for the dispatcher, the dispatcher thread waits for the lock.
+            // The UI plan is collected under the lock and executed outside it, in finally:
+            // an aborted reload must not leave the grid stale.
+            // Delta-2 (S1 FAIL): the plan covers every UI site reachable from the locked body -
+            // deleted-tab Clear (chart/grid/alerts painters), connector Delete (settings-dialog
+            // Close), the connector settings re-apply (synchronous reconnect marshal) and the
+            // indicator reload (chart paint). Nothing UI is called under the lock.
+            List<CandleEngine> chartsToClose = new List<CandleEngine>();
+            List<BotTabSimple> tabsToClear = new List<BotTabSimple>();
+            List<BotTabSimple> tabsToUpdate = new List<BotTabSimple>();
+            bool needRepaint = false;
+            bool indicatorsReload = false;
+
+            try
+            {
+                lock (_reloadTabsLocker)
+                {
+                    TryReLoadTabsLocked(chartsToClose, tabsToClear, tabsToUpdate, ref needRepaint, ref indicatorsReload);
+                }
+            }
+            finally
+            {
+                for (int i = 0; i < chartsToClose.Count; i++)
+                {
+                    chartsToClose[i].CloseGui();
+                }
+
+                // Deleted tabs are wiped here, not under the lock: Clear marshals synchronously
+                // to painted chart/grids/alerts UI. Delete() carries the connector settings-dialog
+                // Close - still a cross-thread call as on the base, deferral only removes it from
+                // under the lock, that behaviour is not redesigned. The deferred Delete should not
+                // wipe a recreated connector's settings file in the same pass: a dead tab's cause
+                // (security gone or switched off) is never re-created here (TryCreateTab checks IsOn).
+                // A cross-pass re-add inside the finally window can clobber Engine\<name>ConnectorPrime.txt;
+                // it is a cache and self-heals on restart.
+                for (int i = 0; i < tabsToClear.Count; i++)
+                {
+                    try
+                    {
+                        tabsToClear[i].Clear();
+                        tabsToClear[i].Delete();
+                    }
+                    catch (Exception error)
+                    {
+                        SendNewLogMessage(error.ToString(), LogMessageType.Error);
+                        NeedToReloadTabs = true; // the base aborted the pass and retried on the next tick, parity
+                    }
+                }
+
+                // A concurrent reload may already own newer settings here - harmless, the next
+                // reload re-applies them; no "lost update" is promised.
+                for (int i = 0; i < tabsToUpdate.Count; i++)
+                {
+                    try
+                    {
+                        UpdateTabSettings(tabsToUpdate[i]);
+                    }
+                    catch (Exception error)
+                    {
+                        SendNewLogMessage(error.ToString(), LogMessageType.Error);
+                        NeedToReloadTabs = true; // parity with the base abort
+                    }
+                }
+
+                if (indicatorsReload)
+                {
+                    try
+                    {
+                        ReloadIndicatorsOnTabs();
+                    }
+                    catch (Exception error)
+                    {
+                        SendNewLogMessage(error.ToString(), LogMessageType.Error);
+                        NeedToReloadTabs = true; // parity with the base abort (R-1)
+                    }
+                }
+
+                if (needRepaint)
+                {
+                    // Residual risk: the repaint reads Tabs outside the lock and may catch a
+                    // parallel reload. RePaintSecuritiesGrid swallows the torn pass, and the grid
+                    // is re-stamped only when a later delete/create sets needRepaint; an
+                    // update-only reload leaves the torn view until then. The deferred repaint
+                    // also replaces append-only PaintNewRow on create: Rows.Clear repaints the
+                    // whole grid, so selection is lost and an in-place On/Off edit is cancelled
+                    // (columns ReadOnly=false :2037+); scroll is restored but flickers. Race class predates fix.
+                    RePaintSecuritiesGrid();
+                }
+            }
+        }
+
+        private object _reloadTabsLocker = new object();
+
+        // живой скринер-воркер (:140-144) дёргает TryReLoadTabs каждые 500 мс: Error о пропуске — только при смене причины
+        private string _lastSkipReason = null;
+
+        /// <param name="chartsToClose">chart windows to close after the lock is released (BUG-0335)</param>
+        /// <param name="tabsToClear">tabs deleted in this pass, wiped and removed outside the lock (BUG-0335)</param>
+        /// <param name="tabsToUpdate">tabs whose connector settings are (re-)applied outside the lock (BUG-0335)</param>
+        /// <param name="needRepaint">set when the securities grid must be redrawn after the lock</param>
+        /// <param name="indicatorsReload">set when the per-tab indicator reload must run after the lock (BUG-0335)</param>
+        private void TryReLoadTabsLocked(List<CandleEngine> chartsToClose, List<BotTabSimple> tabsToClear,
+            List<BotTabSimple> tabsToUpdate, ref bool needRepaint, ref bool indicatorsReload)
+        {
             try
             {
                 if (NeedToReloadTabs == false)
@@ -992,47 +1196,80 @@ namespace OsEngine.OsTrader.Panels.Tab
 
                 if (_tabIsLoad == false)
                 {
+                    if (_lastSkipReason != "tab load not finished")
+                    {
+                        _lastSkipReason = "tab load not finished";
+                        SendNewLogMessage("Screener tabs reload skipped: tab load not finished", LogMessageType.Error);
+                    }
                     return;
                 }
 
                 if (TabsReadyToLoad() == false
                     && Tabs.Count == 0)
                 {
+                    string reason = SecuritiesNames.Count == 0 ? "no securities"
+                        : String.IsNullOrEmpty(PortfolioName) ? "no portfolio name"
+                        : "server type is None";
+                    if (_lastSkipReason != reason)
+                    {
+                        _lastSkipReason = reason;
+                        SendNewLogMessage($"Screener tabs reload skipped: {reason}", LogMessageType.Error);
+                    }
                     return;
                 }
+
+                // прошли гейты: следующая остановка на гейте — снова новость
+                _lastSkipReason = null;
 
                 // 1 remove unwanted tabs
 
                 bool deleteSomeTabs = false;
+
+                // F3: the deferred close in the caller's finally raises ChartClosedEvent on the UI
+                // thread OUTSIDE this lock and RemoveAt's _chartEngines (RemoveAt :1748), so the live list
+                // can shrink mid-loop for the next lock holder. Index a local snapshot; the base
+                // serialized the close under the lock. No UI calls from this loop.
+                CandleEngine[] chartEnginesSnapshot = _chartEngines == null ? null : _chartEngines.ToArray();
               
                 for (int i = 0; i < Tabs.Count; i++)
                 {
-                    UpdateTabSettings(Tabs[i]);
-
-                    if (TabIsAlive(SecuritiesNames, TimeFrame, Tabs[i]) == false)
+                    // BUG-0335 delta-2: settings are not applied here (the base applied them, the call
+                    // marshals a synchronous reconnect - the S1 site). The alive verdict is taken on
+                    // prospective values (settingsWillSync), so keep/dead stays 1:1 with the base.
+                    // A dead tab is not queued at all: the base re-applied settings to it only to
+                    // destroy it a line later, that reconnect was pure busywork.
+                    if (TabIsAlive(SecuritiesNames, TimeFrame, Tabs[i], true) == false)
                     {
                         string chartName = Tabs[i].TabName + "_Engine";
 
-                        for (int i2 = 0; _chartEngines != null && i2 < _chartEngines.Count; i2++)
+                        for (int i2 = 0; chartEnginesSnapshot != null && i2 < chartEnginesSnapshot.Length; i2++)
                         {
-                            if (chartName == _chartEngines[i2].NameStrategyUniq)
+                            if (chartName == chartEnginesSnapshot[i2].NameStrategyUniq)
                             {
-                                _chartEngines[i2].CloseGui();
+                                // closing and wiping are deferred to the plan outside the lock
+                                // (BUG-0335), the engine itself stays in _chartEngines as before
+                                chartsToClose.Add(chartEnginesSnapshot[i2]);
                                 break;
                             }
                         }
 
-                        Tabs[i].Clear();
-                        Tabs[i].Delete();
-                        Tabs.RemoveAt(i);
+                        tabsToClear.Add(Tabs[i]);
+                        lock (_tabsLocker)
+                        {
+                            Tabs.RemoveAt(i);
+                        }
                         i--;
                         deleteSomeTabs = true;
+                    }
+                    else
+                    {
+                        tabsToUpdate.Add(Tabs[i]);
                     }
                 }
 
                 if (deleteSomeTabs)
                 {
-                    RePaintSecuritiesGrid();
+                    needRepaint = true;
                 }
 
                 // 2 update data in tabs
@@ -1046,23 +1283,54 @@ namespace OsEngine.OsTrader.Panels.Tab
                 IsLoadTabs = true;
                 for (int i = 0; i < SecuritiesNames.Count; i++)
                 {
-                    int tabCount = Tabs.Count;
+                    // TryCreateTab returns the created tab: no re-read of the just-added
+                    // element through the live list (W-4b)
+                    BotTabSimple createdTab = TryCreateTab(SecuritiesNames[i], TimeFrame, Tabs);
 
-                    TryCreateTab(SecuritiesNames[i], TimeFrame, Tabs);
-
-                    if (tabCount != Tabs.Count)
+                    if (createdTab != null)
                     {
-                        UpdateTabSettings(Tabs[Tabs.Count - 1]);
-                        PaintNewRow();
+                        // BUG-0335 delta-2: the (re-)apply marshals; queued, the final pass runs it
+                        // outside the lock. The raise below now sees the fresh tab before the full
+                        // re-apply; current subscribers read the creation-time fields only (W-1).
+                        tabsToUpdate.Add(createdTab);
+                        needRepaint = true; // the row is drawn by the deferred plan (BUG-0335)
 
+                        // W-1, contract for NewTabCreateEvent subscribers (the raise stays under the lock):
+                        // data-only here holds for current subscribers: BotPanel :2158/:2200 go to
+                        // journals, LoadTabToWatch :48-51 is an assignment. TestBotOption :262-266 /
+                        // TestBotFunding :171-175 marshal to UI under the raise, and item (2) below
+                        // IS their UI entry into this locker: MCP Apply parks the UI on this lock
+                        // (live base S4 stack: Monitor.Enter <- TryReLoadTabs <- ApplyBotConfigTabScreener),
+                        // so the AB-BA cycle stays closed for TestBot + MCP even on this fix. That is
+                        // the accepted residual W-1: either the subscriber does not marshal, or the
+                        // raise moves out of the lock. Not redesigned here.
+                        // UI entries into this lock: (1) OptimizerUi Closed-callback :1907-12;
+                        // (2) MCP config Apply*: RobotsApi.SetBotConfigTabScreener :2064-72 and
+                        // OptimizerApi :1050-56 marshal to the UI thread (MainWindow.GetDispatcher,
+                        // synchronous Invoke) and enter the lock ON the UI thread - with a non-UI
+                        // holder (static worker :140-43) that freezes OsTrader, not only the optimizer.
+                        // Both TryReLoadTabs and NewTabCreateEvent are public: a user robot with a
+                        // UI-blocking handler under the raise can close the deadlock cycle again.
                         if (NewTabCreateEvent != null)
                         {
-                            NewTabCreateEvent(Tabs[Tabs.Count - 1]);
+                            NewTabCreateEvent(createdTab);
+                        }
+
+                        if (NewTabCreateWithScreenerEvent != null)
+                        {
+                            NewTabCreateWithScreenerEvent(createdTab, this);
                         }
                     }
                 }
                 IsLoadTabs = false;
-                ReloadIndicatorsOnTabs();
+                // BUG-0335 delta-2: the reload paints indicators onto every already-painted chart
+                // (synchronous marshals), so it runs in the deferred plan. Market-depth indicators
+                // are data-only (verified: no marshals in the master), they stay.
+                if (_indicators.Count > 0)
+                {
+                    indicatorsReload = true;
+                }
+                ReloadMarketDepthIndicatorsOnTabs();
 
                 if (Tabs.Count != 0)
                 {
@@ -1078,7 +1346,10 @@ namespace OsEngine.OsTrader.Panels.Tab
 
                 for (int i = 0; Tabs != null && i < Tabs.Count; i++)
                 {
-                    UpdateTabSettings(Tabs[i]);
+                    // BUG-0335 delta-2: re-apply is queued (the deletion loop already queued the
+                    // survivors, this pass re-queues them: UpdateTabSettings is idempotent, the
+                    // second run finds no difference and does not reconnect).
+                    tabsToUpdate.Add(Tabs[i]);
                 }
 
                 SaveTabs();
@@ -1198,16 +1469,16 @@ namespace OsEngine.OsTrader.Panels.Tab
         /// <summary>
         /// Try creating a tab with these options
         /// </summary>
-        private void TryCreateTab(ActivatedSecurity sec, TimeFrame frame, List<BotTabSimple> curTabs)
+        private BotTabSimple TryCreateTab(ActivatedSecurity sec, TimeFrame frame, List<BotTabSimple> curTabs)
         {
             if (sec.IsOn == false)
             {
-                return;
+                return null;
             }
 
             if (curTabs.Find(tab => tab.Connector.SecurityName == sec.SecurityName) != null)
             {
-                return;
+                return null;
             }
 
             string nameStart = curTabs.Count + " " + TabName;
@@ -1237,21 +1508,36 @@ namespace OsEngine.OsTrader.Panels.Tab
             newTab.Connector.TimeFrameBuilder.MarketDepthBuildMaxSpread = this.MarketDepthBuildMaxSpread;
             newTab.Connector.TimeFrameBuilder.MarketDepthBuildMaxSpreadIsOn = this.MarketDepthBuildMaxSpreadIsOn;
             newTab.Connector.SaveTradesInCandles = SaveTradesInCandles;
+            newTab.Connector.EventsIsOn = _eventsIsOn;
             newTab.CommissionType = CommissionType;
             newTab.CommissionValue = CommissionValue;
             newTab.IsCreatedByScreener = true;
 
-            curTabs.Add(newTab);
+            lock (_tabsLocker)
+            {
+                curTabs.Add(newTab);
+            }
 
             SubscribeOnTab(newTab);
+
+            return newTab;
         }
 
         /// <summary>
         /// Check if the tab exists
         /// </summary>
-        private bool TabIsAlive(List<ActivatedSecurity> securities, TimeFrame frame, BotTabSimple tab)
+        /// <summary>
+        /// Alive verdict for a tab against the settings that will be applied to it (BUG-0335 delta-2):
+        /// settingsWillSync means the connector re-apply runs later (deferred plan), so the checks
+        /// comparing fields that the re-apply overwrites (ServerFullName, TimeFrame, candle series
+        /// parameters) are evaluated as post-sync, i.e. always pass; no assignments are made here.
+        /// The candle-series type check stays live: SetSaveString never changes the CLR type, and a
+        /// type mismatch made the base verdict dead too.
+        /// </summary>
+        private bool TabIsAlive(List<ActivatedSecurity> securities, TimeFrame frame, BotTabSimple tab, bool settingsWillSync)
         {
-            if (StartProgram == StartProgram.IsOsTrader)
+            if (settingsWillSync == false
+                && StartProgram == StartProgram.IsOsTrader)
             {
                 if (tab.Connector.ServerFullName != ServerName)
                 {
@@ -1283,7 +1569,8 @@ namespace OsEngine.OsTrader.Panels.Tab
                 return false;
             }
 
-            if (tab.Connector.TimeFrame != frame)
+            if (settingsWillSync == false
+                && tab.Connector.TimeFrame != frame)
             {
                 return false;
             }
@@ -1297,30 +1584,33 @@ namespace OsEngine.OsTrader.Panels.Tab
                 return false;
             }
 
-            for (int i = 0; i < tab.TimeFrameBuilder.CandleSeriesRealization.Parameters.Count; i++)
+            if (settingsWillSync == false)
             {
-                ICandleSeriesParameter paramInTab = tab.TimeFrameBuilder.CandleSeriesRealization.Parameters[i];
-                ICandleSeriesParameter paramInScreener = CandleSeriesRealization.Parameters[i];
+                for (int i = 0; i < tab.TimeFrameBuilder.CandleSeriesRealization.Parameters.Count; i++)
+                {
+                    ICandleSeriesParameter paramInTab = tab.TimeFrameBuilder.CandleSeriesRealization.Parameters[i];
+                    ICandleSeriesParameter paramInScreener = CandleSeriesRealization.Parameters[i];
 
-                if (paramInTab.Type == CandlesParameterType.StringCollection
-                    && ((CandlesParameterString)paramInTab).ValueString != ((CandlesParameterString)paramInScreener).ValueString)
-                {
-                    return false;
-                }
-                else if (paramInTab.Type == CandlesParameterType.Int
-                    && ((CandlesParameterInt)paramInTab).ValueInt != ((CandlesParameterInt)paramInScreener).ValueInt)
-                {
-                    return false;
-                }
-                else if (paramInTab.Type == CandlesParameterType.Bool
-                    && ((CandlesParameterBool)paramInTab).ValueBool != ((CandlesParameterBool)paramInScreener).ValueBool)
-                {
-                    return false;
-                }
-                else if (paramInTab.Type == CandlesParameterType.Decimal
-                    && ((CandlesParameterDecimal)paramInTab).ValueDecimal != ((CandlesParameterDecimal)paramInScreener).ValueDecimal)
-                {
-                    return false;
+                    if (paramInTab.Type == CandlesParameterType.StringCollection
+                        && ((CandlesParameterString)paramInTab).ValueString != ((CandlesParameterString)paramInScreener).ValueString)
+                    {
+                        return false;
+                    }
+                    else if (paramInTab.Type == CandlesParameterType.Int
+                        && ((CandlesParameterInt)paramInTab).ValueInt != ((CandlesParameterInt)paramInScreener).ValueInt)
+                    {
+                        return false;
+                    }
+                    else if (paramInTab.Type == CandlesParameterType.Bool
+                        && ((CandlesParameterBool)paramInTab).ValueBool != ((CandlesParameterBool)paramInScreener).ValueBool)
+                    {
+                        return false;
+                    }
+                    else if (paramInTab.Type == CandlesParameterType.Decimal
+                        && ((CandlesParameterDecimal)paramInTab).ValueDecimal != ((CandlesParameterDecimal)paramInScreener).ValueDecimal)
+                    {
+                        return false;
+                    }
                 }
             }
 
@@ -1894,10 +2184,10 @@ namespace OsEngine.OsTrader.Panels.Tab
 
                     if (_previousActiveRow < SecuritiesDataGrid.Rows.Count)
                     {
-                        SecuritiesDataGrid.Rows[_previousActiveRow].DefaultCellStyle.ForeColor = System.Drawing.Color.FromArgb(154, 156, 158);
+                        SecuritiesDataGrid.Rows[_previousActiveRow].DefaultCellStyle.ForeColor = Themes.ThemeManager.GetColorWinForms("GridTextColor");
                     }
 
-                    SecuritiesDataGrid.Rows[tabRow].DefaultCellStyle.ForeColor = System.Drawing.Color.FromArgb(255, 255, 255);
+                    SecuritiesDataGrid.Rows[tabRow].DefaultCellStyle.ForeColor = Themes.ThemeManager.GetColorWinForms("GridSelectionForeColor");
                     _previousActiveRow = tabRow;
                 }
             }
@@ -2126,7 +2416,7 @@ namespace OsEngine.OsTrader.Panels.Tab
             }
             catch (Exception error)
             {
-                System.Windows.MessageBox.Show(error.ToString());
+                SendNewLogMessage(error.ToString(), LogMessageType.Error);
             }
         }
 
@@ -2544,7 +2834,7 @@ namespace OsEngine.OsTrader.Panels.Tab
             second.ManualPositionSupport.SecondToCloseIsOn = control.SecondToCloseIsOn;
             second.ManualPositionSupport.SecondToOpenIsOn = control.SecondToOpenIsOn;
             second.ManualPositionSupport.SetbackToCloseIsOn = control.SetbackToCloseIsOn;
-            second.ManualPositionSupport.SetbackToClosePosition = control.SetbackToOpenPosition;
+            second.ManualPositionSupport.SetbackToClosePosition = control.SetbackToClosePosition;
             second.ManualPositionSupport.SetbackToOpenIsOn = control.SetbackToOpenIsOn;
             second.ManualPositionSupport.SetbackToOpenPosition = control.SetbackToOpenPosition;
             second.ManualPositionSupport.StopDistance = control.StopDistance;
@@ -2553,6 +2843,7 @@ namespace OsEngine.OsTrader.Panels.Tab
             second.ManualPositionSupport.TypeDoubleExitOrder = control.TypeDoubleExitOrder;
             second.ManualPositionSupport.ValuesType = control.ValuesType;
             second.ManualPositionSupport.OrderTypeTime = control.OrderTypeTime;
+            second.ManualPositionSupport.LimitsMakerOnly = control.LimitsMakerOnly;
             second.ManualPositionSupport.Save();
         }
 
@@ -2810,6 +3101,177 @@ namespace OsEngine.OsTrader.Panels.Tab
 
         #endregion
 
+        #region Creating / deleting / storing market depth indicators
+
+        /// <summary>
+        /// Создать стаканный индикатор для скринера.
+        /// Индикатор создаётся на каждой вкладке скринера (по каждой бумаге).
+        /// </summary>
+        /// <param name="num">Номер индикатора (уникальный в рамках скринера).</param>
+        /// <param name="type">Тип индикатора (имя класса, напр. "Spread", "Iceberg").</param>
+        /// <param name="param">Параметры индикатора в порядке объявления (без HistoryDepth).</param>
+        /// <param name="canDelete">Может ли пользователь удалить индикатор.</param>
+        public void CreateMarketDepthIndicator(int num, string type, List<string> param, bool canDelete)
+        {
+            try
+            {
+                if (_marketDepthIndicators.Find(ind => ind.Num == num) != null)
+                {
+                    NeedToReloadTabs = true;
+                    return;
+                }
+
+                IndicatorOnTabs indicator = new IndicatorOnTabs();
+                indicator.Num = num;
+                indicator.Type = type;
+                indicator.NameArea = "";
+                indicator.CanDelete = canDelete;
+
+                if (param != null)
+                {
+                    indicator.Parameters = param;
+                }
+
+                _marketDepthIndicators.Add(indicator);
+
+                SaveMarketDepthIndicators();
+                ReloadMarketDepthIndicatorsOnTabs();
+            }
+            catch (Exception ex)
+            {
+                SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+            }
+        }
+
+        private void LoadMarketDepthIndicators()
+        {
+            if (!File.Exists(@"Engine\" + TabName + @"ScreenerMarketDepthIndicators.txt"))
+            {
+                return;
+            }
+
+            try
+            {
+                using (StreamReader reader = new StreamReader(@"Engine\" + TabName + @"ScreenerMarketDepthIndicators.txt"))
+                {
+                    while (reader.EndOfStream == false)
+                    {
+                        string str = reader.ReadLine();
+
+                        IndicatorOnTabs ind = new IndicatorOnTabs();
+                        ind.SetFromStr(str);
+                        _marketDepthIndicators.Add(ind);
+                    }
+
+                    reader.Close();
+                }
+            }
+            catch (Exception)
+            {
+                // ignore
+            }
+        }
+
+        private void SaveMarketDepthIndicators()
+        {
+            try
+            {
+                using (StreamWriter writer = new StreamWriter(@"Engine\" + TabName + @"ScreenerMarketDepthIndicators.txt", false))
+                {
+                    for (int i = 0; i < _marketDepthIndicators.Count; i++)
+                    {
+                        writer.WriteLine(_marketDepthIndicators[i].GetSaveStr());
+                    }
+
+                    writer.Close();
+                }
+            }
+            catch (Exception)
+            {
+                // ignore
+            }
+        }
+
+        /// <summary>
+        /// Стаканные индикаторы скринера
+        /// </summary>
+        public List<IndicatorOnTabs> _marketDepthIndicators = new List<IndicatorOnTabs>();
+
+        public void ReloadMarketDepthIndicatorsOnTabs()
+        {
+            for (int i = 0; i < _marketDepthIndicators.Count; i++)
+            {
+                CreateMarketDepthIndicatorOnTabs(_marketDepthIndicators[i]);
+            }
+        }
+
+        private void CreateMarketDepthIndicatorOnTabs(IndicatorOnTabs ind)
+        {
+            for (int i = 0; i < Tabs.Count; i++)
+            {
+                string name = ind.Num + ind.Type + TabName;
+
+                AMarketDepth newIndicator = Tabs[i].MarketDepthIndicators.CreateIndicator(ind.Type, name, ind.CanDelete);
+
+                if (newIndicator == null)
+                {
+                    continue;
+                }
+
+                SetMarketDepthIndicatorParameters(newIndicator, ind.Parameters);
+
+                newIndicator.Save();
+            }
+        }
+
+        private void SetMarketDepthIndicatorParameters(AMarketDepth indicator, List<string> parameters)
+        {
+            if (parameters == null || parameters.Count == 0)
+            {
+                return;
+            }
+
+            List<IParameterMarketDepth> userParams = new List<IParameterMarketDepth>();
+
+            for (int i = 0; i < indicator.Parameters.Count; i++)
+            {
+                if (indicator.Parameters[i].Name != "HistoryDepth")
+                {
+                    userParams.Add(indicator.Parameters[i]);
+                }
+            }
+
+            if (parameters.Count != userParams.Count)
+            {
+                return;
+            }
+
+            for (int i = 0; i < userParams.Count; i++)
+            {
+                IParameterMarketDepth param = userParams[i];
+                string value = parameters[i];
+
+                if (param.Type == MarketDepthParameterType.Int)
+                {
+                    ((ParameterMarketDepthInt)param).ValueInt = Convert.ToInt32(value);
+                }
+                else if (param.Type == MarketDepthParameterType.Decimal)
+                {
+                    ((ParameterMarketDepthDecimal)param).ValueDecimal = value.ToDecimal();
+                }
+                else if (param.Type == MarketDepthParameterType.Bool)
+                {
+                    ((ParameterMarketDepthBool)param).ValueBool = Convert.ToBoolean(value);
+                }
+                else if (param.Type == MarketDepthParameterType.String)
+                {
+                    ((ParameterMarketDepthString)param).ValueString = value;
+                }
+            }
+        }
+
+        #endregion
+
         #region Log
 
         /// <summary>
@@ -2823,7 +3285,7 @@ namespace OsEngine.OsTrader.Panels.Tab
             }
             else if (type == LogMessageType.Error)
             {
-                System.Windows.MessageBox.Show(message);
+                ServerMaster.SendNewLogMessage(message, LogMessageType.Error);
             }
         }
 
@@ -2983,6 +3445,11 @@ namespace OsEngine.OsTrader.Panels.Tab
                     CandleFinishedEvent(candles, tab);
                 }
 
+                if (CandleFinishedWithScreenerEvent != null && EventsIsOn)
+                {
+                    CandleFinishedWithScreenerEvent(candles, tab, this);
+                }
+
                 SynchFinishCandlesMethod(candles, tab);
             };
 
@@ -2992,6 +3459,11 @@ namespace OsEngine.OsTrader.Panels.Tab
                 {
                     CandleUpdateEvent(candles, tab);
                 }
+
+                if (CandleUpdateWithScreenerEvent != null && EventsIsOn)
+                {
+                    CandleUpdateWithScreenerEvent(candles, tab, this);
+                }
             };
             tab.NewTickEvent += (Trade trade) =>
             {
@@ -2999,12 +3471,22 @@ namespace OsEngine.OsTrader.Panels.Tab
                 {
                     NewTickEvent(trade, tab);
                 }
+
+                if (NewTickWithScreenerEvent != null && EventsIsOn)
+                {
+                    NewTickWithScreenerEvent(trade, tab, this);
+                }
             };
             tab.MyTradeEvent += (MyTrade trade) =>
             {
                 if (MyTradeEvent != null && EventsIsOn)
                 {
                     MyTradeEvent(trade, tab);
+                }
+
+                if (MyTradeWithScreenerEvent != null && EventsIsOn)
+                {
+                    MyTradeWithScreenerEvent(trade, tab, this);
                 }
             };
             tab.MyTradeEvent += (MyTrade trade) =>
@@ -3020,12 +3502,22 @@ namespace OsEngine.OsTrader.Panels.Tab
                 {
                     OrderUpdateEvent(order, tab);
                 }
+
+                if (OrderUpdateWithScreenerEvent != null && EventsIsOn)
+                {
+                    OrderUpdateWithScreenerEvent(order, tab, this);
+                }
             };
             tab.MarketDepthUpdateEvent += (MarketDepth md) =>
             {
                 if (MarketDepthUpdateEvent != null && EventsIsOn)
                 {
                     MarketDepthUpdateEvent(md, tab);
+                }
+
+                if (MarketDepthUpdateWithScreenerEvent != null && EventsIsOn)
+                {
+                    MarketDepthUpdateWithScreenerEvent(md, tab, this);
                 }
             };
 
@@ -3035,6 +3527,11 @@ namespace OsEngine.OsTrader.Panels.Tab
                 {
                     BestBidAskChangeEvent(bid, ask, tab);
                 }
+
+                if (BestBidAskChangeWithScreenerEvent != null && EventsIsOn)
+                {
+                    BestBidAskChangeWithScreenerEvent(bid, ask, tab, this);
+                }
             };
 
             tab.PositionClosingSuccesEvent += (Position pos) =>
@@ -3043,12 +3540,22 @@ namespace OsEngine.OsTrader.Panels.Tab
                 {
                     PositionClosingSuccesEvent(pos, tab);
                 }
+
+                if (PositionClosingSuccesWithScreenerEvent != null && EventsIsOn)
+                {
+                    PositionClosingSuccesWithScreenerEvent(pos, tab, this);
+                }
             };
             tab.PositionOpeningSuccesEvent += (Position pos) =>
             {
                 if (PositionOpeningSuccesEvent != null && EventsIsOn)
                 {
                     PositionOpeningSuccesEvent(pos, tab);
+                }
+
+                if (PositionOpeningSuccesWithScreenerEvent != null && EventsIsOn)
+                {
+                    PositionOpeningSuccesWithScreenerEvent(pos, tab, this);
                 }
             };
             tab.PositionNetVolumeChangeEvent += (Position pos) =>
@@ -3057,12 +3564,22 @@ namespace OsEngine.OsTrader.Panels.Tab
                 {
                     PositionNetVolumeChangeEvent(pos, tab);
                 }
+
+                if (PositionNetVolumeChangeWithScreenerEvent != null && EventsIsOn)
+                {
+                    PositionNetVolumeChangeWithScreenerEvent(pos, tab, this);
+                }
             };
             tab.PositionOpeningFailEvent += (Position pos) =>
             {
                 if (PositionOpeningFailEvent != null && EventsIsOn)
                 {
                     PositionOpeningFailEvent(pos, tab);
+                }
+
+                if (PositionOpeningFailWithScreenerEvent != null && EventsIsOn)
+                {
+                    PositionOpeningFailWithScreenerEvent(pos, tab, this);
                 }
             };
             tab.PositionClosingFailEvent += (Position pos) =>
@@ -3071,12 +3588,22 @@ namespace OsEngine.OsTrader.Panels.Tab
                 {
                     PositionClosingFailEvent(pos, tab);
                 }
+
+                if (PositionClosingFailWithScreenerEvent != null && EventsIsOn)
+                {
+                    PositionClosingFailWithScreenerEvent(pos, tab, this);
+                }
             };
             tab.PositionStopActivateEvent += (Position pos) =>
             {
                 if (PositionStopActivateEvent != null && EventsIsOn)
                 {
                     PositionStopActivateEvent(pos, tab);
+                }
+
+                if (PositionStopActivateWithScreenerEvent != null && EventsIsOn)
+                {
+                    PositionStopActivateWithScreenerEvent(pos, tab, this);
                 }
             };
             tab.PositionProfitActivateEvent += (Position pos) =>
@@ -3085,12 +3612,22 @@ namespace OsEngine.OsTrader.Panels.Tab
                 {
                     PositionProfitActivateEvent(pos, tab);
                 }
+
+                if (PositionProfitActivateWithScreenerEvent != null && EventsIsOn)
+                {
+                    PositionProfitActivateWithScreenerEvent(pos, tab, this);
+                }
             };
             tab.PositionBuyAtStopActivateEvent += (Position pos) =>
             {
                 if (PositionBuyAtStopActivateEvent != null && EventsIsOn)
                 {
                     PositionBuyAtStopActivateEvent(pos, tab);
+                }
+
+                if (PositionBuyAtStopActivateWithScreenerEvent != null && EventsIsOn)
+                {
+                    PositionBuyAtStopActivateWithScreenerEvent(pos, tab, this);
                 }
             };
             tab.PositionSellAtStopActivateEvent += (Position pos) =>
@@ -3099,6 +3636,11 @@ namespace OsEngine.OsTrader.Panels.Tab
                 {
                     PositionSellAtStopActivateEvent(pos, tab);
                 }
+
+                if (PositionSellAtStopActivateWithScreenerEvent != null && EventsIsOn)
+                {
+                    PositionSellAtStopActivateWithScreenerEvent(pos, tab, this);
+                }
             };
         }
 
@@ -3106,6 +3648,11 @@ namespace OsEngine.OsTrader.Panels.Tab
         /// New tab creation event
         /// </summary>
         public event Action<BotTabSimple> NewTabCreateEvent;
+
+        /// <summary>
+        /// New tab creation event. Screener is passed in the last parameter
+        /// </summary>
+        public event Action<BotTabSimple, BotTabScreener> NewTabCreateWithScreenerEvent;
 
         /// <summary>
         /// Last candle finished
@@ -3188,6 +3735,86 @@ namespace OsEngine.OsTrader.Panels.Tab
         public event Action<Position, BotTabSimple> PositionSellAtStopActivateEvent;
 
         /// <summary>
+        /// Last candle finished. Screener is passed in the last parameter
+        /// </summary>
+        public event Action<List<Candle>, BotTabSimple, BotTabScreener> CandleFinishedWithScreenerEvent;
+
+        /// <summary>
+        /// Last candle update. Screener is passed in the last parameter
+        /// </summary>
+        public event Action<List<Candle>, BotTabSimple, BotTabScreener> CandleUpdateWithScreenerEvent;
+
+        /// <summary>
+        /// New trades. Screener is passed in the last parameter
+        /// </summary>
+        public event Action<Trade, BotTabSimple, BotTabScreener> NewTickWithScreenerEvent;
+
+        /// <summary>
+        /// My new trade event. Screener is passed in the last parameter
+        /// </summary>
+        public event Action<MyTrade, BotTabSimple, BotTabScreener> MyTradeWithScreenerEvent;
+
+        /// <summary>
+        /// Updated order. Screener is passed in the last parameter
+        /// </summary>
+        public event Action<Order, BotTabSimple, BotTabScreener> OrderUpdateWithScreenerEvent;
+
+        /// <summary>
+        /// New marketDepth. Screener is passed in the last parameter
+        /// </summary>
+        public event Action<MarketDepth, BotTabSimple, BotTabScreener> MarketDepthUpdateWithScreenerEvent;
+
+        /// <summary>
+        /// Bid ask change. Screener is passed in the last parameter
+        /// </summary>
+        public event Action<decimal, decimal, BotTabSimple, BotTabScreener> BestBidAskChangeWithScreenerEvent;
+
+        /// <summary>
+        /// Position successfully closed. Screener is passed in the last parameter
+        /// </summary>
+        public event Action<Position, BotTabSimple, BotTabScreener> PositionClosingSuccesWithScreenerEvent;
+
+        /// <summary>
+        /// Position successfully opened. Screener is passed in the last parameter
+        /// </summary>
+        public event Action<Position, BotTabSimple, BotTabScreener> PositionOpeningSuccesWithScreenerEvent;
+
+        /// <summary>
+        /// Open position volume has changed. Screener is passed in the last parameter
+        /// </summary>
+        public event Action<Position, BotTabSimple, BotTabScreener> PositionNetVolumeChangeWithScreenerEvent;
+
+        /// <summary>
+        /// Opening position failed. Screener is passed in the last parameter
+        /// </summary>
+        public event Action<Position, BotTabSimple, BotTabScreener> PositionOpeningFailWithScreenerEvent;
+
+        /// <summary>
+        /// Position closing failed. Screener is passed in the last parameter
+        /// </summary>
+        public event Action<Position, BotTabSimple, BotTabScreener> PositionClosingFailWithScreenerEvent;
+
+        /// <summary>
+        /// A stop order is activated for the position. Screener is passed in the last parameter
+        /// </summary>
+        public event Action<Position, BotTabSimple, BotTabScreener> PositionStopActivateWithScreenerEvent;
+
+        /// <summary>
+        /// A profit order is activated for the position. Screener is passed in the last parameter
+        /// </summary>
+        public event Action<Position, BotTabSimple, BotTabScreener> PositionProfitActivateWithScreenerEvent;
+
+        /// <summary>
+        /// Stop order buy activated. Screener is passed in the last parameter
+        /// </summary>
+        public event Action<Position, BotTabSimple, BotTabScreener> PositionBuyAtStopActivateWithScreenerEvent;
+
+        /// <summary>
+        /// Stop order sell activated. Screener is passed in the last parameter
+        /// </summary>
+        public event Action<Position, BotTabSimple, BotTabScreener> PositionSellAtStopActivateWithScreenerEvent;
+
+        /// <summary>
         /// Source removed
         /// </summary>
         public event Action TabDeletedEvent;
@@ -3200,12 +3827,15 @@ namespace OsEngine.OsTrader.Panels.Tab
         {
             try
             {
-                if (CandlesSyncFinishedEvent == null)
+                if (CandlesSyncFinishedEvent != null)
                 {
-                    return;
+                    CandlesSyncFinishedEvent(Tabs);
                 }
 
-                CandlesSyncFinishedEvent(Tabs);
+                if (CandlesSyncFinishedWithScreenerEvent != null)
+                {
+                    CandlesSyncFinishedWithScreenerEvent(Tabs, this);
+                }
             }
             catch (Exception error)
             {
@@ -3264,6 +3894,11 @@ namespace OsEngine.OsTrader.Panels.Tab
                 Thread.Sleep(2000);
 
                 CandlesSyncFinishedEvent(Tabs);
+
+                if (CandlesSyncFinishedWithScreenerEvent != null)
+                {
+                    CandlesSyncFinishedWithScreenerEvent(Tabs, this);
+                }
             }
             catch (Exception error)
             {
@@ -3275,6 +3910,11 @@ namespace OsEngine.OsTrader.Panels.Tab
         /// Candles have finished for all screener sources.
         /// </summary>
         public event Action<List<BotTabSimple>> CandlesSyncFinishedEvent;
+
+        /// <summary>
+        /// Candles have finished for all screener sources. Screener is passed in the last parameter
+        /// </summary>
+        public event Action<List<BotTabSimple>, BotTabScreener> CandlesSyncFinishedWithScreenerEvent;
 
         #endregion
 

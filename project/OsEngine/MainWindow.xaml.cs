@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Your rights to use code governed by this license https://github.com/AlexWan/OsEngine/blob/master/LICENSE
  * Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
 */
@@ -20,7 +20,9 @@ using OsEngine.PrimeSettings;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
+using System.Net.Security;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
@@ -31,17 +33,12 @@ using System.Windows.Media;
 using System.Windows.Threading;
 using System.Text.Json;
 using OsEngine.UpdateModule;
+using OsEngine.MCP;
 
 namespace OsEngine
 {
-
-    /// <summary>
-    /// Application start screen
-    /// Стартовое окно приложения
-    /// </summary>
     public partial class MainWindow
     {
-
         private static MainWindow _window;
 
         private UpdateResponse _updServerResp;
@@ -55,22 +52,27 @@ namespace OsEngine
 
         public static bool DebuggerIsWork;
 
-        /// <summary>
-        ///  is application running
-        /// работает ли приложение или закрывается
-        /// </summary>
         public static bool ProccesIsWorked;
+
+        private StartProgram _startProgram = StartProgram.IsMainWindow;
 
         public MainWindow()
         {
-            Process ps = Process.GetCurrentProcess();
-            ps.PriorityClass = ProcessPriorityClass.RealTime;
-
             InitializeComponent();
+
+            Logging.StartupCrashGuard.Detach();
+
             AppDomain.CurrentDomain.UnhandledException += CurrentDomain_UnhandledException;
             TaskScheduler.UnobservedTaskException += TaskScheduler_UnobservedTaskException;
+            System.Windows.Forms.Application.ThreadException += WinForms_ThreadException; // BUG-0202, см. хендлер
+            Application.Current.DispatcherUnhandledException += App_DispatcherUnhandledException;
 
             this.Closing += MainWindow_Closing;
+
+            RePaintThemeImages();
+            Themes.ThemeManager.ThemeChangedEvent += MainWindow_ThemeChangedEvent;
+
+            ButtonTheme.Click += ButtonTheme_Click;
 
             try
             {
@@ -78,36 +80,42 @@ namespace OsEngine
                 if (winVersion < 6)
                 {
                     MessageBox.Show(OsLocalization.MainWindow.Message1);
-                    Close();
+                    AbortStartup();
+                    return;
                 }
                 if (!CheckDotNetVersion())
                 {
-                    Close();
+                    AbortStartup();
+                    return;
                 }
 
                 if (!CheckWorkWithDirectory())
                 {
                     MessageBox.Show(OsLocalization.MainWindow.Message2);
-                    Close();
+                    AbortStartup();
+                    return;
                 }
 
                 if (!CheckOutSomeLibrariesNearby())
                 {
                     MessageBox.Show(OsLocalization.MainWindow.Message6);
-                    Close();
+                    AbortStartup();
+                    return;
                 }
 
                 if (!CheckAlreadyWorkEngine())
                 {
                     MessageBox.Show(OsLocalization.MainWindow.Message7);
-                    Close();
+                    AbortStartup();
+                    return;
                 }
 
             }
             catch (Exception)
             {
                 MessageBox.Show(OsLocalization.MainWindow.Message3);
-                Close();
+                AbortStartup();
+                return;
             }
 
             if (Debugger.IsAttached)
@@ -121,6 +129,7 @@ namespace OsEngine
             _window = this;
 
             ServerMaster.Activate();
+            TrySetRealTimePriority();
             SystemUsageAnalyzeMaster.Activate();
 
             Thread.CurrentThread.CurrentCulture = OsLocalization.CurCulture;
@@ -134,6 +143,17 @@ namespace OsEngine
             ChangeText();
             OsLocalization.LocalizationTypeChangeEvent += ChangeText;
 
+            if (BlockMaster.IsBlocked == true)
+            {
+                BlockInterface();
+            }
+            else
+            {
+                UnblockInterface();
+            }
+
+            StartMcpHost();
+
             CommandLineInterfaceProcess();
 
             Task.Run(ClearOptimizerWorkResults);
@@ -144,15 +164,6 @@ namespace OsEngine
             GlobalGUILayout.Listen(this, "mainWindow");
 
             VideoGrid.MouseDown += VideoGrid_MouseDown;
-
-            if (BlockMaster.IsBlocked == true)
-            {
-                BlockInterface();
-            }
-            else
-            {
-                UnblockInterface();
-            }
 
             if (InteractiveInstructions.MainMenu.AllInstructionsInClass == null
               || InteractiveInstructions.MainMenu.AllInstructionsInClass.Count == 0)
@@ -171,6 +182,1480 @@ namespace OsEngine
             this.ContentRendered += MainWindow_ContentRendered;
 
             StartButtonBlinkAnimation();
+        }
+
+        // PriorityClass=RealTime без try/catch ронял запуск через XamlParseException (ACCESS_DENIED
+        // в ограниченных средах). Ставится после ServerMaster.Activate(): к этой точке лог жив.
+        private void TrySetRealTimePriority()
+        {
+            try
+            {
+                Process ps = Process.GetCurrentProcess();
+                TryApplyPriorityChain(
+                    p => ps.PriorityClass = p,
+                    () => ps.PriorityClass,
+                    ServerMaster.SendNewLogMessage,
+                    out _);
+            }
+            catch (Exception)
+            {
+                // страховка: сбой установки приоритета не должен рождать краш
+            }
+        }
+
+        // Pure-цепочка с инъектируемыми делегатами (unit-тестируемость): RealTime → High → AboveNormal,
+        // Normal не пробуем — при отказе процесс остаётся в запущенном классе. lastError при успехе
+        // не обнулять: System-текст деградации требует причину.
+        internal static bool TryApplyPriorityChain(
+            Action<ProcessPriorityClass> setPriority,
+            Func<ProcessPriorityClass> getPriority,
+            Action<string, Logging.LogMessageType> log,
+            out Exception lastError)
+        {
+            ProcessPriorityClass[] chain =
+            {
+                ProcessPriorityClass.RealTime,
+                ProcessPriorityClass.High,
+                ProcessPriorityClass.AboveNormal
+            };
+            lastError = null;
+            ProcessPriorityClass? applied = null;
+            for (int i = 0; i < chain.Length; i++)
+            {
+                try
+                {
+                    setPriority(chain[i]);
+                    applied = chain[i];
+                    break;
+                }
+                catch (Exception e)
+                {
+                    lastError = e;
+                }
+            }
+            if (applied == ProcessPriorityClass.RealTime)
+            {
+                return true; // штатный путь — тихо
+            }
+            if (applied != null)
+            {
+                log("Process priority degraded to " + applied + ". " + lastError, Logging.LogMessageType.System);
+                return true;
+            }
+            string actual = "unknown";
+            try { actual = getPriority().ToString(); }
+            catch (Exception) { }
+            log("Process priority could not be set, running as launched (" + actual + "). " + lastError, Logging.LogMessageType.Error);
+            return false;
+        }
+
+        private int _shutdownRequested;
+        private int _shutdownCompleted;
+        private bool _applicationShutdownRequested;
+
+        private void MainWindow_Closing(object sender, System.ComponentModel.CancelEventArgs e)
+        {
+            try
+            {
+                _aiAdTimer?.Stop();
+
+                if (_applicationShutdownRequested || Dispatcher.HasShutdownStarted)
+                { // завершение инициировано извне (Application.Shutdown) — окна не показываем
+                    TerminateNow();
+                    return;
+                }
+
+                if (_shutdownRequested != 0)
+                { // повторный Closing во время уже идущего завершения
+                    e.Cancel = true;
+                    return;
+                }
+
+                e.Cancel = true; // завершаемся сами по сторожу (немодально, с досохранением)
+                BeginGracefulShutdown(false);
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        /// <summary>Приложение уже завершается извне — MainWindow_Closing не должен показывать окна. UI-поток.</summary>
+        public void NotifyApplicationShutdownInitiated()
+        {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.Invoke(NotifyApplicationShutdownInitiated);
+                return;
+            }
+
+            _applicationShutdownRequested = true;
+        }
+
+        /// <summary>
+        /// Программный грациозный выход. Заменил Application.Shutdown() в путях обновления:
+        /// Shutdown асинхронно перечисляет окна и кидает VerifyNotClosing, если окно уже в Closing.
+        /// Идемпотенен через сторож BeginGracefulShutdown; programmatic=true гасит модные подтверждения закрытия.
+        /// </summary>
+        public void RequestProgrammaticShutdown()
+        {
+            try
+            {
+                if (!Dispatcher.CheckAccess())
+                {
+                    Dispatcher.Invoke(() => RequestProgrammaticShutdown());
+                    return;
+                }
+
+                _applicationShutdownRequested = true;
+                BeginGracefulShutdown(true);
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        /// <summary>Завершение уже инициировано любым путём. Зонд для вызывающих до spawn/Show-операций UI-потока.</summary>
+        public bool ShutdownInProgress => Interlocked.CompareExchange(ref _shutdownRequested, 0, 0) != 0;
+
+        /// <summary>Немедленное завершение: из любого потока, без WPF-операций, Kill не ждёт UI-диспетчер.</summary>
+        private void TerminateNow()
+        {
+            if (Interlocked.CompareExchange(ref _shutdownRequested, 1, 0) != 0)
+            {
+                return;
+            }
+
+            // ссылку захватываем ДО StopMcpHost (он обнуляет _mcpMaster), уведомление — best-effort, не блокирует Kill
+            McpMaster mcp = _mcpMaster;
+
+            try { ProccesIsWorked = false; } catch { }
+            try { GlobalGUILayout.IsClosed = true; } catch { }
+
+            try { Task.Run(() => { try { mcp?.SendTerminalStopped("shutting_down"); } catch { } }); } catch { }
+
+            try { StopMcpHost(); } catch { }
+            try { Process.GetCurrentProcess().Kill(); } catch { }
+        }
+
+        /// <summary>Грациозное завершение: только UI-поток, немодальное окно + гарантированный Kill сторожем (~12 с).</summary>
+        private void BeginGracefulShutdown(bool programmatic)
+        {
+            try
+            {
+                if (!Dispatcher.CheckAccess())
+                {
+                    Dispatcher.Invoke(() => BeginGracefulShutdown(programmatic));
+                    return;
+                }
+
+                if (Interlocked.CompareExchange(ref _shutdownRequested, 1, 0) != 0)
+                {
+                    return;
+                }
+
+                if (programmatic)
+                {
+                    _isProgrammaticClose = true;
+                }
+
+                // сторож вооружается ДО UI-операций: исключение ниже не оставит скрытого «зомби» без Kill
+                Task.Run(async () =>
+                {
+                    try { await Task.Delay(12000).ConfigureAwait(false); } catch { }
+                    if (Interlocked.Exchange(ref _shutdownCompleted, 1) == 0)
+                    {
+                        try { Process.GetCurrentProcess().Kill(); } catch { }
+                    }
+                });
+
+                ProccesIsWorked = false;
+
+                // отключаем все коннекторы до остановки MCP: иначе gRPC-стримы (TInvest и др.)
+                // остаются живыми после завершения и «глючат» токен на сервере биржи
+                try { ServerMaster.AbortAll(); }
+                catch (Exception ex) { ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error); }
+
+                _mcpMaster?.SendTerminalStopped("shutting_down");
+                StopMcpHost();
+                GlobalGUILayout.IsClosed = true;
+
+                try { _activeModeWindow?.Close(); } catch (Exception ex) { ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error); }
+
+                Hide();
+
+                AwaitObject awaitObj = new AwaitObject(OsLocalization.Trader.Label391, 100, 0, true);
+                AwaitUi awaitUi = new AwaitUi(awaitObj);
+                awaitUi.Show();
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        /// <summary>Явный выход при неудачной инициализации (OnExplicitShutdown не завершит процесс по последнему окну).</summary>
+        private void AbortStartup()
+        {
+            try { Process.GetCurrentProcess().Kill(); } catch { }
+        }
+
+        private void MainWindow_ContentRendered(object sender, EventArgs e)
+        {
+            Task.Run(() =>
+            {
+                Thread.Sleep(1000);
+                try
+                {
+                    ChangeText();
+                }
+                catch
+                {
+                    // ignore
+                }
+            });
+        }
+
+        private void ChangeText()
+        {
+
+            if (ImageGear.Dispatcher.CheckAccess() == false)
+            {
+                ImageGear.Dispatcher.Invoke(new Action(ChangeText));
+                return;
+            }
+
+            Title = OsLocalization.MainWindow.Title;
+            BlockDataLabel.Content = OsLocalization.MainWindow.BlockDataLabel;
+            BlockTestingLabel.Content = OsLocalization.MainWindow.BlockTestingLabel;
+            BlockTradingLabel.Content = OsLocalization.MainWindow.BlockTradingLabel;
+            ButtonData.Content = OsLocalization.MainWindow.OsDataName;
+            ButtonConverter.Content = OsLocalization.MainWindow.OsConverter;
+            ButtonTester.Content = OsLocalization.MainWindow.OsTesterName;
+            ButtonOptimizer.Content = OsLocalization.MainWindow.OsOptimizerName;
+
+            ButtonRobot.Content = OsLocalization.MainWindow.OsBotStationName;
+            ButtonApi.Content = OsLocalization.MainWindow.OsApiButtonName;
+            ButtonCandleConverter.Content = OsLocalization.MainWindow.OsCandleConverter;
+
+            ButtonTesterLight.Content = OsLocalization.MainWindow.OsTesterLiteName;
+            ButtonRobotLight.Content = OsLocalization.MainWindow.OsBotStationLiteName;
+            ButtonCapitalAllocation.Content = OsLocalization.MainWindow.OsCapitalAllocationName;
+
+            ChangeButtonCommits();
+
+            if (OsLocalization.CurLocalization == OsLocalization.OsLocalType.Ru)
+            {
+                VideoGrid.Visibility = Visibility.Visible;
+                this.Height = 460;
+                GifT.Play();
+            }
+            else
+            {
+                this.Height = 345;
+                VideoGrid.Visibility = Visibility.Collapsed;
+            }
+        }
+
+        void CurrentDomain_UnhandledException(object sender, UnhandledExceptionEventArgs e)
+        {
+            if (e.ExceptionObject is OutOfMemoryException)
+            { // фатальное исключение: не строим отчёт, лог и UI-диалог под OOM
+                return;
+            }
+
+            string message = OsLocalization.MainWindow.Message5 + " THREAD " + e.ExceptionObject;
+
+            message = _startProgram + "  " + message;
+
+            message = System.Reflection.Assembly.GetExecutingAssembly() + "\n" + message;
+
+            _messageToCrashServer = "Crash% " + message;
+            Thread worker = new Thread(SendMessageInCrashServer);
+            worker.Start();
+
+            ServerMaster.SendNewLogMessage(message, Logging.LogMessageType.Error);
+
+            if (PrimeSettingsMaster.RebootTradeUiLight == true &&
+                RobotUiLite.IsRobotUiLightStart)
+            {
+                Reboot(message);
+            }
+        }
+
+        // BUG-0202: WinForms-канал необработанных исключений. Механизм ThreadContext покрывает главный
+        // UI-тред; второстепенные Forms-циклы не покрыты осознанно. Метка THREAD/TASK/UI — третья ветка,
+        // антидубль по экземпляру: соседний повтор того же исключения не отчитывается второй раз.
+        // Аргумент делегата живёт в System.Threading (в System.Windows.Forms его нет — CS0234 на net10).
+        private object _lastWinFormsThreadException;
+
+        void WinForms_ThreadException(object sender, System.Threading.ThreadExceptionEventArgs e)
+        {
+            try
+            {
+                Exception ex = e.Exception;
+                if (ex is OutOfMemoryException)
+                { // фатальное: Crash%-отчёт не строим, след по образцу записей гварда в CrashStart.log, затем
+                  // мгновенная смерть: Kill — дом-примитив (:339/:369/:401); Exit не используем — он гоняет
+                  // финализаторы/ProcessExit (риск зависания под OOM), а его бросок CatchException проглотил бы (зомби)
+                    Logging.StartupCrashGuard.LogStartup("WinForms THREAD OOM (not reported), exiting.");
+                    try { Process.GetCurrentProcess().Kill(); } catch { }
+                    return;
+                }
+                if (ex != null && ex.ToString().Contains("(995)"))
+                { // игнорируем прерывания потока за делом по кансел токену
+                    return;
+                }
+                if (ReferenceEquals(Interlocked.Exchange(ref _lastWinFormsThreadException, ex), ex))
+                {
+                    return;
+                }
+                string error = ex.ToString();
+                if (error.Length > 32768)
+                { // хардканим канал: гигантская строка рвёт отчёт (и сам дефолтный диалог до фикса)
+                    int dropped = error.Length - 32768;
+                    error = error.Substring(0, 32768) + " ...[TRUNCATED " + dropped + " chars]";
+                }
+                string message = OsLocalization.MainWindow.Message5 + " WinForms THREAD " + error;
+                message = _startProgram + "  " + message;
+                message = System.Reflection.Assembly.GetExecutingAssembly() + "\n" + message;
+                _messageToCrashServer = "Crash% " + message;
+                Thread worker = new Thread(SendMessageInCrashServer);
+                worker.Start();
+                ServerMaster.SendNewLogMessage(message, Logging.LogMessageType.Error);
+                return; // политика «продолжить»: дефолтного диалога Continue/Quit больше нет
+            }
+            catch (Exception error2)
+            { // хендлер не бросает никогда: фолбэк на файловый лог, реентранса в диалог нет
+                Logging.StartupCrashGuard.LogStartup("WinForms ThreadException report failed. " + error2);
+            }
+        }
+
+        private void TaskScheduler_UnobservedTaskException(object sender, UnobservedTaskExceptionEventArgs e)
+        {
+            if (e.Exception is OutOfMemoryException
+                || (e.Exception != null && e.Exception.InnerException is OutOfMemoryException))
+            { // фатальное исключение: не строим отчёт, лог и UI-диалог под OOM
+                e.SetObserved();
+                return;
+            }
+
+            if (e.Exception != null
+                && e.Exception.ToString().Contains("(995):") == true)
+            { // игнорируем прерывания потока за делом по кансел токену
+                return;
+            }
+
+            string message = OsLocalization.MainWindow.Message5 + " TASK " + e.Exception.ToString();
+
+            message = _startProgram + "  " + message;
+
+            message = System.Reflection.Assembly.GetExecutingAssembly() + "\n" + message;
+
+            _messageToCrashServer = "Crash% " + message;
+            Thread worker = new Thread(SendMessageInCrashServer);
+            worker.Start();
+
+            ServerMaster.SendNewLogMessage(message, Logging.LogMessageType.Error);
+
+            if (PrimeSettingsMaster.RebootTradeUiLight == true &&
+                RobotUiLite.IsRobotUiLightStart)
+            {
+                Reboot(message);
+            }
+        }
+
+        private void App_DispatcherUnhandledException(object sender, System.Windows.Threading.DispatcherUnhandledExceptionEventArgs e)
+        {
+            try
+            {
+                // HasShutdownStarted одного недостаточен: при броске из DoShutdown он всё ещё false (замерено), сторож начала завершения в условии тоже.
+                if (Dispatcher.HasShutdownStarted || ShutdownInProgress)
+                { // завершение уже идёт: Crash%-отчёт и Reboot не нужны; Handled обязателен —
+                  // иначе WPF перебросит исключение в живой диспетчер уже начатого завершения
+                    e.Handled = true;
+                    ServerMaster.SendNewLogMessage(_startProgram + " Shutdown-phase exception suppressed: " + e.Exception?.Message, Logging.LogMessageType.System);
+                    return;
+                }
+
+                if (e.Exception is OutOfMemoryException)
+                { // фатальное исключение: не строим отчёт, лог и UI-диалог (под OOM это само по себе
+                  // рискованно), не выставляем e.Handled и даём процессу завершиться штатным крашем
+                    return;
+                }
+
+                if (e.Exception != null
+                    && e.Exception.ToString().Contains("(995):") == true)
+                { // игнорируем прерывания потока за делом по кансел токену
+                    e.Handled = true;
+                    return;
+                }
+
+                if (IsDispatcherSuspendedInterop(e.Exception))
+                { // транзиент WPF/WinForms interop: сообщение пришло в оконный колбэк при приостановленной
+                  // обработке Dispatcher; сообщение теряется, WPF работает дальше. Поглощаем без Crash%-отчёта и Reboot
+                    e.Handled = true;
+                    ServerMaster.SendNewLogMessage(_startProgram + " Dispatcher suspended transient suppressed (BUG-0050): " + e.Exception.Message, Logging.LogMessageType.System);
+                    return;
+                }
+
+                // исключение не фатальное: помечаем обработанным сразу, до отчёта и диалога,
+                // чтобы ошибка внутри отчёта/Reboot/MessageBox не привела к повторному крашу
+                e.Handled = true;
+
+                string message = OsLocalization.MainWindow.Message5 + " UI " + e.Exception;
+
+                message = _startProgram + "  " + message;
+
+                message = System.Reflection.Assembly.GetExecutingAssembly() + "\n" + message;
+
+                _messageToCrashServer = "Crash% " + message;
+                Thread worker = new Thread(SendMessageInCrashServer);
+                worker.Start();
+
+                ServerMaster.SendNewLogMessage(message, Logging.LogMessageType.Error);
+
+                if (PrimeSettingsMaster.RebootTradeUiLight == true &&
+                    RobotUiLite.IsRobotUiLightStart)
+                {
+                    Reboot(message);
+                }
+            }
+            catch
+            {
+                // ошибка в самом обработчике: не зацикливаемся, пусть процесс завершится штатно
+            }
+        }
+
+        // Подавляем ровно benign-транзиент DispatcherProcessingDisabledButStillPumping из WindowsBase:
+        // EN «Dispatcher processing has been suspended, but messages are still being processed» (RU-локализация — текст репорта).
+        // Конъюнкция трёх групп ключей; третья («still being processed»/«по-прежнему») намеренно не пускает сюда
+        // соседний ресурс DispatcherProcessingDisabled («Cannot perform this operation while dispatcher processing
+        // is suspended» — запрещённая операция поверх DisableProcessing, возможен реальный дефект кода):
+        // он остаётся на обычном пути отчёта. Локализацию текста учитываем парами ключей, полным текстом не зависим.
+        private static bool IsDispatcherSuspendedInterop(Exception ex)
+        {
+            if (!(ex is InvalidOperationException) || string.IsNullOrEmpty(ex.Message))
+            {
+                return false;
+            }
+
+            return (ex.Message.IndexOf("suspended", StringComparison.OrdinalIgnoreCase) >= 0
+                    || ex.Message.IndexOf("приостановлена", StringComparison.OrdinalIgnoreCase) >= 0)
+                && (ex.Message.IndexOf("Dispatcher", StringComparison.OrdinalIgnoreCase) >= 0
+                    || ex.Message.IndexOf("диспетчер", StringComparison.OrdinalIgnoreCase) >= 0)
+                && (ex.Message.IndexOf("still being processed", StringComparison.OrdinalIgnoreCase) >= 0
+                    || ex.Message.IndexOf("по-прежнему", StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
+        #region MCP Host
+
+        private McpMaster _mcpMaster;
+
+        private McpApiUi _mcpApiUi;
+
+        private int _mcpPort = McpSettings.Port;
+
+        private string _mcpApiKey = McpSettings.ApiKey;
+
+        private Window _activeModeWindow;
+
+        private bool _isProgrammaticClose;
+
+        /// <summary>
+        /// Indicates that the terminal is being closed programmatically (e.g. via MCP terminal_stop).
+        /// Mode windows can use this flag to skip user confirmation dialogs.
+        /// </summary>
+        public bool IsProgrammaticClose => _isProgrammaticClose;
+
+        private void StartMcpHost()
+        {
+            try
+            {
+                int port = McpSettings.Port;
+                string apiKey = McpSettings.ApiKey;
+
+                ParseMcpCommandLineArgs(ref port, ref apiKey);
+
+                _mcpPort = port;
+                _mcpApiKey = apiKey;
+
+                _mcpMaster = new McpMaster(
+                    port,
+                    apiKey,
+                    RestartMcpHost,
+                    GetTerminalStatusForMcp,
+                    LaunchTerminalProgram,
+                    StopTerminalProgram,
+                    KillTerminalProgram,
+                    OpenModeForMcp);
+
+                if (McpSettings.IsEnabled)
+                {
+                    _mcpMaster.Start();
+                }
+            }
+            catch (Exception ex)
+            {
+                // Log as System to avoid a MessageBox during startup if no log subscribers exist yet.
+                ServerMaster.SendNewLogMessage($"MCP host start failed: {ex}", Logging.LogMessageType.System);
+            }
+        }
+
+        public void RestartMcpHost()
+        {
+            try
+            {
+                StopMcpHost();
+                StartMcpHost();
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private void LaunchTerminalProgram(string mode)
+        {
+            try
+            {
+                StopMcpHost();
+
+                string arguments = GetLaunchArguments(mode);
+                arguments += $" -mcpPort {_mcpPort}";
+                arguments += $" -mcpApiKey {_mcpApiKey}";
+
+                string exePath = Process.GetCurrentProcess().MainModule.FileName;
+
+                Process process = new Process();
+                process.StartInfo.FileName = exePath;
+                process.StartInfo.Arguments = arguments;
+
+                bool started;
+                bool logged = false;
+
+                try
+                {
+                    started = process.Start();
+                }
+                catch (Exception ex)
+                {
+                    started = false;
+                    logged = true;
+                    ServerMaster.SendNewLogMessage("terminal_launch: failed to start new process: " + ex.Message, Logging.LogMessageType.Error);
+                }
+
+                if (started == false)
+                {
+                    // отказ Start: процесс остаётся живым и видимым; MCP, остановленный выше, возвращаем.
+                    // Лог ровно один: если исключение уже залогировано — не дублируем.
+                    if (logged == false)
+                    {
+                        ServerMaster.SendNewLogMessage("terminal_launch: failed to start new process", Logging.LogMessageType.Error);
+                    }
+
+                    try { StartMcpHost(); } catch { }
+                    return;
+                }
+
+                // новый процесс уже стартовал; старый завершается немедленно (Immediate).
+                // Вне обработки отказа Start, чтобы не «воскрешать» MCP при уже начатом завершении.
+                TerminateNow();
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private string GetLaunchArguments(string mode)
+        {
+            switch (mode?.ToLowerInvariant())
+            {
+                case "tester":
+                    return "-tester";
+                case "testerlight":
+                    return "-testerlight";
+                case "robots":
+                    return "-robots";
+                case "robotslight":
+                    return "-robotslight";
+                case "data":
+                    return "-data";
+                case "optimizer":
+                    return "-optimizer";
+                case "converter":
+                    return "-converter";
+                case "allocation":
+                    return "-allocation";
+                default:
+                    return string.Empty;
+            }
+        }
+
+        private void StopTerminalProgram()
+        {
+            try
+            {
+                if (Dispatcher.CheckAccess())
+                {
+                    StopTerminalProgramInternal();
+                }
+                else
+                {
+                    Dispatcher.Invoke(StopTerminalProgramInternal);
+                }
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private void StopTerminalProgramInternal()
+        {
+            // программная остановка = грациозное завершение с досохранением
+            BeginGracefulShutdown(true);
+        }
+
+        private void KillTerminalProgram()
+        {
+            try
+            {
+                // контракт terminal_kill — немедленное убийство без grace
+                TerminateNow();
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private void OpenModeForMcp(string mode)
+        {
+            try
+            {
+                if (Dispatcher.CheckAccess())
+                {
+                    OpenMode(mode);
+                }
+                else
+                {
+                    Dispatcher.Invoke(() => OpenMode(mode));
+                }
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private void OpenMode(string mode)
+        {
+            try
+            {
+                if (_startProgram != StartProgram.IsMainWindow)
+                {
+                    ServerMaster.SendNewLogMessage("terminal_open_mode is available only from MainWindow", Logging.LogMessageType.Error);
+                    return;
+                }
+
+                switch (mode?.ToLowerInvariant())
+                {
+                    case "tester":
+                        ButtonTesterCandleOne_Click(null, null);
+                        break;
+                    case "testerlight":
+                        ButtonTesterLight_Click(null, null);
+                        break;
+                    case "robots":
+                        ButtonRobotCandleOne_Click(null, null);
+                        break;
+                    case "robotslight":
+                        ButtonRobotLight_Click(null, null);
+                        break;
+                    case "data":
+                        ButtonData_Click(null, null);
+                        break;
+                    case "optimizer":
+                        ButtonOptimizer_Click(null, null);
+                        break;
+                    case "converter":
+                        ButtonConverter_Click(null, null);
+                        break;
+                    case "allocation":
+                        ButtonCapitalAllocation_Click(null, null);
+                        break;
+                    default:
+                        ServerMaster.SendNewLogMessage($"Unknown mode for terminal_open_mode: {mode}", Logging.LogMessageType.Error);
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private void StopMcpHost()
+        {
+            try
+            {
+                _mcpMaster?.Stop();
+                _mcpMaster = null;
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private McpTerminalStatus GetTerminalStatusForMcp()
+        {
+            var status = new McpTerminalStatus
+            {
+                Mode = _startProgram.ToString(),
+                Version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version.ToString(),
+                ProcessStarted = Process.GetCurrentProcess().StartTime,
+                IsMainWindowVisible = false
+            };
+
+            try
+            {
+                if (Dispatcher.CheckAccess())
+                {
+                    status.IsMainWindowVisible = IsVisible;
+                }
+                else
+                {
+                    Dispatcher.Invoke(() => { status.IsMainWindowVisible = IsVisible; });
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+
+            return status;
+        }
+
+        private void ParseMcpCommandLineArgs(ref int port, ref string apiKey)
+        {
+            try
+            {
+                string[] args = Environment.GetCommandLineArgs();
+
+                for (int i = 0; i < args.Length; i++)
+                {
+                    if (args[i].Equals("-mcpPort", StringComparison.OrdinalIgnoreCase)
+                        && i + 1 < args.Length)
+                    {
+                        if (int.TryParse(args[i + 1], out int parsedPort))
+                        {
+                            port = parsedPort;
+                        }
+                    }
+                    else if (args[i].Equals("-mcpApiKey", StringComparison.OrdinalIgnoreCase)
+                        && i + 1 < args.Length)
+                    {
+                        apiKey = args[i + 1];
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        #endregion
+
+        private void Reboot(string message)
+        {
+
+            if (!CheckAccess())
+            {
+                Dispatcher.Invoke(() =>
+                {
+                    Reboot(message);
+                });
+                return;
+            }
+
+            if (_shutdownRequested != 0)
+            { // завершение уже идёт (в т.ч. рекурсивный Reboot) — повторно не перезапускаемся
+                return;
+            }
+
+            // новый процесс стартует ДО TerminateNow(): старый убивает себя последним
+            Process process = new Process();
+            process.StartInfo.FileName = Directory.GetCurrentDirectory() + "\\OsEngine.exe";
+            process.StartInfo.Arguments = " -error " + message;
+
+            bool started;
+
+            try
+            {
+                started = process.Start();
+            }
+            catch (Exception ex)
+            {
+                started = false;
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+
+            if (started == false)
+            { // нового процесса нет — не убиваем себя без замены
+                ServerMaster.SendNewLogMessage("Reboot: failed to start new process", Logging.LogMessageType.Error);
+                return;
+            }
+
+            TerminateNow();
+        }
+
+        #region Block and Unblock interface
+
+        private void BlockInterface()
+        {
+            ImageData.Visibility = Visibility.Hidden;
+            ImageTests.Visibility = Visibility.Hidden;
+            ImageTrading.Visibility = Visibility.Hidden;
+            ImageFlag_Ru.Visibility = Visibility.Hidden;
+            ImageFlag_Eng.Visibility = Visibility.Hidden;
+
+            ImagePadlock.Visibility = Visibility.Visible;
+            ImagePadlock.MouseEnter += ImagePadlock_MouseEnter;
+            ImagePadlock.MouseLeave += ImagePadlock_MouseLeave;
+            ImagePadlock.MouseDown += ImagePadlock_MouseDown;
+            ButtonSettings.IsEnabled = false;
+            ButtonApi.IsEnabled = false;
+            ButtonRobot.IsEnabled = false;
+            ButtonTester.IsEnabled = false;
+            ButtonData.IsEnabled = false;
+            ButtonCandleConverter.IsEnabled = false;
+            ButtonConverter.IsEnabled = false;
+            ButtonOptimizer.IsEnabled = false;
+            ButtonTesterLight.IsEnabled = false;
+            ButtonRobotLight.IsEnabled = false;
+            ButtonCapitalAllocation.IsEnabled = false;
+            ButtonLocal_Ru.IsEnabled = false;
+            ButtonLocal_Eng.IsEnabled = false;
+            ButtonNewCommits.IsEnabled = false;
+            ButtonTheme.IsEnabled = false;
+            ButtonPostsMenu.IsEnabled = false;
+        }
+
+        private void ImagePadlock_MouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+        {
+            try
+            {
+                RobotsUiLightUnblock ui = new RobotsUiLightUnblock();
+
+                ui.ShowDialog();
+
+                if (ui.IsUnBlocked == true)
+                {
+                    UnblockInterface();
+                }
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private void ImagePadlock_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
+        {
+            ImagePadlock.Cursor = System.Windows.Input.Cursors.Arrow;
+        }
+
+        private void ImagePadlock_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
+        {
+            ImagePadlock.Cursor = System.Windows.Input.Cursors.Hand;
+        }
+
+        private void UnblockInterface()
+        {
+            ImageData.Visibility = Visibility.Visible;
+            ImageTests.Visibility = Visibility.Visible;
+            ImageTrading.Visibility = Visibility.Visible;
+            ImageFlag_Ru.Visibility = Visibility.Visible;
+            ImageFlag_Eng.Visibility = Visibility.Visible;
+
+            ImagePadlock.Visibility = Visibility.Hidden;
+            ButtonSettings.IsEnabled = true;
+            ButtonApi.IsEnabled = true;
+            ButtonRobot.IsEnabled = true;
+            ButtonTester.IsEnabled = true;
+            ButtonData.IsEnabled = true;
+            ButtonCandleConverter.IsEnabled = true;
+            ButtonConverter.IsEnabled = true;
+            ButtonOptimizer.IsEnabled = true;
+            ButtonTesterLight.IsEnabled = true;
+            ButtonRobotLight.IsEnabled = true;
+            ButtonCapitalAllocation.IsEnabled = true;
+            ButtonLocal_Ru.IsEnabled = true;
+            ButtonLocal_Eng.IsEnabled = true;
+            ButtonNewCommits.IsEnabled = true;
+            ButtonTheme.IsEnabled = true;
+            ButtonPostsMenu.IsEnabled = true;
+        }
+
+        #endregion
+
+        #region Check system on start program
+
+        private bool CheckDotNetVersion()
+        {
+            using (RegistryKey ndpKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry32).OpenSubKey("SOFTWARE\\Microsoft\\NET Framework Setup\\NDP\\v4\\Full\\"))
+            {
+                if (ndpKey == null)
+                {
+                    return false;
+                }
+                int releaseKey = Convert.ToInt32(ndpKey.GetValue("Release"));
+
+                if (releaseKey >= 393295)
+                {
+                    //"4.6 or later";
+                    return true;
+                }
+                if ((releaseKey >= 379893))
+                {
+                    //"4.5.2 or later";
+                    return true;
+                }
+                if ((releaseKey >= 378675))
+                {
+                    //"4.5.1 or later";
+                    return true;
+                }
+                if ((releaseKey >= 378389))
+                {
+                    MessageBox.Show(OsLocalization.MainWindow.Message4);
+                    return false;
+                }
+
+                MessageBox.Show(OsLocalization.MainWindow.Message4);
+
+                return false;
+            }
+        }
+
+        private bool CheckOutSomeLibrariesNearby()
+        {
+            // проверяем чтобы пользователь не запустился с рабочего стола, но не ярлыком, а экзешником
+
+            if (File.Exists("QuikSharp.dll") == false)
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        private bool CheckWorkWithDirectory()
+        {
+            try
+            {
+                if (!Directory.Exists("Engine"))
+                {
+                    Directory.CreateDirectory("Engine");
+                }
+
+                if (File.Exists("Engine\\checkFile.txt"))
+                {
+                    File.Delete("Engine\\checkFile.txt");
+                }
+
+                File.Create("Engine\\checkFile.txt");
+
+                if (File.Exists("Engine\\checkFile.txt") == false)
+                {
+                    return false;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+
+
+            return true;
+        }
+
+        private bool CheckAlreadyWorkEngine()
+        {
+            try
+            {
+                string myProgramPath = Directory.GetCurrentDirectory() + "\\OsEngine.exe";
+                int myId = Process.GetCurrentProcess().Id;
+
+                // После рестарта старый процесс убивается немедленно — ждём его исчезновения (<=3 с).
+                // Конфликт определяется по модулю, а не по MainWindowHandle (живой скрытый процесс тоже конфликт).
+                DateTime deadline = DateTime.Now.AddSeconds(3);
+
+                while (true)
+                {
+                    bool conflict = false;
+
+                    Process[] processes = System.Diagnostics.Process.GetProcesses();
+
+                    for (int i = 0; i < processes.Length && conflict == false; i++)
+                    {
+                        Process p = processes[i];
+
+                        try
+                        {
+                            if (p.Id == myId || p.Modules == null)
+                            {
+                                continue;
+                            }
+
+                            for (int j = 0; j < p.Modules.Count; j++)
+                            {
+                                string fileName = p.Modules[j].FileName;
+
+                                if (fileName != null
+                                    && fileName.EndsWith(myProgramPath, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    conflict = true;
+                                    break;
+                                }
+                            }
+                        }
+                        catch
+                        {
+                            // процесс завершился/недоступен — пропускаем
+                        }
+                    }
+
+                    if (conflict == false)
+                    {
+                        return true;
+                    }
+
+                    if (DateTime.Now >= deadline)
+                    {
+                        return false;
+                    }
+
+                    Thread.Sleep(250);
+                }
+            }
+            catch
+            {
+                return true;
+            }
+        }
+
+        #endregion
+
+        #region Open program buttons
+
+        private void ButtonTesterCandleOne_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                _startProgram = StartProgram.IsTester;
+                ServerMaster.TesterStarted();
+                Hide();
+                _mcpMaster?.SendTerminalModeChanged(_startProgram);
+                TesterUi candleOneUi = new TesterUi();
+                _activeModeWindow = candleOneUi;
+                candleOneUi.ShowDialog();
+                _activeModeWindow = null;
+                BeginGracefulShutdown(false);
+            }
+            catch (Exception error)
+            {
+                MessageBox.Show(error.ToString());
+            }
+        }
+
+        private void ButtonTesterLight_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                _startProgram = StartProgram.IsTester;
+                ServerMaster.TesterStarted();
+                Hide();
+                _mcpMaster?.SendTerminalModeChanged(_startProgram);
+                TesterUiLite candleOneUi = new TesterUiLite();
+                _activeModeWindow = candleOneUi;
+                candleOneUi.ShowDialog();
+                _activeModeWindow = null;
+                BeginGracefulShutdown(false);
+            }
+            catch (Exception error)
+            {
+                MessageBox.Show(error.ToString());
+            }
+        }
+
+        private void ButtonRobotCandleOne_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                _startProgram = StartProgram.IsOsTrader;
+                ServerMaster.RealStarted();
+                Hide();
+                _mcpMaster?.SendTerminalModeChanged(_startProgram);
+                RobotUi candleOneUi = new RobotUi();
+                _activeModeWindow = candleOneUi;
+                candleOneUi.ShowDialog();
+                _activeModeWindow = null;
+                BeginGracefulShutdown(false);
+            }
+            catch (Exception error)
+            {
+                MessageBox.Show(error.ToString());
+            }
+        }
+
+        private void ButtonRobotLight_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                _startProgram = StartProgram.IsOsTrader;
+                ServerMaster.RealStarted();
+                Hide();
+                _mcpMaster?.SendTerminalModeChanged(_startProgram);
+                RobotUiLite candleOneUi = new RobotUiLite();
+                _activeModeWindow = candleOneUi;
+                candleOneUi.ShowDialog();
+                _activeModeWindow = null;
+                BeginGracefulShutdown(false);
+            }
+            catch (Exception error)
+            {
+                MessageBox.Show(error.ToString());
+            }
+        }
+
+        private void ButtonData_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                _startProgram = StartProgram.IsOsData;
+                Hide();
+                _mcpMaster?.SendTerminalModeChanged(_startProgram);
+                OsDataUi ui = new OsDataUi();
+                _activeModeWindow = ui;
+                _mcpMaster?.SetOsDataMaster(ui.Master);
+                ui.ShowDialog();
+                _activeModeWindow = null;
+                _mcpMaster?.SetOsDataMaster(null);
+                BeginGracefulShutdown(false);
+            }
+            catch (Exception error)
+            {
+                MessageBox.Show(error.ToString());
+            }
+        }
+
+        private void ButtonConverter_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                _startProgram = StartProgram.IsOsConverter;
+                Hide();
+                _mcpMaster?.SendTerminalModeChanged(_startProgram);
+                OsConverterUi ui = new OsConverterUi();
+                _activeModeWindow = ui;
+                ui.ShowDialog();
+                _activeModeWindow = null;
+                BeginGracefulShutdown(false);
+            }
+            catch (Exception error)
+            {
+                MessageBox.Show(error.ToString());
+            }
+        }
+
+        private void ButtonOptimizer_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                _startProgram = StartProgram.IsOsOptimizer;
+                ServerMaster.OptimizerStarted();
+                Hide();
+                _mcpMaster?.SendTerminalModeChanged(_startProgram);
+                OptimizerUi ui = new OptimizerUi();
+                _activeModeWindow = ui;
+                _mcpMaster?.SetOptimizerMaster(ui.Master);
+                ui.ShowDialog();
+                _activeModeWindow = null;
+                _mcpMaster?.SetOptimizerMaster(null);
+                BeginGracefulShutdown(false);
+            }
+            catch (Exception error)
+            {
+                MessageBox.Show(error.ToString());
+            }
+        }
+
+        private void ButtonSettings_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (_settingsUi == null)
+                {
+                    _settingsUi = new PrimeSettingsMasterUi();
+                    _settingsUi.Show();
+                    _settingsUi.Closing += delegate { _settingsUi = null; };
+                }
+                else
+                {
+                    _settingsUi.Activate();
+                }
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private PrimeSettingsMasterUi _settingsUi;
+
+        private void ButtonApi_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (_mcpApiUi == null)
+                {
+                    _mcpApiUi = new McpApiUi(_mcpMaster, RestartMcpHost);
+                    _mcpApiUi.Show();
+                    _mcpApiUi.Closing += delegate { _mcpApiUi = null; };
+                }
+                else
+                {
+                    _mcpApiUi.Activate();
+                }
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private void CandleConverter_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                Hide();
+                OsCandleConverterUi ui = new OsCandleConverterUi();
+                ui.ShowDialog();
+                BeginGracefulShutdown(false);
+            }
+            catch (Exception error)
+            {
+                MessageBox.Show(error.ToString());
+            }
+        }
+
+        private void ButtonCapitalAllocation_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                _startProgram = StartProgram.IsOsCapitalAllocation;
+                Hide();
+                _mcpMaster?.SendTerminalModeChanged(_startProgram);
+                OsCapitalAllocation.CapitalAllocationUi ui = new OsCapitalAllocation.CapitalAllocationUi();
+                _activeModeWindow = ui;
+                _mcpMaster?.SetCapitalAllocationMaster(ui.Master);
+                ui.ShowDialog();
+                _activeModeWindow = null;
+                _mcpMaster?.SetCapitalAllocationMaster(null);
+                BeginGracefulShutdown(false);
+            }
+            catch (Exception error)
+            {
+                ServerMaster.SendNewLogMessage(error.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private void CommandLineInterfaceProcess()
+        {
+            try
+            {
+                if (BlockMaster.IsBlocked == true)
+                {
+                    return;
+                }
+
+                string[] args = Environment.GetCommandLineArgs();
+
+                if (Array.Exists(args, a => a.Equals("-robots")))
+                {
+                    ButtonRobotCandleOne_Click(this, default);
+                }
+                else if (Array.Exists(args, a => a.Equals("-tester")))
+                {
+                    ButtonTesterCandleOne_Click(this, default);
+                }
+                else if (Array.Exists(args, a => a.Equals("-robotslight")))
+                {
+                    ButtonRobotLight_Click(this, default);
+                }
+                else if (Array.Exists(args, a => a.Equals("-testerlight")))
+                {
+                    ButtonTesterLight_Click(this, default);
+                }
+                else if (Array.Exists(args, a => a.Equals("-data")))
+                {
+                    ButtonData_Click(this, default);
+                }
+                else if (Array.Exists(args, a => a.Equals("-optimizer")))
+                {
+                    ButtonOptimizer_Click(this, default);
+                }
+                else if (Array.Exists(args, a => a.Equals("-converter")))
+                {
+                    ButtonConverter_Click(this, default);
+                }
+                else if (Array.Exists(args, a => a.Equals("-allocation")))
+                {
+                    ButtonCapitalAllocation_Click(this, default);
+                }
+                else if (Array.Exists(args, a => a.Equals("-error")) && PrimeSettingsMaster.RebootTradeUiLight)
+                {
+                    CriticalErrorHandler.ErrorInStartUp = true;
+
+                    Array.ForEach(args, (a) => { CriticalErrorHandler.ErrorMessage += a; });
+
+                    new Task(() =>
+                    {
+                        string messageError = String.Empty;
+
+                        for (int i = 0; i < args.Length; i++)
+                        {
+                            messageError += args[i];
+                        }
+
+                        ServerMaster.SendNewLogMessage(messageError, Logging.LogMessageType.Error);
+
+                    }).Start();
+
+                    ButtonRobotLight_Click(this, default);
+                }
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private void ClearOptimizerWorkResults()
+        {
+            try
+            {
+                if (Directory.Exists("Engine") == false)
+                {
+                    return;
+                }
+
+                string[] files = Directory.GetFiles("Engine");
+
+                for (int i = 0; i < files.Length; i++)
+                {
+                    try
+                    {
+                        if (files[i].Contains(" OpT "))
+                        {
+                            File.Delete(files[i]);
+                        }
+                    }
+                    catch
+                    {
+                        // ignore
+                    }
+
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
+        #endregion
+
+        #region Crash server
+
+        /// <summary> Crash-server: единые endpoint-константы для зрелого рутина и StartupCrashGuard (C2) </summary>
+        internal const string CrashServerHost = "45.137.152.144";
+
+        internal const int CrashServerPort = 11000;
+
+        string _messageToCrashServer;
+
+        private void SendMessageInCrashServer()
+        {
+            try
+            {
+                if (PrimeSettingsMaster.ReportCriticalErrors == false)
+                {
+                    return;
+                }
+
+                TcpClient newClient = new TcpClient();
+                newClient.Connect(CrashServerHost, CrashServerPort);
+                NetworkStream tcpStream = newClient.GetStream();
+                byte[] sendBytes = Encoding.UTF8.GetBytes(_messageToCrashServer);
+                tcpStream.Write(sendBytes, 0, sendBytes.Length);
+                newClient.Close();
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
+        #endregion
+
+        #region Pictures and visual 
+
+        private async void ThreadAreaGreeting()
+        {
+            try
+            {
+                await Task.Delay(1000);
+                double angle = 5;
+
+                for (int i = 0; i < 7; i++)
+                {
+                    RotatePic(angle);
+                    await Task.Delay(50);
+                    angle += 10;
+                }
+
+                for (int i = 0; i < 7; i++)
+                {
+                    RotatePic(angle);
+                    await Task.Delay(100);
+                    angle += 10;
+                }
+
+                await Task.Delay(100);
+                RotatePic(angle);
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private void RotatePic(double angle)
+        {
+            if (ImageGear.Dispatcher.CheckAccess() == false)
+            {
+                ImageGear.Dispatcher.Invoke(new Action<double>(RotatePic), angle);
+                return;
+            }
+
+            ImageGear.RenderTransform = new RotateTransform(angle, 12, 12);
         }
 
         private void StartButtonBlinkAnimation()
@@ -223,50 +1708,27 @@ namespace OsEngine
             }
         }
 
+        private bool _aiVideoIsCurrent = false;
+
+        private System.Windows.Threading.DispatcherTimer _aiAdTimer;
+
         private void GifT_MediaEnded(object sender, RoutedEventArgs e)
-        {
-            GifT.Pause(); // останавливаем на последнем кадре
-        }
-
-        #region Block and Unblock interface
-
-        private void BlockInterface()
-        {
-            ImageData.Visibility = Visibility.Hidden;
-            ImageTests.Visibility = Visibility.Hidden;
-            ImageTrading.Visibility = Visibility.Hidden;
-            ImageFlag_Ru.Visibility = Visibility.Hidden;
-            ImageFlag_Eng.Visibility = Visibility.Hidden;
-
-            ImagePadlock.Visibility = Visibility.Visible;
-            ImagePadlock.MouseEnter += ImagePadlock_MouseEnter;
-            ImagePadlock.MouseLeave += ImagePadlock_MouseLeave;
-            ImagePadlock.MouseDown += ImagePadlock_MouseDown;
-            ButtonSettings.IsEnabled = false;
-            ButtonRobot.IsEnabled = false;
-            ButtonTester.IsEnabled = false;
-            ButtonData.IsEnabled = false;
-            ButtonCandleConverter.IsEnabled = false;
-            ButtonConverter.IsEnabled = false;
-            ButtonOptimizer.IsEnabled = false;
-            ButtonTesterLight.IsEnabled = false;
-            ButtonRobotLight.IsEnabled = false;
-            ButtonLocal_Ru.IsEnabled = false;
-            ButtonLocal_Eng.IsEnabled = false;
-            ButtonNewCommits.IsEnabled = false;
-        }
-
-        private void ImagePadlock_MouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
         {
             try
             {
-                RobotsUiLightUnblock ui = new RobotsUiLightUnblock();
+                GifT.Pause(); // останавливаем на последнем кадре
 
-                ui.ShowDialog();
+                if (_aiVideoIsCurrent == false)
+                { // после заставки Т-Банк, через паузу, показываем рекламу курса
+                    if (_aiAdTimer == null)
+                    {
+                        _aiAdTimer = new System.Windows.Threading.DispatcherTimer();
+                        _aiAdTimer.Interval = TimeSpan.FromSeconds(2);
+                        _aiAdTimer.Tick += AiAdTimer_Tick;
+                    }
 
-                if (ui.IsUnBlocked == true)
-                {
-                    UnblockInterface();
+                    _aiAdTimer.Stop();
+                    _aiAdTimer.Start();
                 }
             }
             catch (Exception ex)
@@ -275,698 +1737,31 @@ namespace OsEngine
             }
         }
 
-        private void ImagePadlock_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
+        private void AiAdTimer_Tick(object sender, EventArgs e)
         {
-            ImagePadlock.Cursor = System.Windows.Input.Cursors.Arrow;
+            try
+            {
+                _aiAdTimer.Stop();
+
+                _aiVideoIsCurrent = true;
+                GifT.Source = new Uri(System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, @"Images\MainWIndow\ai.mp4"));
+                GifT.Play();
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
         }
-
-        private void ImagePadlock_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
-        {
-            ImagePadlock.Cursor = System.Windows.Input.Cursors.Hand;
-        }
-
-        private void UnblockInterface()
-        {
-            ImageData.Visibility = Visibility.Visible;
-            ImageTests.Visibility = Visibility.Visible;
-            ImageTrading.Visibility = Visibility.Visible;
-            ImageFlag_Ru.Visibility = Visibility.Visible;
-            ImageFlag_Eng.Visibility = Visibility.Visible;
-
-            ImagePadlock.Visibility = Visibility.Hidden;
-            ButtonSettings.IsEnabled = true;
-            ButtonRobot.IsEnabled = true;
-            ButtonTester.IsEnabled = true;
-            ButtonData.IsEnabled = true;
-            ButtonCandleConverter.IsEnabled = true;
-            ButtonConverter.IsEnabled = true;
-            ButtonOptimizer.IsEnabled = true;
-            ButtonTesterLight.IsEnabled = true;
-            ButtonRobotLight.IsEnabled = true;
-            ButtonLocal_Ru.IsEnabled = true;
-            ButtonLocal_Eng.IsEnabled = true;
-            ButtonNewCommits.IsEnabled = true;
-        }
-
-        #endregion
 
         private void VideoGrid_MouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
         {
             try
             {
-                Process.Start(new ProcessStartInfo("https://www.tbank.ru/invest") { UseShellExecute = true });
-            }
-            catch
-            {
-                // ignore
-            }
-        }
-
-        private void MainWindow_Closing(object sender, System.ComponentModel.CancelEventArgs e)
-        {
-            try
-            {
-                GlobalGUILayout.IsClosed = true;
-
-                if (ProccesIsWorked == true)
-                {
-                    ProccesIsWorked = false;
-
-                    if (this.IsVisible == false)
-                    {
-                        _awaitUiBotsInfoLoading = new AwaitObject(OsLocalization.Trader.Label391, 100, 0, true);
-                        AwaitUi ui = new AwaitUi(_awaitUiBotsInfoLoading);
-
-                        Thread worker = new Thread(Await7Seconds);
-                        worker.Start();
-
-                        ui.ShowDialog();
-                    }
-                }
-
-                Thread.Sleep(500);
-
-                Process.GetCurrentProcess().Kill();
-            }
-            catch (Exception ex)
-            {
-                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
-            }
-        }
-
-        AwaitObject _awaitUiBotsInfoLoading;
-
-        private void Await7Seconds()
-        {
-            // Это нужно чтобы потоки сохраняющие данные в файловую систему штатно завершили свою работу
-            // This is necessary for threads saving data to the file system to complete their work properly
-            Thread.Sleep(7000);
-            _awaitUiBotsInfoLoading.Dispose();
-        }
-
-        private void MainWindow_ContentRendered(object sender, EventArgs e)
-        {
-            Task.Run(() =>
-            {
-                Thread.Sleep(1000);
-                try
-                {
-                    ChangeText();
-                }
-                catch
-                {
-                    // ignore
-                }
-            });
-        }
-
-        private void ChangeText()
-        {
-
-            if (ImageGear.Dispatcher.CheckAccess() == false)
-            {
-                ImageGear.Dispatcher.Invoke(new Action(ChangeText));
-                return;
-            }
-
-            Title = OsLocalization.MainWindow.Title;
-            BlockDataLabel.Content = OsLocalization.MainWindow.BlockDataLabel;
-            BlockTestingLabel.Content = OsLocalization.MainWindow.BlockTestingLabel;
-            BlockTradingLabel.Content = OsLocalization.MainWindow.BlockTradingLabel;
-            ButtonData.Content = OsLocalization.MainWindow.OsDataName;
-            ButtonConverter.Content = OsLocalization.MainWindow.OsConverter;
-            ButtonTester.Content = OsLocalization.MainWindow.OsTesterName;
-            ButtonOptimizer.Content = OsLocalization.MainWindow.OsOptimizerName;
-
-            ButtonRobot.Content = OsLocalization.MainWindow.OsBotStationName;
-            ButtonCandleConverter.Content = OsLocalization.MainWindow.OsCandleConverter;
-
-            ButtonTesterLight.Content = OsLocalization.MainWindow.OsTesterLiteName;
-            ButtonRobotLight.Content = OsLocalization.MainWindow.OsBotStationLiteName;
-
-            ChangeButtonCommits();
-
-            if (OsLocalization.CurLocalization == OsLocalization.OsLocalType.Ru)
-            {
-                VideoGrid.Visibility = Visibility.Visible;
-                this.Height = 430;
-                GifT.Play();
-            }
-            else
-            {
-                this.Height = 315;
-                VideoGrid.Visibility = Visibility.Collapsed;
-            }
-        }
-
-        /// <summary>
-        /// check the version of dotnet
-        /// проверить версию дотНет
-        /// </summary>
-        private bool CheckDotNetVersion()
-        {
-            using (RegistryKey ndpKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry32).OpenSubKey("SOFTWARE\\Microsoft\\NET Framework Setup\\NDP\\v4\\Full\\"))
-            {
-                if (ndpKey == null)
-                {
-                    return false;
-                }
-                int releaseKey = Convert.ToInt32(ndpKey.GetValue("Release"));
-
-                if (releaseKey >= 393295)
-                {
-                    //"4.6 or later";
-                    return true;
-                }
-                if ((releaseKey >= 379893))
-                {
-                    //"4.5.2 or later";
-                    return true;
-                }
-                if ((releaseKey >= 378675))
-                {
-                    //"4.5.1 or later";
-                    return true;
-                }
-                if ((releaseKey >= 378389))
-                {
-                    MessageBox.Show(OsLocalization.MainWindow.Message4);
-                    return false;
-                }
-
-                MessageBox.Show(OsLocalization.MainWindow.Message4);
-
-                return false;
-            }
-        }
-
-        private bool CheckOutSomeLibrariesNearby()
-        {
-            // проверяем чтобы пользователь не запустился с рабочего стола, но не ярлыком, а экзешником
-
-            if (File.Exists("QuikSharp.dll") == false)
-            {
-                return false;
-            }
-
-            return true;
-        }
-
-        /// <summary>
-        /// check the permission of the program to create files in the directory
-        /// проверяем разрешение программы создавать файлы в директории
-        /// </summary>
-        private bool CheckWorkWithDirectory()
-        {
-            try
-            {
-                if (!Directory.Exists("Engine"))
-                {
-                    Directory.CreateDirectory("Engine");
-                }
-
-                if (File.Exists("Engine\\checkFile.txt"))
-                {
-                    File.Delete("Engine\\checkFile.txt");
-                }
-
-                File.Create("Engine\\checkFile.txt");
-
-                if (File.Exists("Engine\\checkFile.txt") == false)
-                {
-                    return false;
-                }
-            }
-            catch
-            {
-                return false;
-            }
-
-
-            return true;
-        }
-
-        private bool CheckAlreadyWorkEngine()
-        {
-            try
-            {
-                string myDirectory = Directory.GetCurrentDirectory();
-
-                Process[] ps1 = System.Diagnostics.Process.GetProcesses();
-
-                List<Process> process = new List<Process>();
-
-                for (int i = 0; i < ps1.Length; i++)
-                {
-                    Process p = ps1[i];
-
-                    try
-                    {
-                        string mainStr = p.MainWindowHandle.ToString();
-
-                        if (mainStr == "0")
-                        {
-                            continue;
-                        }
-
-                        if (p.MainModule.FileName != ""
-                            && p.Modules != null)
-                        {
-                            process.Add(p);
-                        }
-                    }
-                    catch
-                    {
-
-                    }
-                }
-
-                int osEngineCount = 0;
-
-                string myProgramPath = myDirectory + "\\OsEngine.exe";
-
-                for (int i = 0; i < process.Count; i++)
-                {
-                    Process p = process[i];
-
-                    for (int j = 0; p.Modules != null && j < p.Modules.Count; j++)
-                    {
-                        if (p.Modules[j].FileName == null)
-                        {
-                            continue;
-                        }
-
-                        if (p.Modules[j].FileName.EndsWith(myProgramPath))
-                        {
-                            osEngineCount++;
-                        }
-                    }
-                }
-
-                if (osEngineCount > 0)
-                {
-                    return false;
-                }
-
-                return true;
-            }
-            catch
-            {
-                return true;
-            }
-        }
-
-        void CurrentDomain_UnhandledException(object sender, UnhandledExceptionEventArgs e)
-        {
-            string message = OsLocalization.MainWindow.Message5 + " THREAD " + e.ExceptionObject;
-
-            message = _startProgram + "  " + message;
-
-            message = System.Reflection.Assembly.GetExecutingAssembly() + "\n" + message;
-
-            _messageToCrashServer = "Crash% " + message;
-            Thread worker = new Thread(SendMessageInCrashServer);
-            worker.Start();
-
-            if (PrimeSettingsMaster.RebootTradeUiLight == true &&
-                RobotUiLite.IsRobotUiLightStart)
-            {
-                Reboot(message);
-            }
-            else
-            {
-                MessageBox.Show(message);
-            }
-        }
-
-        private void TaskScheduler_UnobservedTaskException(object sender, UnobservedTaskExceptionEventArgs e)
-        {
-            if (e.Exception != null
-                && e.Exception.ToString().Contains("(995):") == true)
-            { // игнорируем прерывания потока за делом по кансел токену
-                return;
-            }
-
-            string message = OsLocalization.MainWindow.Message5 + " TASK " + e.Exception.ToString();
-
-            message = _startProgram + "  " + message;
-
-            message = System.Reflection.Assembly.GetExecutingAssembly() + "\n" + message;
-
-            _messageToCrashServer = "Crash% " + message;
-            Thread worker = new Thread(SendMessageInCrashServer);
-            worker.Start();
-
-            if (PrimeSettingsMaster.RebootTradeUiLight == true &&
-                RobotUiLite.IsRobotUiLightStart)
-            {
-                Reboot(message);
-            }
-            else
-            {
-                MessageBox.Show(message);
-            }
-        }
-
-        private StartProgram _startProgram;
-
-        private void Reboot(string message)
-        {
-
-            if (!CheckAccess())
-            {
-                Dispatcher.Invoke(() =>
-                {
-                    Reboot(message);
-                });
-                return;
-            }
-
-            App.app.Shutdown();
-            Process process = new Process();
-            process.StartInfo.FileName = Directory.GetCurrentDirectory() + "\\OsEngine.exe";
-            process.StartInfo.Arguments = " -error " + message;
-            process.Start();
-
-            Process.GetCurrentProcess().Kill();
-        }
-
-        private void ButtonTesterCandleOne_Click(object sender, RoutedEventArgs e)
-        {
-            try
-            {
-                _startProgram = StartProgram.IsTester;
-                ServerMaster.TesterStarted();
-                Hide();
-                TesterUi candleOneUi = new TesterUi();
-                candleOneUi.ShowDialog();
-                Close();
-                ProccesIsWorked = false;
-                Thread.Sleep(5000);
-            }
-            catch (Exception error)
-            {
-                MessageBox.Show(error.ToString());
-            }
-            Process.GetCurrentProcess().Kill();
-        }
-
-        private void ButtonTesterLight_Click(object sender, RoutedEventArgs e)
-        {
-            try
-            {
-                _startProgram = StartProgram.IsTester;
-                ServerMaster.TesterStarted();
-                Hide();
-                TesterUiLite candleOneUi = new TesterUiLite();
-                candleOneUi.ShowDialog();
-                Close();
-                ProccesIsWorked = false;
-                Thread.Sleep(5000);
-            }
-            catch (Exception error)
-            {
-                MessageBox.Show(error.ToString());
-            }
-            Process.GetCurrentProcess().Kill();
-        }
-
-        private void ButtonRobotCandleOne_Click(object sender, RoutedEventArgs e)
-        {
-            try
-            {
-                _startProgram = StartProgram.IsOsTrader;
-                ServerMaster.RealStarted();
-                Hide();
-                RobotUi candleOneUi = new RobotUi();
-                candleOneUi.ShowDialog();
-                Close();
-                ProccesIsWorked = false;
-                Thread.Sleep(5000);
-            }
-            catch (Exception error)
-            {
-                MessageBox.Show(error.ToString());
-            }
-            Process.GetCurrentProcess().Kill();
-        }
-
-        private void ButtonRobotLight_Click(object sender, RoutedEventArgs e)
-        {
-            try
-            {
-                _startProgram = StartProgram.IsOsTrader;
-                ServerMaster.RealStarted();
-                Hide();
-                RobotUiLite candleOneUi = new RobotUiLite();
-                candleOneUi.ShowDialog();
-                Close();
-                ProccesIsWorked = false;
-                Thread.Sleep(5000);
-            }
-            catch (Exception error)
-            {
-                MessageBox.Show(error.ToString());
-            }
-            Process.GetCurrentProcess().Kill();
-        }
-
-        private void ButtonData_Click(object sender, RoutedEventArgs e)
-        {
-            try
-            {
-                _startProgram = StartProgram.IsOsData;
-                Hide();
-                OsDataUi ui = new OsDataUi();
-                ui.ShowDialog();
-                Close();
-                ProccesIsWorked = false;
-                Thread.Sleep(5000);
-            }
-            catch (Exception error)
-            {
-                MessageBox.Show(error.ToString());
-            }
-            Process.GetCurrentProcess().Kill();
-        }
-
-        private void ButtonConverter_Click(object sender, RoutedEventArgs e)
-        {
-            try
-            {
-                _startProgram = StartProgram.IsOsConverter;
-                Hide();
-                OsConverterUi ui = new OsConverterUi();
-                ui.ShowDialog();
-                Close();
-                ProccesIsWorked = false;
-                Thread.Sleep(10000);
-            }
-            catch (Exception error)
-            {
-                MessageBox.Show(error.ToString());
-            }
-            Process.GetCurrentProcess().Kill();
-        }
-
-        private void ButtonOptimizer_Click(object sender, RoutedEventArgs e)
-        {
-            try
-            {
-                _startProgram = StartProgram.IsOsOptimizer;
-                ServerMaster.OptimizerStarted();
-                Hide();
-                OptimizerUi ui = new OptimizerUi();
-                ui.ShowDialog();
-                Close();
-                ProccesIsWorked = false;
-                Thread.Sleep(10000);
-            }
-            catch (Exception error)
-            {
-                MessageBox.Show(error.ToString());
-            }
-            Process.GetCurrentProcess().Kill();
-        }
-
-        private async void ThreadAreaGreeting()
-        {
-            try
-            {
-                await Task.Delay(1000);
-                double angle = 5;
-
-                for (int i = 0; i < 7; i++)
-                {
-                    RotatePic(angle);
-                    await Task.Delay(50);
-                    angle += 10;
-                }
-
-                for (int i = 0; i < 7; i++)
-                {
-                    RotatePic(angle);
-                    await Task.Delay(100);
-                    angle += 10;
-                }
-
-                await Task.Delay(100);
-                RotatePic(angle);
-            }
-            catch (Exception ex)
-            {
-                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
-            }
-        }
-
-        private void RotatePic(double angle)
-        {
-            if (ImageGear.Dispatcher.CheckAccess() == false)
-            {
-                ImageGear.Dispatcher.Invoke(new Action<double>(RotatePic), angle);
-                return;
-            }
-
-            ImageGear.RenderTransform = new RotateTransform(angle, 12, 12);
-        }
-
-        private void ButtonSettings_Click(object sender, RoutedEventArgs e)
-        {
-            try
-            {
-                if (_settingsUi == null)
-                {
-                    _settingsUi = new PrimeSettingsMasterUi();
-                    _settingsUi.Show();
-                    _settingsUi.Closing += delegate { _settingsUi = null; };
-                }
-                else
-                {
-                    _settingsUi.Activate();
-                }
-            }
-            catch (Exception ex)
-            {
-                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
-            }
-        }
-
-        private PrimeSettingsMasterUi _settingsUi;
-
-        private void CandleConverter_Click(object sender, RoutedEventArgs e)
-        {
-            try
-            {
-                Hide();
-                OsCandleConverterUi ui = new OsCandleConverterUi();
-                ui.ShowDialog();
-                Close();
-                ProccesIsWorked = false;
-                Thread.Sleep(10000);
-            }
-            catch (Exception error)
-            {
-                MessageBox.Show(error.ToString());
-            }
-            Process.GetCurrentProcess().Kill();
-        }
-
-        private void CommandLineInterfaceProcess()
-        {
-            try
-            {
-                string[] args = Environment.GetCommandLineArgs();
-
-                if (Array.Exists(args, a => a.Equals("-robots")))
-                {
-                    ButtonRobotCandleOne_Click(this, default);
-                }
-                else if (Array.Exists(args, a => a.Equals("-tester")))
-                {
-                    ButtonTesterCandleOne_Click(this, default);
-                }
-                else if (Array.Exists(args, a => a.Equals("-robotslight")))
-                {
-                    ButtonRobotLight_Click(this, default);
-                }
-                else if (Array.Exists(args, a => a.Equals("-error")) && PrimeSettingsMaster.RebootTradeUiLight)
-                {
-                    CriticalErrorHandler.ErrorInStartUp = true;
-
-                    Array.ForEach(args, (a) => { CriticalErrorHandler.ErrorMessage += a; });
-
-                    new Task(() =>
-                    {
-                        string messageError = String.Empty;
-
-                        for (int i = 0; i < args.Length; i++)
-                        {
-                            messageError += args[i];
-                        }
-
-                        MessageBox.Show(messageError);
-
-                    }).Start();
-
-                    ButtonRobotLight_Click(this, default);
-                }
-            }
-            catch (Exception ex)
-            {
-                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
-            }
-        }
-
-        private void ClearOptimizerWorkResults()
-        {
-            try
-            {
-                if (Directory.Exists("Engine") == false)
-                {
-                    return;
-                }
-
-                string[] files = Directory.GetFiles("Engine");
-
-                for (int i = 0; i < files.Length; i++)
-                {
-                    try
-                    {
-                        if (files[i].Contains(" OpT "))
-                        {
-                            File.Delete(files[i]);
-                        }
-                    }
-                    catch
-                    {
-                        // ignore
-                    }
-
-                }
-            }
-            catch
-            {
-                // ignore
-            }
-        }
-
-        string _messageToCrashServer;
-
-        private void SendMessageInCrashServer()
-        {
-            try
-            {
-                if (PrimeSettingsMaster.ReportCriticalErrors == false)
-                {
-                    return;
-                }
-
-                TcpClient newClient = new TcpClient();
-                newClient.Connect("45.137.152.144", 11000);
-                NetworkStream tcpStream = newClient.GetStream();
-                byte[] sendBytes = Encoding.UTF8.GetBytes(_messageToCrashServer);
-                tcpStream.Write(sendBytes, 0, sendBytes.Length);
-                newClient.Close();
+                string url = _aiVideoIsCurrent
+                    ? "https://o-s-a.net/course-ai-robots.html"
+                    : "https://www.tbank.ru/invest";
+
+                Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
             }
             catch
             {
@@ -976,36 +1771,64 @@ namespace OsEngine
 
         private void ButtonLocal_Click(object sender, RoutedEventArgs e)
         {
-            OsLocalization.OsLocalType newType;
-
-            if (ButtonLocal_Ru.Background.ToString() == "#FFFF5500")
+            try
             {
-                return;
+                OsLocalization.OsLocalType newType;
+
+                if (ButtonLocal_Ru.Background is System.Windows.Media.SolidColorBrush ruBrush
+                    && ruBrush.Color == Themes.ThemeManager.GetColor("ControlForeground"))
+                {
+                    return;
+                }
+
+                if (Enum.TryParse("Ru", out newType))
+                {
+                    OsLocalization.CurLocalization = newType;
+                    Thread.CurrentThread.CurrentCulture = OsLocalization.CurCulture;
+
+                    ButtonLocal_Ru.Background = Themes.ThemeManager.GetBrush("ControlForeground");
+                    ButtonLocal_Eng.Background = Themes.ThemeManager.GetBrush("ControlBackgroundNormal");
+
+                    if (_aiAdTimer != null)
+                    {
+                        _aiAdTimer.Stop();
+                    }
+
+                    _aiVideoIsCurrent = false;
+                    GifT.Source = new Uri(System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, @"Images\MainWIndow\tbank.mp4"));
+                    GifT.Position = TimeSpan.Zero;
+                    GifT.Play();
+                }
             }
-
-            if (Enum.TryParse("Ru", out newType))
+            catch (Exception ex)
             {
-                OsLocalization.CurLocalization = newType;
-                Thread.CurrentThread.CurrentCulture = OsLocalization.CurCulture;
-
-                ButtonLocal_Ru.Background = (SolidColorBrush)new BrushConverter().ConvertFrom("#ff5500");
-                ButtonLocal_Eng.Background = (SolidColorBrush)new BrushConverter().ConvertFrom("#FF111217");
-                GifT.Position = TimeSpan.Zero;
-                GifT.Play();
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
             }
         }
 
         private void ButtonLocal_Eng_Click(object sender, RoutedEventArgs e)
         {
-            OsLocalization.OsLocalType newType;
-
-            if (Enum.TryParse("Eng", out newType))
+            try
             {
-                OsLocalization.CurLocalization = newType;
-                Thread.CurrentThread.CurrentCulture = OsLocalization.CurCulture;
+                OsLocalization.OsLocalType newType;
 
-                ButtonLocal_Eng.Background = (SolidColorBrush)new BrushConverter().ConvertFrom("#ff5500");
-                ButtonLocal_Ru.Background = (SolidColorBrush)new BrushConverter().ConvertFrom("#FF111217");
+                if (Enum.TryParse("Eng", out newType))
+                {
+                    OsLocalization.CurLocalization = newType;
+                    Thread.CurrentThread.CurrentCulture = OsLocalization.CurCulture;
+
+                    if (_aiAdTimer != null)
+                    {
+                        _aiAdTimer.Stop();
+                    }
+
+                    ButtonLocal_Eng.Background = Themes.ThemeManager.GetBrush("ControlForeground");
+                    ButtonLocal_Ru.Background = Themes.ThemeManager.GetBrush("ControlBackgroundNormal");
+                }
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
             }
         }
 
@@ -1013,13 +1836,88 @@ namespace OsEngine
         {
             if (OsLocalization.CurLocalization == OsLocalization.OsLocalType.Ru)
             {
-                ButtonLocal_Ru.Background = (SolidColorBrush)new BrushConverter().ConvertFrom("#ff5500");
+                ButtonLocal_Ru.Background = Themes.ThemeManager.GetBrush("ControlForeground");
+                ButtonLocal_Eng.Background = Themes.ThemeManager.GetBrush("ControlBackgroundNormal");
             }
             else
             {
-                ButtonLocal_Eng.Background = (SolidColorBrush)new BrushConverter().ConvertFrom("#ff5500");
+                ButtonLocal_Eng.Background = Themes.ThemeManager.GetBrush("ControlForeground");
+                ButtonLocal_Ru.Background = Themes.ThemeManager.GetBrush("ControlBackgroundNormal");
             }
         }
+
+        private void MainWindow_ThemeChangedEvent()
+        {
+            try
+            {
+                RePaintThemeImages();
+                ChangeButtonCommits();
+                ReloadFlagButton();
+            }
+            catch (Exception error)
+            {
+                ServerMaster.SendNewLogMessage(error.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        /// <summary>
+        /// установить картинки главного меню под текущую тему
+        /// </summary>
+        private void RePaintThemeImages()
+        {
+            try
+            {
+                string theme = Themes.ThemeManager.CurrentTheme;
+
+                // у пользовательской темы может не быть своих картинок — откат на DarkOrange
+                Uri probe = new Uri("pack://application:,,,/Images/MainWIndow/Themes/" + theme + "/gear.png");
+
+                try
+                {
+                    System.Windows.Resources.StreamResourceInfo stream = Application.GetResourceStream(probe);
+
+                    if (stream != null)
+                    {
+                        stream.Stream.Dispose();
+                    }
+                    else
+                    {
+                        theme = Themes.ThemeManager.DefaultTheme;
+                    }
+                }
+                catch
+                {
+                    theme = Themes.ThemeManager.DefaultTheme;
+                }
+
+                string themeFolder = "pack://application:,,,/Images/MainWIndow/Themes/"
+                    + theme + "/";
+
+                ImageData.Source = new System.Windows.Media.Imaging.BitmapImage(new Uri(themeFolder + "test.png"));
+                ImageTests.Source = new System.Windows.Media.Imaging.BitmapImage(new Uri(themeFolder + "data.png"));
+                ImageTrading.Source = new System.Windows.Media.Imaging.BitmapImage(new Uri(themeFolder + "trading.png"));
+                ImageGear.Source = new System.Windows.Media.Imaging.BitmapImage(new Uri(themeFolder + "gear.png"));
+            }
+            catch (Exception error)
+            {
+                ServerMaster.SendNewLogMessage(error.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private void ButtonTheme_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                Themes.ThemeSelectUi ui = new Themes.ThemeSelectUi();
+                ui.ShowDialog();
+            }
+            catch (Exception error)
+            {
+                ServerMaster.SendNewLogMessage(error.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        #endregion
 
         #region Posts collection
 
@@ -1067,10 +1965,16 @@ namespace OsEngine
         #endregion
 
         #region Updater
+
         private async void GetUpdateInfo()
         {
             try
             {
+                if (Debugger.IsAttached && Process.GetProcessesByName("devenv").Length > 0)
+                {
+                    return;
+                }
+
                 DateTime insideVersionDate = File.GetLastWriteTimeUtc(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "OsEngine.exe"));
 
                 if (!File.Exists(@"Engine\Updater\LastUpdatesInfo.txt")) // модуль запустили первый раз, значит сборка актуальная
@@ -1080,81 +1984,77 @@ namespace OsEngine
                     Directory.CreateDirectory(@"Engine\Log");
 
                     //записываем дату сборки, далее ориентир будет по ней
-                    File.WriteAllText(@"Engine\Updater\LastUpdatesInfo.txt", insideVersionDate.ToString("G"));
+                    File.WriteAllText(@"Engine\Updater\LastUpdatesInfo.txt", insideVersionDate.ToUniversalTime().ToString("O"));
                 }
                 else
                 {
                     // взять из файла время последнего обновления
                     string time = File.ReadAllText(@"Engine\Updater\LastUpdatesInfo.txt");
 
-                    insideVersionDate = DateTime.Parse(time);
+                    DateTime parsedDate;
+
+                    if (!DateTime.TryParse(time, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out parsedDate))
+                    {
+                        // старый локаль-зависимый формат "G"
+                        parsedDate = DateTime.Parse(time);
+                    }
+
+                    insideVersionDate = DateTime.SpecifyKind(parsedDate, DateTimeKind.Utc);
                 }
 
-                // передать серверу дату 
+                // передать серверу дату по TLS с пиннингом сертификата
 
-                string ip = "185.186.143.9";
-                int port = 49152;
-
-                using (TcpClient client = new TcpClient())
+                using (SslStream stream = UpdateServerTls.ConnectPinned(UpdateServerTls.ServerHost, UpdateServerTls.UpdateProtocolPort, 5000))
                 {
-                    await client.ConnectAsync(ip, port);
+                    string request = $"{{\"LastUpdateDate\":\"{insideVersionDate:yyyy-MM-ddTHH:mm:ssZ}\"}}";
 
-                    if (client.Connected)
+                    byte[] data = Encoding.UTF8.GetBytes(request);
+
+                    stream.Write(data, 0, data.Length);
+
+                    using (MemoryStream ms = new MemoryStream())
                     {
-                        string request = $"{{\"LastUpdateDate\":\"{insideVersionDate:yyyy-MM-ddTHH:mm:ss}\"}}";
+                        byte[] buffer = new byte[8192];
+                        int bytesRead;
 
-                        byte[] data = Encoding.UTF8.GetBytes(request);
-
-                        using (NetworkStream stream = client.GetStream())
+                        while ((bytesRead = stream.Read(buffer, 0, buffer.Length)) > 0)
                         {
+                            ms.Write(buffer, 0, bytesRead);
+                        }
 
-                            stream.Write(data, 0, data.Length);
+                        string response = Encoding.UTF8.GetString(ms.ToArray());
 
-                            using (MemoryStream ms = new MemoryStream())
+                        if (!string.IsNullOrEmpty(response))
+                        {
+                            UpdateResponse firstResponse = JsonSerializer.Deserialize<UpdateResponse>(response);
+
+                            if (firstResponse != null)
                             {
-                                byte[] buffer = new byte[8192];
-                                int bytesRead;
-
-                                while ((bytesRead = stream.Read(buffer, 0, buffer.Length)) > 0)
+                                if (firstResponse.Success)
                                 {
-                                    ms.Write(buffer, 0, bytesRead);
+                                    _updServerResp = firstResponse;
+
+                                    if (!File.Exists(@"Engine\Updater\FilesVersionsTime.txt"))
+                                    {
+                                        WriteFilesVersionsTime(insideVersionDate); // при первом запуске проекта с обновлятором записываем время версии файлов в Debug
+                                    }
+
+                                    _commitsCount = firstResponse.MissedCommitsCount;
+
+                                    Application.Current.Dispatcher.Invoke(() =>
+                                    {
+                                        ChangeButtonCommits();
+                                    });
                                 }
-
-                                string response = Encoding.UTF8.GetString(ms.ToArray());
-
-                                if (!string.IsNullOrEmpty(response))
+                                else
                                 {
-                                    UpdateResponse firstResponse = JsonSerializer.Deserialize<UpdateResponse>(response);
-
-                                    if (firstResponse != null)
-                                    {
-                                        if (firstResponse.Success)
-                                        {
-                                            _updServerResp = firstResponse;
-
-                                            if (!File.Exists(@"Engine\Updater\FilesVersionsTime.txt"))
-                                            {
-                                                WriteFilesVersionsTime(insideVersionDate); // при первом запуске проекта с обновлятором записываем время версии файлов в Debug
-                                            }
-
-                                            _commitsCount = firstResponse.MissedCommitsCount;
-
-                                            Application.Current.Dispatcher.Invoke(() =>
-                                            {
-                                                ChangeButtonCommits();
-                                            });
-                                        }
-                                        else
-                                        {
-                                            _updServerResp = firstResponse;
-                                            throw new Exception("Сервер ответил с ошибкой");
-                                        }
-                                    }
-                                    else
-                                    {
-                                        throw new Exception("Нет ответа от сервера");
-                                    }
+                                    _updServerResp = firstResponse;
+                                    throw new Exception("Сервер ответил с ошибкой");
                                 }
+                            }
+                            else
+                            {
+                                throw new Exception("Нет ответа от сервера");
                             }
                         }
                     }
@@ -1192,7 +2092,7 @@ namespace OsEngine
             }
             catch (Exception ex)
             {
-                MessageBox.Show(ex.ToString());
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
             }
         }
 
@@ -1201,13 +2101,13 @@ namespace OsEngine
             try
             {
                 string buttCont = OsLocalization.MainWindow.NewCommits;
-                SolidColorBrush foreground = new((Color)ColorConverter.ConvertFromString("#FFEEEFFF"));
-                SolidColorBrush background = new((Color)ColorConverter.ConvertFromString("#FF111217"));
+                SolidColorBrush foreground = Themes.ThemeManager.GetBrush("ControlForegroundWhite");
+                SolidColorBrush background = Themes.ThemeManager.GetBrush("ControlBackgroundNormal");
 
                 if (_commitsCount > 0)
                 {
                     buttCont = OsLocalization.MainWindow.NewCommits.Replace("0", _commitsCount.ToString());
-                    background = new SolidColorBrush(Color.FromRgb(255, 85, 0));
+                    background = Themes.ThemeManager.GetBrush("ControlForeground");
                     foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FFF0F0F0"));
                 }
                 else if (_commitsCount < 0)
@@ -1222,7 +2122,7 @@ namespace OsEngine
             }
             catch (Exception ex)
             {
-                MessageBox.Show(ex.ToString());
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
             }
         }
 
@@ -1236,14 +2136,14 @@ namespace OsEngine
 
                 if(ui.IsUpdated == true)
                 {
-                    Close();
-                    ProccesIsWorked = false;
-                    Thread.Sleep(5000);
-                    Process.GetCurrentProcess().Kill();
+                    BeginGracefulShutdown(false);
                 }
                 else
                 {
-                    Show();
+                    if (ShutdownInProgress == false)
+                    { // из окна обновления могло стартовать завершение с AbortAll — не реэкспонировать главное окно
+                        Show();
+                    }
                 }
             }
             catch (Exception error)

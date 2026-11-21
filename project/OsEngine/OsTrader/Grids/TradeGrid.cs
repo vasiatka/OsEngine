@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Your rights to use code governed by this license https://github.com/AlexWan/OsEngine/blob/master/LICENSE
  * Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
 */
@@ -650,7 +650,8 @@ namespace OsEngine.OsTrader.Grids
                     TradeGridLine line = GridCreator.Lines[curNumber];
 
                     if (line.Position != null
-                        && line.Position.OpenActive)
+                        && line.Position.OpenActive
+                        && CanCancel(line.Position.OpenOrders[^1]))
                     {
                         Tab.CloseOrder(line.Position.OpenOrders[^1]);
                     }
@@ -972,6 +973,8 @@ namespace OsEngine.OsTrader.Grids
 
             if (StartProgram == StartProgram.IsOsTrader)
             {
+                ErrorsReaction.TryProcessCloseOrdersRecovery(DateTime.Now);
+
                 TradeGridRegime reaction = ErrorsReaction.GetReactionOnErrors(this);
 
                 if (reaction != TradeGridRegime.On)
@@ -1033,6 +1036,23 @@ namespace OsEngine.OsTrader.Grids
             if (baseRegime != TradeGridRegime.Off)
             {
                 DateTime serverTime = Tab.TimeServerCurrent;
+
+                if (serverTime == DateTime.MinValue)
+                {
+                    if (_serverTimeMissingLogged == false)
+                    {
+                        _serverTimeMissingLogged = true;
+
+                        string message = "Server time is not received yet. \n";
+                        message += "Grid trading is suspended until first data from the server.";
+
+                        SendNewLogMessage(message, LogMessageType.Error);
+                    }
+                }
+                else
+                {
+                    _serverTimeMissingLogged = false;
+                }
 
                 TradeGridRegime nonTradePeriodsRegime = NonTradePeriods.GetNonTradePeriodsRegime(serverTime);
 
@@ -1276,6 +1296,8 @@ namespace OsEngine.OsTrader.Grids
 
         private bool _firstPositionIsOpen = false;
 
+        private bool _serverTimeMissingLogged = false;
+
         private void Tab_PositionStopActivateEvent(Position obj)
         {
             if (_firstStopIsActivate == false)
@@ -1321,7 +1343,7 @@ namespace OsEngine.OsTrader.Grids
 
                 Order order = lines[i].Position.CloseOrders[^1];
 
-                if (order.NumberMarket != null
+                if (CanCancel(order)
                     && order.LastCancelTryLocalTime.AddSeconds(5) < DateTime.Now)
                 {
                     if (order.Price != line.Position.ProfitOrderPrice
@@ -1366,8 +1388,8 @@ namespace OsEngine.OsTrader.Grids
                 if (Tab.Security.PriceLimitHigh != 0
                  && Tab.Security.PriceLimitLow != 0)
                 {
-                    if (line.PriceExit > Tab.Security.PriceLimitHigh
-                        || line.PriceExit < Tab.Security.PriceLimitLow)
+                    if (pos.ProfitOrderPrice > Tab.Security.PriceLimitHigh
+                        || pos.ProfitOrderPrice < Tab.Security.PriceLimitLow)
                     {
                         continue;
                     }
@@ -1380,8 +1402,8 @@ namespace OsEngine.OsTrader.Grids
                     decimal maxPriceUp = lastPrice + lastPrice * (MaxDistanceToOrdersPercent / 100);
                     decimal minPriceDown = lastPrice - lastPrice * (MaxDistanceToOrdersPercent / 100);
 
-                    if (line.PriceExit > maxPriceUp
-                     || line.PriceExit < minPriceDown)
+                    if (pos.ProfitOrderPrice > maxPriceUp
+                     || pos.ProfitOrderPrice < minPriceDown)
                     {
                         continue;
                     }
@@ -1517,6 +1539,11 @@ namespace OsEngine.OsTrader.Grids
                 for (int i = 0; i < ordersToCancelBadPrice.Count; i++)
                 {
                     //Tab.SetNewLogMessage("Отзыв ордера по не правильной цене", LogMessageType.System);
+                    if (!CanCancel(ordersToCancelBadPrice[i]))
+                    {
+                        continue;
+                    }
+
                     Tab.CloseOrder(ordersToCancelBadPrice[i]);
                 }
 
@@ -1533,6 +1560,11 @@ namespace OsEngine.OsTrader.Grids
                 for (int i = 0; i < ordersToCancelBadLines.Count; i++)
                 {
                     //Tab.SetNewLogMessage("Отзыв ордера по количеству", LogMessageType.System);
+                    if (!CanCancel(ordersToCancelBadLines[i]))
+                    {
+                        continue;
+                    }
+
                     Tab.CloseOrder(ordersToCancelBadLines[i]);
                 }
 
@@ -1549,6 +1581,11 @@ namespace OsEngine.OsTrader.Grids
                 for (int i = 0; i < ordersToCancelOpenOrders.Count; i++)
                 {
                     //Tab.SetNewLogMessage("Отзыв ордера по дыре в сетке", LogMessageType.System);
+                    if (!CanCancel(ordersToCancelOpenOrders[i]))
+                    {
+                        continue;
+                    }
+
                     Tab.CloseOrder(ordersToCancelOpenOrders[i]);
                 }
 
@@ -1568,6 +1605,11 @@ namespace OsEngine.OsTrader.Grids
                 {
                     for (int i = 0; i < ordersToCancelCloseOrders.Count; i++)
                     {
+                        if (!CanCancel(ordersToCancelCloseOrders[i]))
+                        {
+                            continue;
+                        }
+
                         Tab.CloseOrder(ordersToCancelCloseOrders[i]);
                     }
 
@@ -1742,7 +1784,7 @@ namespace OsEngine.OsTrader.Grids
 
                 Order orderToClose = pos.CloseOrders[^1];
 
-                if (orderToClose.Volume != pos.OpenVolume)
+                if (orderToClose.Volume - orderToClose.VolumeExecute != pos.OpenVolume)
                 {
                     bool isInArray = false;
 
@@ -1782,7 +1824,7 @@ namespace OsEngine.OsTrader.Grids
 
                 Order order = lines[i].Position.OpenOrders[^1];
 
-                if (order.NumberMarket != null)
+                if (CanCancel(order))
                 {
                     Tab.CloseOrder(order);
                     cancelledOrders++;
@@ -1878,7 +1920,8 @@ namespace OsEngine.OsTrader.Grids
                     decimal volumeCloseOrder = orderToClose.Volume;
                     decimal volumeExecuteCloseOrder = orderToClose.VolumeExecute;
 
-                    if (volumePosOpen != (volumeCloseOrder - volumeExecuteCloseOrder))
+                    if (volumePosOpen != (volumeCloseOrder - volumeExecuteCloseOrder)
+                        && CanCancel(orderToClose))
                     {
                         Tab.CloseOrder(orderToClose);
                     }
@@ -1904,7 +1947,7 @@ namespace OsEngine.OsTrader.Grids
 
                 Order order = lines[i].Position.CloseOrders[^1];
 
-                if (order.NumberMarket != null
+                if (CanCancel(order)
                    && order.TypeOrder != OrderPriceType.Market)
                 {
                     Tab.CloseOrder(order);
@@ -1915,12 +1958,97 @@ namespace OsEngine.OsTrader.Grids
             return cancelledOrders;
         }
 
+        // отзыв возможен только с биржевым номером: AServer.CancelOrder безномера отклоняет с ERROR-логом каждый тик — спам;
+        // безномера приходят и как "" (null -> "" после round-trip журнала сетки), поэтому IsNullOrEmpty, а не != null
+        private static bool CanCancel(Order o) => !string.IsNullOrEmpty(o.NumberMarket);
+
+        // bug-0493: гейты «нет рыночных данных» в TrySetOpenOrders молча останавливали сетку на неограниченное время.
+        // Только наблюдаемость: гейты по-прежнему делают return, варнинг после непрерывной блокировки
+        // BlockWarnAfterSeconds и не чаще раза в BlockWarnRepeatMinutes.
+        private DateTime _openOrdersBlockedSince = DateTime.MinValue;
+
+        private string _openOrdersBlockedGate = null;
+
+        private DateTime _openOrdersBlockWarnTime = DateTime.MinValue;
+
+        private const int BlockWarnAfterSeconds = 30;
+
+        private const int BlockWarnRepeatMinutes = 10;
+
+        private void WarnAboutOpenOrdersBlock(string gateReason)
+        {
+            if (_openOrdersBlockedGate != gateReason)
+            {
+                _openOrdersBlockedGate = gateReason;
+                _openOrdersBlockedSince = DateTime.Now;
+                _openOrdersBlockWarnTime = DateTime.MinValue;
+                return;
+            }
+
+            if ((DateTime.Now - _openOrdersBlockedSince).TotalSeconds < BlockWarnAfterSeconds)
+            {
+                return;
+            }
+
+            if (_openOrdersBlockWarnTime != DateTime.MinValue
+                && (DateTime.Now - _openOrdersBlockWarnTime).TotalMinutes < BlockWarnRepeatMinutes)
+            {
+                return;
+            }
+
+            _openOrdersBlockWarnTime = DateTime.Now;
+
+            decimal warnBid = 0;
+            decimal warnAsk = 0;
+            decimal warnLastPrice = 0;
+            int warnCandlesCount = 0;
+
+            // живой список свечей trim-ит поток сервера (AServer.cs RemoveRange), Tab может быть в teardown:
+            // читаем в локальные снапшоты под защитой — гонка не должна срывать return гейта (хвост тика после хелпера).
+            // текст тогда выйдет с нулями, но факт блока и причина обязаны дойти до лога.
+            try
+            {
+                warnBid = Tab.PriceBestBid;
+                warnAsk = Tab.PriceBestAsk;
+                List<Candle> warnCandles = Tab.CandlesAll;
+                warnCandlesCount = warnCandles == null ? 0 : warnCandles.Count;
+
+                if (warnCandlesCount > 0)
+                {
+                    warnLastPrice = warnCandles[warnCandlesCount - 1].Close;
+                }
+            }
+            catch (Exception)
+            {
+                warnBid = 0;
+                warnAsk = 0;
+                warnLastPrice = 0;
+            }
+
+            string message = "Grid open orders gate blocked for "
+                + (int)(DateTime.Now - _openOrdersBlockedSince).TotalSeconds + "s. Gate: " + gateReason
+                + ". Bid: " + warnBid + ", Ask: " + warnAsk
+                + ", LastPrice: " + warnLastPrice + ", Candles: " + warnCandlesCount
+                + ". Orders are not placed until market data arrives.";
+
+            try
+            {
+                SendNewLogMessage(message, LogMessageType.Warning);
+            }
+            catch (Exception)
+            {
+                // осознанно молчим: бросок подписчика лога не причина срывать хвост тика (TrySetStopAndProfit/TrySetLimitProfit).
+                // штамп warnTime выше уже выставлен: потеря варнинга = подавление на BlockWarnRepeatMinutes, не краш и не Error.
+            }
+        }
+
         private void TrySetOpenOrders()
         {
             List<Candle> candles = Tab.CandlesAll;
 
             if (candles == null || candles.Count == 0)
             {
+                WarnAboutOpenOrdersBlock("candles");
                 return;
             }
 
@@ -1928,14 +2056,19 @@ namespace OsEngine.OsTrader.Grids
 
             if (lastPrice == 0)
             {
+                WarnAboutOpenOrdersBlock("lastPrice");
                 return;
             }
 
             if (Tab.PriceBestAsk == 0
                 || Tab.PriceBestBid == 0)
             {
+                WarnAboutOpenOrdersBlock("bid_ask");
                 return;
             }
+
+            _openOrdersBlockedSince = DateTime.MinValue;
+            _openOrdersBlockedGate = null;
 
             List<TradeGridLine> linesAll = GridCreator.Lines;
 

@@ -2794,5 +2794,169 @@ namespace OsEngine.Language
         public string Label745 => OsLocalization.ConvertToLocString(
           "Eng:Separation_" +
           "Ru:Раздвижка_");
+
+        public string Label746 => OsLocalization.ConvertToLocString(
+          "Eng:Time shift (hour)_" +
+          "Ru:Временной сдвиг (час)_");
+
+        public string Label747 => OsLocalization.ConvertToLocString(
+          "Eng:Journal common_" +
+          "Ru:Журнал общий_");
+
+        public string Label748 => OsLocalization.ConvertToLocString(
+         "Eng:Save bots_" +
+         "Ru:Сохранить ботов_");
+
+        public string Label749 => OsLocalization.ConvertToLocString(
+          "Eng:Load bots_" +
+          "Ru:Загрузить ботов_");
+
+        public string Label750 => OsLocalization.ConvertToLocString(
+          "Eng:No bots to save_" +
+          "Ru:Нет роботов для сохранения_");
+
+        public string Label751 => OsLocalization.ConvertToLocString(
+          "Eng:Preset file not found_" +
+          "Ru:Файл preset не найден_");
+
+        public string Label752 => OsLocalization.ConvertToLocString(
+          "Eng:Load preset is available only in Robot Lite_" +
+          "Ru:Загрузка preset доступна только в Robot Lite_");
+
+        public string Label753 => OsLocalization.ConvertToLocString(
+          "Eng:Invalid preset file format_" +
+          "Ru:Неверный формат файла preset_");
+
+        public string Label754 => OsLocalization.ConvertToLocString(
+          "Eng:Bot \"{0}\" cannot be loaded. A robot with this name already exists._" +
+          "Ru:Робот \"{0}\" не может быть загружен. Робот с таким именем уже существует._");
+
+        public string Label755 => OsLocalization.ConvertToLocString(
+          "Eng:Preset saved: {0}_" +
+          "Ru:Preset сохранён: {0}_");
+
+        public string Label756 => OsLocalization.ConvertToLocString(
+          "Eng:Preset loaded: {0}_" +
+          "Ru:Preset загружен: {0}_");
+
+        public string Label757 => OsLocalization.ConvertToLocString(
+          "Eng:Change password_" +
+          "Ru:Сменить пароль_");
+
+        public string Label758 => OsLocalization.ConvertToLocString(
+          "Eng:Wrong password. Try again_" +
+          "Ru:Неверный пароль. Попробуйте ещё_");
+
+        public string Label759 => OsLocalization.ConvertToLocString(
+          "Eng:Bot line in the preset file is corrupted and was skipped. Line - {0}_" +
+          "Ru:Строка робота в файле preset повреждена и была пропущена. Строка - {0}_");
+
+        public string Label760 => OsLocalization.ConvertToLocString(
+          "Eng:Some bots from the preset could not be created. Count - {0}_" +
+          "Ru:Некоторые роботы из preset не были созданы. Количество - {0}_");
+
+        public string Label761 => OsLocalization.ConvertToLocString(
+          "Eng:Some bots were saved without parameters. Count - {0}_" +
+          "Ru:Некоторые роботы сохранены без параметров. Количество - {0}_");
+
+        public string Label762 => OsLocalization.ConvertToLocString(
+          "Eng:Migration_" +
+          "Ru:Миграция_");
+
+        public string Label763 => OsLocalization.ConvertToLocString(
+          "Eng:Transfer robots with parameters_" +
+          "Ru:Перенос роботов с параметрами_");
+
+        public string Label764 => OsLocalization.ConvertToLocString(
+          "Eng:Close_" +
+          "Ru:Закрыть_");
+
+        public string Label765 => OsLocalization.ConvertToLocString(
+          "Eng:Check the data sources in the robot tabs_" +
+          "Ru:Проверьте источники данных в табах роботов_");
+
+        public string Label766 => OsLocalization.ConvertToLocString(
+          "Eng:Save_" +
+          "Ru:Сохранить_");
+
+        public string Label767 => OsLocalization.ConvertToLocString(
+          "Eng:Load_" +
+          "Ru:Загрузить_");
+
+        public string Label768 => OsLocalization.ConvertToLocString(
+          "Eng:Prefix_" +
+          "Ru:Префикс_");
+
+        public string Label769 => OsLocalization.ConvertToLocString(
+          "Eng:Invalid characters in the prefix_" +
+          "Ru:Недопустимые символы в префиксе_");
+
+        public string Label770 => OsLocalization.ConvertToLocString(
+          "Eng:Save tab - writes all robots with parameters to a file. " +
+          "The suffix from the field is appended to robot names, the field can be empty.\n\n" +
+          "Load tab - creates robots from the file. " +
+          "A robot whose name already exists in the table will be skipped. " +
+          "After loading, open the robot tabs and re-select the data source and instrument._" +
+          "Ru:Вкладка Сохранить - записывает всех роботов с параметрами в файл. " +
+          "Суффикс из поля дописывается в конец имён роботов, поле можно оставить пустым.\n\n" +
+          "Вкладка Загрузить - создаёт роботов из файла. " +
+          "Робот с именем, которое уже есть в таблице, будет пропущен. " +
+          "После загрузки откройте табы роботов и заново выберите источник данных и инструмент._");
+
+        public string Label771 => OsLocalization.ConvertToLocString(
+           "Eng:Server stop order_" +
+           "Ru:Серверный стоп ордер_");
+
+        public string Label772 => OsLocalization.ConvertToLocString(
+           "Eng:Stop-Market_" +
+           "Ru:Стоп-Маркет_");
+
+        public string Label773 => OsLocalization.ConvertToLocString(
+           "Eng:Buy at stop market_" +
+           "Ru:Купить стоп-маркет ордером_");
+
+        public string Label774 => OsLocalization.ConvertToLocString(
+           "Eng:Sell at stop market_" +
+           "Ru:Продать стоп-маркет ордером_");
+
+        public string Label775 => OsLocalization.ConvertToLocString(
+           "Eng:Close at stop market_" +
+           "Ru:Выставить стоп-маркет ордер_");
+
+        public string Label776 => OsLocalization.ConvertToLocString(
+           "Eng:Move to group_" +
+           "Ru:Переместить в группу_");
+
+        public string Label777 => OsLocalization.ConvertToLocString(
+           "Eng:New group..._" +
+           "Ru:Новая группа..._");
+
+        public string Label778 => OsLocalization.ConvertToLocString(
+           "Eng:Base group_" +
+           "Ru:Базовая группа_");
+
+        public string Label779 => OsLocalization.ConvertToLocString(
+           "Eng:Delete group_" +
+           "Ru:Удалить группу_");
+
+        public string Label780 => OsLocalization.ConvertToLocString(
+           "Eng:You want to delete the group \"{0}\". All robots from this group will be moved to the Base group. Are you sure?_" +
+           "Ru:Вы собираетесь удалить группу \"{0}\". Все роботы из этой группы будут перемещены в группу \"Базовая группа\". Вы уверены?_");
+
+        public string Label781 => OsLocalization.ConvertToLocString(
+           "Eng:Server time is not received yet_" +
+           "Ru:Время сервера не получено_");
+
+        public string Label782 => OsLocalization.ConvertToLocString(
+           "Eng:Stop by price up_" +
+           "Ru:По достижении цены вверх_");
+
+        public string Label783 => OsLocalization.ConvertToLocString(
+           "Eng:Stop by price down_" +
+           "Ru:По достижении цены вниз_");
+
+        public string Label784 => OsLocalization.ConvertToLocString(
+           "Eng:Restore close orders count on funds recovery_" +
+           "Ru:Восстанавливать закрытия при возврате средств_");
     }
 }

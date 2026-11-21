@@ -39,6 +39,7 @@ namespace OsEngine.Market.Servers.KuCoin.KuCoinFutures
             CreateParameterEnum("Margin Mode", "Cross", new List<string> { "Cross", "Isolated" });
             CreateParameterString("Leverage", "1");
             CreateParameterBoolean("Extended Data", false);
+            CreateParameterBoolean("Use Shared RateGate", false);
 
             ServerParameters[0].Comment = OsLocalization.Market.Label246;
             ServerParameters[1].Comment = OsLocalization.Market.Label247;
@@ -47,6 +48,7 @@ namespace OsEngine.Market.Servers.KuCoin.KuCoinFutures
             ServerParameters[4].Comment = OsLocalization.Market.Label249;
             ServerParameters[5].Comment = OsLocalization.Market.Label256;
             ServerParameters[6].Comment = OsLocalization.Market.Label270;
+            ServerParameters[7].Comment = OsLocalization.Market.Label324;
         }
 
         private void KuCoinFuturesServer_ValueChange()
@@ -65,30 +67,37 @@ namespace OsEngine.Market.Servers.KuCoin.KuCoinFutures
 
             Thread threadForPublicMessages = new Thread(PublicMessageReader);
             threadForPublicMessages.Name = "PublicMessageReaderKuCoin";
+            threadForPublicMessages.IsBackground = true;
             threadForPublicMessages.Start();
 
             Thread threadForPrivateMessages = new Thread(PrivateMessageReader);
             threadForPrivateMessages.Name = "PrivateMessageReaderKuCoin";
+            threadForPrivateMessages.IsBackground = true;
             threadForPrivateMessages.Start();
 
             Thread threadCheckAliveWebSocket = new Thread(CheckAliveWebSocket);
             threadCheckAliveWebSocket.Name = "CheckAliveWebSocketKuCoinFutures";
+            threadCheckAliveWebSocket.IsBackground = true;
             threadCheckAliveWebSocket.Start();
 
             Thread threadGetPortfolios = new Thread(ThreadGetPortfolios);
             threadGetPortfolios.Name = "ThreadKuCoinFuturesPortfolios";
+            threadGetPortfolios.IsBackground = true;
             threadGetPortfolios.Start();
 
             Thread threadExtendedData = new Thread(ThreadExtendedData);
             threadExtendedData.Name = "ThreadKuCoinFuturesExtendedData";
+            threadExtendedData.IsBackground = true;
             threadExtendedData.Start();
 
             Thread threadMarketDepthParsing = new Thread(ThreadMarketDepthParsing);
             threadMarketDepthParsing.Name = "ThreadKuCoinFuturesMarketDepthParsing";
+            threadMarketDepthParsing.IsBackground = true;
             threadMarketDepthParsing.Start();
 
             Thread threadTradesParsing = new Thread(ThreadTradesParsing);
             threadTradesParsing.Name = "ThreadKuCoinFuturesTradesParsing";
+            threadTradesParsing.IsBackground = true;
             threadTradesParsing.Start();
         }
 
@@ -1491,6 +1500,9 @@ namespace OsEngine.Market.Servers.KuCoin.KuCoinFutures
 
         private List<OpenInterestData> _openInterest = new List<OpenInterestData>();
 
+        // Guards _openInterest: written by ThreadExtendedData, read per trade by UpdateTrade
+        private readonly object _openInterestLocker = new object();
+
         private DateTime _timeLastUpdateExtendedData = DateTime.Now;
 
         private readonly RateGate _rateGateOpenInterest = new RateGate(1, TimeSpan.FromMilliseconds(350));
@@ -1576,19 +1588,22 @@ namespace OsEngine.Market.Servers.KuCoin.KuCoinFutures
 
                                 bool isInArray = false;
 
-                                for (int j = 0; j < _openInterest.Count; j++)
+                                lock (_openInterestLocker)
                                 {
-                                    if (_openInterest[j].SecutityName == openInterestData.SecutityName)
+                                    for (int j = 0; j < _openInterest.Count; j++)
                                     {
-                                        _openInterest[j].OpenInterestValue = openInterestData.OpenInterestValue;
-                                        isInArray = true;
-                                        break;
+                                        if (_openInterest[j].SecutityName == openInterestData.SecutityName)
+                                        {
+                                            _openInterest[j].OpenInterestValue = openInterestData.OpenInterestValue;
+                                            isInArray = true;
+                                            break;
+                                        }
                                     }
-                                }
 
-                                if (isInArray == false)
-                                {
-                                    _openInterest.Add(openInterestData);
+                                    if (isInArray == false)
+                                    {
+                                        _openInterest.Add(openInterestData);
+                                    }
                                 }
                             }
 
@@ -1900,21 +1915,24 @@ namespace OsEngine.Market.Servers.KuCoin.KuCoinFutures
 
         private decimal GetOpenInterestValue(string securityNameCode)
         {
-            if (_openInterest.Count == 0
-                 || _openInterest == null)
+            lock (_openInterestLocker)
             {
+                if (_openInterest == null
+                    || _openInterest.Count == 0)
+                {
+                    return 0;
+                }
+
+                for (int i = 0; i < _openInterest.Count; i++)
+                {
+                    if (_openInterest[i].SecutityName == securityNameCode)
+                    {
+                        return _openInterest[i].OpenInterestValue.ToDecimal();
+                    }
+                }
+
                 return 0;
             }
-
-            for (int i = 0; i < _openInterest.Count; i++)
-            {
-                if (_openInterest[i].SecutityName == securityNameCode)
-                {
-                    return _openInterest[i].OpenInterestValue.ToDecimal();
-                }
-            }
-
-            return 0;
         }
 
         private MarketDepth UpdateDepth(string message)
@@ -2743,11 +2761,18 @@ namespace OsEngine.Market.Servers.KuCoin.KuCoinFutures
 
         #region 12 Queries
 
+        private static readonly RateGate _sharedRateGate = new RateGate(20, TimeSpan.FromMilliseconds(300));
+
         private RateGate _rateGate = new RateGate(20, TimeSpan.FromMilliseconds(300));
+
+        private RateGate GetRateGate()
+        {
+            return ((ServerParameterBool)ServerParameters[7]).Value ? _sharedRateGate : _rateGate;
+        }
 
         private IRestResponse CreatePrivateQueryOrders(string path, Method method, string body)
         {
-            _rateGate.WaitToProceed();
+            GetRateGate().WaitToProceed();
 
             try
             {
@@ -2792,7 +2817,7 @@ namespace OsEngine.Market.Servers.KuCoin.KuCoinFutures
 
         private IRestResponse CreatePrivateQuery(string path, Method method, string body)
         {
-            _rateGate.WaitToProceed();
+            GetRateGate().WaitToProceed();
 
             try
             {

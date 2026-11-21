@@ -1,4 +1,8 @@
-﻿
+﻿/*
+ * Your rights to use code governed by this license https://github.com/AlexWan/OsEngine/blob/master/LICENSE
+ * Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
+*/
+
 namespace OsEngine.Market.Servers.TelegramNews
 {
     class TelegramNewsServerPermission : IServerPermission
@@ -109,6 +113,11 @@ namespace OsEngine.Market.Servers.TelegramNews
         #region Trade permission
 
         public bool MarketOrdersIsSupport
+        {
+            get { return false; }
+        }
+
+        public bool StopOrdersIsSupport
         {
             get { return false; }
         }
@@ -227,7 +236,7 @@ namespace OsEngine.Market.Servers.TelegramNews
 
         public bool IsSupports_ProxyFor_MultipleInstances
         {
-            get { return false; }
+            get { return true; }
         }
 
         public bool IsSupports_AsyncOrderSending
@@ -278,8 +287,8 @@ namespace OsEngine.Market.Servers.TelegramNews
             {
                 return new OrderLifeTimePermission
                 {
-                    GtcIsReady = true,
-                    SpecifiedIsReady = true,
+                    GtcIsReady = false,
+                    SpecifiedIsReady = false,
                     DayIsReady = false
                 };
             }

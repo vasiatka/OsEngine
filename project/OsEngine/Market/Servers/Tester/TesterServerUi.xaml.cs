@@ -1,13 +1,16 @@
-﻿/*
+/*
  *Your rights to use the code are governed by this license https://github.com/AlexWan/OsEngine/blob/master/LICENSE
  *Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
 */
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Forms;
@@ -18,6 +21,7 @@ using OsEngine.Entity;
 using OsEngine.Language;
 using OsEngine.Layout;
 using OsEngine.Logging;
+using OsEngine.Wiki;
 using Color = System.Drawing.Color;
 
 namespace OsEngine.Market.Servers.Tester
@@ -85,6 +89,7 @@ namespace OsEngine.Market.Servers.Tester
             _server.SecuritiesChangeEvent += _server_SecuritiesChangeEvent;
             _server.TestRegimeChangeEvent += _server_TestRegimeChangeEvent;
             _server.TestingFastEvent += _server_TestingFastEvent;
+            _server.DividendPaymentsChangedEvent += _server_DividendPaymentsChangedEvent;
 
             CreateGrid();
             PaintGrid();
@@ -162,16 +167,65 @@ namespace OsEngine.Market.Servers.Tester
             {
                 ComboBoxSets.Items.Add(sets[i]);
             }
-            if (!string.IsNullOrEmpty(_server.ActiveSet) &&
-                _server.ActiveSet.Split('_').Length == 2)
+            if (!string.IsNullOrEmpty(_server.ActiveSet))
             {
-                ComboBoxSets.SelectedItem = _server.ActiveSet.Split('_')[1];
+                string activeSetName = Path.GetFileName(_server.ActiveSet);
+
+                if (activeSetName.StartsWith("Set_"))
+                {
+                    activeSetName = activeSetName.Substring("Set_".Length);
+                }
+
+                ComboBoxSets.SelectedItem = activeSetName;
             }
 
             ComboBoxSets.SelectionChanged += ComboBoxSets_SelectionChanged;
 
             CheckBoxRemoveTrades.IsChecked = _server.RemoveTradesFromMemory;
             CheckBoxRemoveTrades.Click += CheckBoxRemoveTrades_Click;
+
+            // dividends
+
+            CreateDividendsGrid();
+            PaintDividendsGrid();
+
+            if (_server.DividendsIsOn)
+            {
+                CheckBoxDividendsIsOn.IsChecked = true;
+            }
+            else
+            {
+                CheckBoxDividendsIsOn.IsChecked = false;
+            }
+
+            CheckBoxDividendsIsOn.Click += CheckBoxDividendsIsOn_Click;
+
+            // margin and taxes
+
+            _server.MarginPaymentsChangedEvent += _server_MarginPaymentsChangedEvent;
+            _server.TaxPaymentsChangedEvent += _server_TaxPaymentsChangedEvent;
+
+            CreateMarginGrids();
+            PaintMarginPaymentsGrid();
+
+            ComboBoxMarginRegime.Items.Add("Off");
+            ComboBoxMarginRegime.Items.Add("Summ");
+            ComboBoxMarginRegime.Items.Add("Percent");
+            ComboBoxMarginRegime.SelectedItem = _server.MarginRegime;
+            ComboBoxMarginRegime.SelectionChanged += ComboBoxMarginRegime_SelectionChanged;
+
+            UpdateMarginSettingsGrid();
+
+            CreateTaxGrids();
+            PaintTaxPaymentsGrid();
+
+            CheckBoxTaxesIsOn.IsChecked = _server.TaxesIsOn;
+            CheckBoxTaxesIsOn.Click += CheckBoxTaxesIsOn_Click;
+
+            ButtonHelpDividends.Click += ButtonHelpDividends_Click;
+            ButtonHelpMargin.Click += ButtonHelpMargin_Click;
+            ButtonHelpTaxes.Click += ButtonHelpTaxes_Click;
+            ButtonHelpDataType.Click += ButtonHelpDataType_Click;
 
             // data for test
 
@@ -182,6 +236,8 @@ namespace OsEngine.Market.Servers.Tester
             ComboBoxDataType.Items.Add(TesterDataType.MarketDepthOnlyReadyCandle);
             ComboBoxDataType.SelectedItem = _server.TypeTesterData;
             ComboBoxDataType.SelectionChanged += ComboBoxDataType_SelectionChanged;
+
+            CheckDataTypeMatch();
 
             TextBoxDataPath.Text = _server.PathToFolder;
             ComboBoxDataSourceType.Items.Add(TesterSourceDataType.Folder);
@@ -217,6 +273,15 @@ namespace OsEngine.Market.Servers.Tester
             ButtonNextPos.Content = OsLocalization.Market.Label62;
             ButtonGoTo.Content = OsLocalization.Market.Label63;
             CheckBoxRemoveTrades.Content = OsLocalization.Market.Label130;
+            LabelTabItemAccrualsAndCharge.Header = OsLocalization.Market.LabelAccrualsAndCharges;
+            LabelTabItemDividends.Header = OsLocalization.Market.LabelTabItemDividends;
+            CheckBoxDividendsIsOn.Content = OsLocalization.Market.LabelDividendsIsOn;
+            ButtonOpenDataBaseDividends.Content = OsLocalization.Market.Label337;
+            ButtonDivsUpdateBase.Content = OsLocalization.Market.Label338;
+            LabelTabItemMargin.Header = OsLocalization.Market.LabelTabItemMargin;
+            LabelTabItemTaxes.Header = OsLocalization.Market.LabelTabItemTaxes;
+            LabelMarginRegime.Content = OsLocalization.Market.LabelMarginRegime;
+            CheckBoxTaxesIsOn.Content = OsLocalization.Market.LabelDividendsIsOn;
 
             if (InteractiveInstructions.TesterLightPosts.AllInstructionsInClass == null
              || InteractiveInstructions.TesterLightPosts.AllInstructionsInClass.Count == 0)
@@ -237,6 +302,10 @@ namespace OsEngine.Market.Servers.Tester
             Thread profitChartUpdater = new Thread(ResizeWorker);
             profitChartUpdater.Start();
 
+            Thread dividendsGridUpdater = new Thread(DividendsGridPainterWorkerPlace);
+            dividendsGridUpdater.IsBackground = true;
+            dividendsGridUpdater.Start();
+
             this.Activate();
             this.Focus();
 
@@ -256,53 +325,63 @@ namespace OsEngine.Market.Servers.Tester
             _timerTextBoxTo.Tick += _timer_TextBoxTo;
         }
 
+        private DispatcherTimer _blinkTimer;
+        private int _blinkCount;
+        private bool _isGreenVisible = true;
+
         private void StartButtonBlinkAnimation()
         {
             try
             {
-                DispatcherTimer timer = new DispatcherTimer();
-                int blinkCount = 0;
-                bool isGreenVisible = true;
-
-                timer.Interval = TimeSpan.FromMilliseconds(300);
-                timer.Tick += (s, e) =>
-                {
-                    try
-                    {
-                        if (blinkCount >= 20)
-                        {
-                            timer.Stop();
-                            PostGreenTesterServer.Opacity = 1;
-                            PostWhiteTesterServer.Opacity = 0;
-                            return;
-                        }
-
-                        if (isGreenVisible)
-                        {
-                            PostGreenTesterServer.Opacity = 0;
-                            PostWhiteTesterServer.Opacity = 1;
-                        }
-                        else
-                        {
-                            PostGreenTesterServer.Opacity = 1;
-                            PostWhiteTesterServer.Opacity = 0;
-                        }
-
-                        isGreenVisible = !isGreenVisible;
-                        blinkCount++;
-                    }
-                    catch (Exception ex)
-                    {
-                        ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
-                        timer.Stop();
-                    }
-                };
-
-                timer.Start();
+                _blinkTimer = new DispatcherTimer();
+                _blinkTimer.Interval = TimeSpan.FromMilliseconds(300);
+                _blinkTimer.Tick += _blinkTimer_Tick;
+                _blinkTimer.Start();
             }
             catch (Exception ex)
             {
                 ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private void _blinkTimer_Tick(object sender, EventArgs e)
+        {
+            if (_blinkTimer == null)
+            {
+                return;
+            }
+
+            try
+            {
+                if (_blinkCount >= 20)
+                {
+                    _blinkTimer.Stop();
+                    PostGreenTesterServer.Opacity = 1;
+                    PostWhiteTesterServer.Opacity = 0;
+                    return;
+                }
+
+                if (_isGreenVisible)
+                {
+                    PostGreenTesterServer.Opacity = 0;
+                    PostWhiteTesterServer.Opacity = 1;
+                }
+                else
+                {
+                    PostGreenTesterServer.Opacity = 1;
+                    PostWhiteTesterServer.Opacity = 0;
+                }
+
+                _isGreenVisible = !_isGreenVisible;
+                _blinkCount++;
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+                if (_blinkTimer != null)
+                {
+                    _blinkTimer.Stop();
+                }
             }
         }
 
@@ -314,71 +393,119 @@ namespace OsEngine.Market.Servers.Tester
 
         private void TesterServerUi_Closing(object sender, System.ComponentModel.CancelEventArgs e)
         {
-            _uiIsClosed = true;
-
-            Closing -= TesterServerUi_Closing;
-
-            TextBoxStartDepozit.TextChanged -= TextBoxStartDeposit_TextChanged;
-            TextBoxFrom.TextChanged -= TextBoxFrom_TextChanged;
-            TextBoxTo.TextChanged -= TextBoxTo_TextChanged;
-            TextBoxSlippageSimpleOrder.TextChanged -= TextBoxSlippageSimpleOrderTextChanged;
-            TextBoxSlippageStop.TextChanged -= TextBoxSlippageStop_TextChanged;
-            ComboBoxSets.SelectionChanged -= ComboBoxSets_SelectionChanged;
-            ComboBoxDataType.SelectionChanged -= ComboBoxDataType_SelectionChanged;
-            ComboBoxDataSourceType.SelectionChanged -= ComboBoxDataSourceType_SelectionChanged;
-            SliderFrom.ValueChanged -= SliderFrom_ValueChanged;
-            SliderTo.ValueChanged -= SliderTo_ValueChanged;
-
-            _server.ConnectStatusChangeEvent -= _server_ConnectStatusChangeEvent;
-            _server.NewCurrentValue -= _server_NewCurrentValue;
-            _server.TestingStartEvent -= _server_TestingStartEvent;
-            _server.SecuritiesChangeEvent -= _server_SecuritiesChangeEvent;
-            _server.TestRegimeChangeEvent -= _server_TestRegimeChangeEvent;
-            _server.TestingFastEvent -= _server_TestingFastEvent;
-            _server.LoadSecurityEvent -= _server_LoadSecurityEvent;
-
-            _server = null;
-
-            if (_securitiesGrid != null)
+            try
             {
-                DataGridFactory.ClearLinks(_securitiesGrid);
-                _securitiesGrid.DoubleClick -= _myGridView_DoubleClick;
-                _securitiesGrid.CellValueChanged -= _myGridView_CellValueChanged;
-                _securitiesGrid.DataError -= _gridClearing_DataError;
-                HostSecurities.Child = null;
-                _securitiesGrid = null;
-            }
+                _uiIsClosed = true;
 
-            if (_gridClearing != null)
+                if (_blinkTimer != null)
+                {
+                    _blinkTimer.Stop();
+                    _blinkTimer.Tick -= _blinkTimer_Tick;
+                    _blinkTimer = null;
+                }
+
+                TextBoxStartDepozit.TextChanged -= TextBoxStartDeposit_TextChanged;
+                TextBoxFrom.TextChanged -= TextBoxFrom_TextChanged;
+                TextBoxTo.TextChanged -= TextBoxTo_TextChanged;
+                TextBoxSlippageSimpleOrder.TextChanged -= TextBoxSlippageSimpleOrderTextChanged;
+                TextBoxSlippageStop.TextChanged -= TextBoxSlippageStop_TextChanged;
+                ComboBoxSets.SelectionChanged -= ComboBoxSets_SelectionChanged;
+                ComboBoxDataType.SelectionChanged -= ComboBoxDataType_SelectionChanged;
+                ComboBoxDataSourceType.SelectionChanged -= ComboBoxDataSourceType_SelectionChanged;
+                ComboBoxOrderActivationType.SelectionChanged -= ComboBoxOrderActivationType_SelectionChanged;
+                SliderFrom.ValueChanged -= SliderFrom_ValueChanged;
+                SliderTo.ValueChanged -= SliderTo_ValueChanged;
+
+                ButtonStartTest.Click -= buttonStartTest_Click;
+                ButtonFast.Click -= buttonFast_Click;
+                ButtonNextCandle.Click -= buttonNextCandle_Click;
+                ButtonPausePlay.Click -= buttonPausePlay_Click;
+                ButtonSynchronizer.Click -= ButtonSynchronizer_Click;
+                ButtonGoTo.Click -= ButtonGoTo_Click;
+                ButtonNextPos.Click -= ButtonNextPos_Click;
+                ButtonTesterServer.Click -= ButtonTesterServer_Click;
+                ButtonSetDataFromPath.Click -= ButtonSetDataFromPath_Click;
+
+                CheckBoxOnOffMarketPortfolio.Click -= CheckBoxOnOffMarketPortfolio_Checked;
+                CheckBoxRemoveTrades.Click -= CheckBoxRemoveTrades_Click;
+                CheckBoxDividendsIsOn.Click -= CheckBoxDividendsIsOn_Click;
+                CheckBoxTaxesIsOn.Click -= CheckBoxTaxesIsOn_Click;
+                ComboBoxMarginRegime.SelectionChanged -= ComboBoxMarginRegime_SelectionChanged;
+                ButtonHelpDividends.Click -= ButtonHelpDividends_Click;
+                ButtonHelpMargin.Click -= ButtonHelpMargin_Click;
+                ButtonHelpTaxes.Click -= ButtonHelpTaxes_Click;
+                ButtonHelpDataType.Click -= ButtonHelpDataType_Click;
+                CheckBoxSlippageLimitOff.Checked -= CheckBoxSlippageLimitOff_Checked;
+                CheckBoxSlippageLimitOn.Checked -= CheckBoxSlippageLimitOn_Checked;
+                CheckBoxSlippageStopOff.Checked -= CheckBoxSlippageStopOff_Checked;
+                CheckBoxSlippageStopOn.Checked -= CheckBoxSlippageStopOn_Checked;
+
+                if (_server != null)
+                {
+                    _server.ConnectStatusChangeEvent -= _server_ConnectStatusChangeEvent;
+                    _server.NewCurrentValue -= _server_NewCurrentValue;
+                    _server.TestingStartEvent -= _server_TestingStartEvent;
+                    _server.SecuritiesChangeEvent -= _server_SecuritiesChangeEvent;
+                    _server.TestRegimeChangeEvent -= _server_TestRegimeChangeEvent;
+                    _server.TestingFastEvent -= _server_TestingFastEvent;
+                    _server.DividendPaymentsChangedEvent -= _server_DividendPaymentsChangedEvent;
+                    _server.MarginPaymentsChangedEvent -= _server_MarginPaymentsChangedEvent;
+                    _server.TaxPaymentsChangedEvent -= _server_TaxPaymentsChangedEvent;
+                    _server.LoadSecurityEvent -= _server_LoadSecurityEvent;
+                }
+
+                DeleteMarginAndTaxGrids();
+
+                DeleteSecuritiesGrid();
+                DeleteClearingGrid();
+                DeleteNonTradePeriodsGrid();
+
+                if (_chartReport != null)
+                {
+                    try
+                    {
+                        HostPortfolio.Child = null;
+                        _chartReport.Series.Clear();
+                        _chartReport.ChartAreas.Clear();
+                        _chartReport.Dispose();
+                    }
+                    catch (Exception ex)
+                    {
+                        ServerMaster.SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+                    }
+                    _chartReport = null;
+                }
+
+                if (_log != null)
+                {
+                    _log.StopPaint();
+                }
+                Host.Child = null;
+
+                _timerTextBoxFrom?.Stop();
+                _timerTextBoxFrom.Tick -= _timer_TextBoxFrom;
+                _timerTextBoxFrom = null;
+
+                _timerTextBoxTo?.Stop();
+                _timerTextBoxTo.Tick -= _timer_TextBoxTo;
+                _timerTextBoxTo = null;
+
+                _server = null;
+                _log = null;
+
+                Closing -= TesterServerUi_Closing;
+            }
+            catch (Exception ex)
             {
-                DataGridFactory.ClearLinks(_gridClearing);
-                _gridClearing.CellClick -= _gridClearing_CellClick;
-                _gridClearing.CellValueChanged -= _gridClearing_CellValueChanged;
-                _gridClearing.DataError -= _gridClearing_DataError;
-                HostClearing.Child = null;
-                _gridClearing = null;
+                try
+                {
+                    _server?.SendLogMessage(ex.ToString(), LogMessageType.Error);
+                }
+                catch
+                {
+                    // ignore
+                }
             }
-
-            if (_gridNonTradePeriods != null)
-            {
-                DataGridFactory.ClearLinks(_gridNonTradePeriods);
-                _gridNonTradePeriods.CellValueChanged -= _gridNonTradePeriods_CellValueChanged;
-                _gridNonTradePeriods.CellClick -= _gridNonTradePeriods_CellClick;
-                _gridNonTradePeriods.DataError -= _gridClearing_DataError;
-                HostNonTradePeriods.Child = null;
-                _gridNonTradePeriods = null;
-            }
-
-            _log.StopPaint();
-            _log = null;
-
-            _timerTextBoxFrom.Stop();
-            _timerTextBoxFrom.Tick -= _timer_TextBoxFrom;
-            _timerTextBoxFrom = null;
-
-            _timerTextBoxTo.Stop();
-            _timerTextBoxTo.Tick -= _timer_TextBoxTo;
-            _timerTextBoxTo = null;
         }
 
         private void CheckBoxRemoveTrades_Click(object sender, RoutedEventArgs e)
@@ -400,6 +527,7 @@ namespace OsEngine.Market.Servers.Tester
             _server.TypeTesterData = type;
             _server.Save();
 
+            CheckDataTypeMatch();
             PaintGrid();
         }
 
@@ -505,6 +633,7 @@ namespace OsEngine.Market.Servers.Tester
 
         private void _server_ConnectStatusChangeEvent(string status)
         {
+            if (_uiIsClosed || _server == null) { return; }
             if (!LabelStatus.Dispatcher.CheckAccess())
             {
                 LabelStatus.Dispatcher.Invoke(new Action<string>(_server_ConnectStatusChangeEvent), status);
@@ -527,10 +656,20 @@ namespace OsEngine.Market.Servers.Tester
         private void _server_SecuritiesChangeEvent(List<Security> securities)
         {
             _needToRePaintGrid = true;
+
+            if (Label25.Dispatcher.CheckAccess() == false)
+            {
+                Label25.Dispatcher.Invoke(new Action(CheckDataTypeMatch));
+            }
+            else
+            {
+                CheckDataTypeMatch();
+            }
         }
 
         private void _server_TestingStartEvent()
         {
+            if (_uiIsClosed || _server == null) { return; }
             _chartActive = true;
             CreateChart();
             PaintPausePlayButtonByActualServerState();
@@ -543,11 +682,13 @@ namespace OsEngine.Market.Servers.Tester
 
         private void _server_TestRegimeChangeEvent(TesterRegime regime)
         {
+            if (_uiIsClosed || _server == null) { return; }
             PaintPausePlayButtonByActualServerState();
         }
 
         private void _server_TestingFastEvent()
         {
+            if (_uiIsClosed || _server == null) { return; }
             PaintPausePlayButtonByActualServerState();
         }
 
@@ -703,12 +844,20 @@ namespace OsEngine.Market.Servers.Tester
 
         private void ButtonGoTo_Click(object sender, RoutedEventArgs e)
         {
+            DateTime timeStart = _server.TimeStart;
+            DateTime timeEnd = _server.TimeEnd;
+
+            if ((timeEnd - timeStart).TotalDays <= 0)
+            {
+                ServerMaster.SendNewLogMessage(OsLocalization.Market.Label376, LogMessageType.Error);
+                CustomMessageBoxUi ui = new CustomMessageBoxUi(OsLocalization.Market.Label376);
+                ui.ShowDialog();
+                return;
+            }
 
             if (_goToUi == null)
             {
-                _goToUi = new GoToUi(_server.TimeStart, _server.TimeEnd, _server.TimeNow);
-                _goToUi.Show();
-                _goToUi.SetLocation(this.Left + this.Width, this.Top);
+                _goToUi = new GoToUi(timeStart, timeEnd, _server.TimeNow);
 
                 _goToUi.Closing += (a, b) =>
                 {
@@ -719,6 +868,9 @@ namespace OsEngine.Market.Servers.Tester
 
                     _goToUi = null;
                 };
+
+                _goToUi.Show();
+                _goToUi.SetLocation(this.Left + this.Width, this.Top);
             }
             else
             {
@@ -850,10 +1002,10 @@ namespace OsEngine.Market.Servers.Tester
             Series profit = new Series("SeriesProfit");
 
             profit.ChartType = SeriesChartType.Line;
-            profit.Color = Color.DeepSkyBlue;
+            profit.Color = Themes.ThemeManager.GetColorWinForms("ChartEquityColor");
             profit.YAxisType = AxisType.Secondary;
             profit.ChartArea = "ChartAreaProfit";
-            profit.ShadowOffset = 2;
+            profit.ShadowOffset = Themes.ThemeManager.GetChartSeriesShadow();
             _chartReport.Series.Add(profit);
 
             ChartArea areaLineProfitBar = new ChartArea("ChartAreaProfitBar");
@@ -870,22 +1022,26 @@ namespace OsEngine.Market.Servers.Tester
             profitBar.ChartType = SeriesChartType.Column;
             profitBar.YAxisType = AxisType.Secondary;
             profitBar.ChartArea = "ChartAreaProfitBar";
-            profitBar.ShadowOffset = 2;
+            profitBar.ShadowOffset = Themes.ThemeManager.GetChartSeriesShadow();
             _chartReport.Series.Add(profitBar);
 
-            _chartReport.BackColor = Color.FromArgb(-15395563);
+            _chartReport.BackColor = Themes.ThemeManager.GetColorWinForms("ChartBackColor");
 
             for (int i = 0; _chartReport.ChartAreas != null && i < _chartReport.ChartAreas.Count; i++)
             {
-                _chartReport.ChartAreas[i].BackColor = Color.FromArgb(-15395563);
-                _chartReport.ChartAreas[i].BorderColor = Color.FromArgb(-16701360);
-                _chartReport.ChartAreas[i].CursorY.LineColor = Color.DimGray;
-                _chartReport.ChartAreas[i].CursorX.LineColor = Color.DimGray;
-                _chartReport.ChartAreas[i].AxisX.TitleForeColor = Color.DimGray;
+                _chartReport.ChartAreas[i].BackColor = Themes.ThemeManager.GetColorWinForms("ChartBackColor");
+                _chartReport.ChartAreas[i].BorderColor = Themes.ThemeManager.GetColorWinForms("ChartBorderColor");
+                _chartReport.ChartAreas[i].CursorY.LineColor = Themes.ThemeManager.GetColorWinForms("ChartTextColor");
+                _chartReport.ChartAreas[i].CursorX.LineColor = Themes.ThemeManager.GetColorWinForms("ChartTextColor");
+                _chartReport.ChartAreas[i].AxisX.TitleForeColor = Themes.ThemeManager.GetColorWinForms("ChartTextColor");
 
                 foreach (var axe in _chartReport.ChartAreas[i].Axes)
                 {
-                    axe.LabelStyle.ForeColor = Color.DimGray;
+                    axe.LabelStyle.ForeColor = Themes.ThemeManager.GetColorWinForms("ChartTextColor");
+                    axe.LabelStyle.Font = Themes.ThemeManager.GetChartAxisFont();
+
+                    // значения осей — не больше двух знаков после запятой
+                    axe.LabelStyle.Format = "0.##";
                 }
             }
 
@@ -932,11 +1088,11 @@ namespace OsEngine.Market.Servers.Tester
 
                         if (portfolio[i] - portfolio[i - 1] > 0)
                         {
-                            _chartReport.Series[1].Points[_chartReport.Series[1].Points.Count - 1].Color = Color.DeepSkyBlue;
+                            _chartReport.Series[1].Points[_chartReport.Series[1].Points.Count - 1].Color = Themes.ThemeManager.GetColorWinForms("ChartBarPlusColor");
                         }
                         else
                         {
-                            _chartReport.Series[1].Points[_chartReport.Series[1].Points.Count - 1].Color = Color.DarkRed;
+                            _chartReport.Series[1].Points[_chartReport.Series[1].Points.Count - 1].Color = Themes.ThemeManager.GetColorWinForms("ChartBarMinusColor");
                         }
                     }
                 }
@@ -982,11 +1138,11 @@ namespace OsEngine.Market.Servers.Tester
 
                 if (portfolio[portfolio.Count - 1] - portfolio[portfolio.Count - 1 - 1] > 0)
                 {
-                    _chartReport.Series[1].Points[_chartReport.Series[1].Points.Count - 1].Color = Color.DeepSkyBlue;
+                    _chartReport.Series[1].Points[_chartReport.Series[1].Points.Count - 1].Color = Themes.ThemeManager.GetColorWinForms("ChartBarPlusColor");
                 }
                 else
                 {
-                    _chartReport.Series[1].Points[_chartReport.Series[1].Points.Count - 1].Color = Color.DarkRed;
+                    _chartReport.Series[1].Points[_chartReport.Series[1].Points.Count - 1].Color = Themes.ThemeManager.GetColorWinForms("ChartBarMinusColor");
                 }
             }
 
@@ -1260,7 +1416,7 @@ namespace OsEngine.Market.Servers.Tester
                     else
                     {// Удаление клиринга
 
-                        AcceptDialogUi ui = new AcceptDialogUi("Are you sure you want to remove the clearing?");
+                        AcceptDialogUi ui = new AcceptDialogUi(OsLocalization.Market.LabelAcceptRemoveClearing);
 
                         ui.ShowDialog();
 
@@ -1392,6 +1548,63 @@ namespace OsEngine.Market.Servers.Tester
             _gridNonTradePeriods.DataError += _gridClearing_DataError;
         }
 
+        private void DeleteSecuritiesGrid()
+        {
+            if (_securitiesGrid == null)
+            {
+                return;
+            }
+
+            HostSecurities.Child = null;
+            DataGridFactory.ClearLinks(_securitiesGrid);
+            _securitiesGrid.DoubleClick -= _myGridView_DoubleClick;
+            _securitiesGrid.CellValueChanged -= _myGridView_CellValueChanged;
+            _securitiesGrid.DataError -= _gridClearing_DataError;
+            _securitiesGrid.Rows.Clear();
+            _securitiesGrid.Columns.Clear();
+            _securitiesGrid.DataSource = null;
+            _securitiesGrid.Dispose();
+            _securitiesGrid = null;
+        }
+
+        private void DeleteClearingGrid()
+        {
+            if (_gridClearing == null)
+            {
+                return;
+            }
+
+            HostClearing.Child = null;
+            DataGridFactory.ClearLinks(_gridClearing);
+            _gridClearing.CellClick -= _gridClearing_CellClick;
+            _gridClearing.CellValueChanged -= _gridClearing_CellValueChanged;
+            _gridClearing.DataError -= _gridClearing_DataError;
+            _gridClearing.Rows.Clear();
+            _gridClearing.Columns.Clear();
+            _gridClearing.DataSource = null;
+            _gridClearing.Dispose();
+            _gridClearing = null;
+        }
+
+        private void DeleteNonTradePeriodsGrid()
+        {
+            if (_gridNonTradePeriods == null)
+            {
+                return;
+            }
+
+            HostNonTradePeriods.Child = null;
+            DataGridFactory.ClearLinks(_gridNonTradePeriods);
+            _gridNonTradePeriods.CellValueChanged -= _gridNonTradePeriods_CellValueChanged;
+            _gridNonTradePeriods.CellClick -= _gridNonTradePeriods_CellClick;
+            _gridNonTradePeriods.DataError -= _gridClearing_DataError;
+            _gridNonTradePeriods.Rows.Clear();
+            _gridNonTradePeriods.Columns.Clear();
+            _gridNonTradePeriods.DataSource = null;
+            _gridNonTradePeriods.Dispose();
+            _gridNonTradePeriods = null;
+        }
+
         public void PaintNonTradePeriodsGrid()
         {
             try
@@ -1495,7 +1708,7 @@ namespace OsEngine.Market.Servers.Tester
                     else
                     {// Удаление периода
 
-                        AcceptDialogUi ui = new AcceptDialogUi("Are you sure you want to remove the non trade period?");
+                        AcceptDialogUi ui = new AcceptDialogUi(OsLocalization.Market.LabelAcceptRemoveNonTradePeriod);
 
                         ui.ShowDialog();
 
@@ -1643,8 +1856,16 @@ namespace OsEngine.Market.Servers.Tester
                 SliderFrom.ValueChanged -= SliderFrom_ValueChanged;
                 SliderTo.ValueChanged -= SliderTo_ValueChanged;
 
-                ProgressBar.Maximum = (_server.TimeMax - DateTime.MinValue).TotalMinutes;
-                ProgressBar.Minimum = (_server.TimeMin - DateTime.MinValue).TotalMinutes;
+                if (HasDataRange)
+                {
+                    ProgressBar.Maximum = (_server.TimeMax - DateTime.MinValue).TotalMinutes;
+                    ProgressBar.Minimum = (_server.TimeMin - DateTime.MinValue).TotalMinutes;
+                }
+                else
+                {
+                    ProgressBar.Minimum = ProgressBar.Maximum = 0;
+                }
+
                 ProgressBar.Value = (_server.TimeNow - DateTime.MinValue).TotalMinutes;
 
                 int displayedRow = _securitiesGrid.FirstDisplayedScrollingRowIndex;
@@ -1708,22 +1929,31 @@ namespace OsEngine.Market.Servers.Tester
                     }
                 }
 
-                TextBoxFrom.Text = _server.TimeStart.ToString(_currentCulture);
-                TextBoxTo.Text = _server.TimeEnd.ToString(_currentCulture);
-
-                SliderFrom.Minimum = (_server.TimeMin - DateTime.MinValue).TotalMinutes;
-                SliderFrom.Maximum = (_server.TimeMax - DateTime.MinValue).TotalMinutes;
-                SliderFrom.Value = (_server.TimeStart - DateTime.MinValue).TotalMinutes;
-
-                SliderTo.Minimum = (_server.TimeMin - DateTime.MinValue).TotalMinutes;
-                SliderTo.Maximum = (_server.TimeMax - DateTime.MinValue).TotalMinutes;
-                SliderTo.Value = (_server.TimeMin - DateTime.MinValue).TotalMinutes;
-
-                if (_server.TimeEnd != DateTime.MinValue &&
-                    SliderFrom.Minimum + SliderTo.Maximum - (_server.TimeEnd - DateTime.MinValue).TotalMinutes > 0)
+                if (!HasDataRange)
                 {
-                    SliderTo.Value =
-                    SliderFrom.Minimum + SliderTo.Maximum - (_server.TimeEnd - DateTime.MinValue).TotalMinutes;
+                    // no data - sliders have nothing to show. Date boxes are not touched, to not erase what user is typing
+                    SliderFrom.Minimum = SliderFrom.Maximum = SliderFrom.Value = 0;
+                    SliderTo.Minimum = SliderTo.Maximum = SliderTo.Value = 0;
+                }
+                else
+                {
+                    if (!TextBoxFrom.IsKeyboardFocusWithin)
+                    {
+                        TextBoxFrom.Text = _server.TimeStart.ToString(_currentCulture);
+                    }
+
+                    if (!TextBoxTo.IsKeyboardFocusWithin)
+                    {
+                        TextBoxTo.Text = _server.TimeEnd.ToString(_currentCulture);
+                    }
+
+                    SliderFrom.Minimum = (_server.TimeMin - DateTime.MinValue).TotalMinutes;
+                    SliderFrom.Maximum = (_server.TimeMax - DateTime.MinValue).TotalMinutes;
+                    SliderFrom.Value = (_server.TimeStart - DateTime.MinValue).TotalMinutes;
+
+                    SliderTo.Minimum = (_server.TimeMin - DateTime.MinValue).TotalMinutes;
+                    SliderTo.Maximum = (_server.TimeMax - DateTime.MinValue).TotalMinutes;
+                    SliderTo.Value = SliderValueFromDate(_server.TimeEnd);
                 }
 
                 SliderFrom.ValueChanged += SliderFrom_ValueChanged;
@@ -1804,24 +2034,69 @@ namespace OsEngine.Market.Servers.Tester
 
         #region Sliders. Setting the start and end time of testing. Slippage
 
+        /// <summary>
+        /// Bounds of loaded data are known. Without them sliders have nothing to show and dates are not trimmed
+        /// </summary>
+        private bool HasDataRange
+        {
+            get { return _server.HasTestPeriodBounds; }
+        }
+
+        /// <summary>
+        /// Date from the "To" slider position. The slider is inverted: its value counts minutes from the end of the period
+        /// </summary>
+        private DateTime DateFromSliderTo(double slider_value)
+        {
+            return _server.TimeMin.AddMinutes((_server.TimeMax - DateTime.MinValue).TotalMinutes - slider_value);
+        }
+
+        /// <summary>
+        /// Position of the inverted "To" slider for the date
+        /// </summary>
+        private double SliderValueFromDate(DateTime date)
+        {
+            return (_server.TimeMax - DateTime.MinValue).TotalMinutes - (date - _server.TimeMin).TotalMinutes;
+        }
+
+        /// <summary>
+        /// Date typed outside the loaded data. Same way as GoTo: log and window, not a silent reset of the box
+        /// </summary>
+        private void RejectDateOutsideData()
+        {
+            string message = string.Format(OsLocalization.Market.Label377,
+                _server.TimeMin.ToString(_currentCulture), _server.TimeMax.ToString(_currentCulture));
+
+            ServerMaster.SendNewLogMessage(message, LogMessageType.System);
+        }
+
         private void SliderTo_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
         {
+            if (!HasDataRange)
+            {
+                return;
+            }
+
             TextBoxTo.TextChanged -= TextBoxTo_TextChanged;
 
-            DateTime to = DateTime.MinValue.AddMinutes(SliderFrom.Minimum + SliderFrom.Maximum - SliderTo.Value);
+            DateTime to = DateFromSliderTo(SliderTo.Value);
             _server.TimeEnd = to;
             _server.SaveSecurityTestSettings();
             TextBoxTo.Text = to.ToString(_currentCulture);
 
-            if (SliderFrom.Minimum + SliderFrom.Maximum - SliderTo.Value < SliderFrom.Value)
+            if (to < _server.TimeStart)
             {
-                SliderFrom.Value = SliderFrom.Minimum + SliderFrom.Maximum - SliderTo.Value;
+                SliderFrom.Value = (to - DateTime.MinValue).TotalMinutes;
             }
             TextBoxTo.TextChanged += TextBoxTo_TextChanged;
         }
 
         private void SliderFrom_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
         {
+            if (!HasDataRange)
+            {
+                return;
+            }
+
             TextBoxFrom.TextChanged -= TextBoxFrom_TextChanged;
 
             DateTime from = DateTime.MinValue.AddMinutes(SliderFrom.Value);
@@ -1829,9 +2104,9 @@ namespace OsEngine.Market.Servers.Tester
             _server.SaveSecurityTestSettings();
             TextBoxFrom.Text = from.ToString(_currentCulture);
 
-            if (SliderFrom.Minimum + SliderFrom.Maximum - SliderTo.Value < SliderFrom.Value)
+            if (DateFromSliderTo(SliderTo.Value) < from)
             {
-                SliderTo.Value = SliderFrom.Minimum + SliderFrom.Maximum - SliderFrom.Value;
+                SliderTo.Value = SliderValueFromDate(from);
             }
 
             TextBoxFrom.TextChanged += TextBoxFrom_TextChanged;
@@ -1858,12 +2133,6 @@ namespace OsEngine.Market.Servers.Tester
                 _timerTextBoxTo.Stop();
 
                 to = Convert.ToDateTime(TextBoxTo.Text, _currentCulture);
-
-                if (to < _server.TimeMin ||
-                    to > _server.TimeMax)
-                {
-                    throw new Exception();
-                }
             }
             catch (Exception)
             {
@@ -1871,10 +2140,16 @@ namespace OsEngine.Market.Servers.Tester
                 return;
             }
 
+            // without the data we do not trim dates, the server will decide it on the data load
+            if (HasDataRange && (to < _server.TimeMin || to > _server.TimeMax))
+            {
+                RejectDateOutsideData();
+                TextBoxTo.Text = _server.TimeEnd.ToString(_currentCulture);
+                return;
+            }
+
             _server.TimeEnd = to;
-            // SliderTo.Value = SliderFrom.Minimum + SliderFrom.Maximum - to.Minute;
-            // SliderFrom.Minimum + SliderFrom.Maximum - SliderTo.Value
-            SliderTo.Value = SliderFrom.Minimum + SliderTo.Maximum - (to - DateTime.MinValue).TotalMinutes;
+            SliderTo.Value = SliderValueFromDate(to);
         }
 
         private void TextBoxFrom_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
@@ -1898,15 +2173,17 @@ namespace OsEngine.Market.Servers.Tester
                 _timerTextBoxFrom.Stop();
 
                 from = Convert.ToDateTime(TextBoxFrom.Text, _currentCulture);
-
-                if (from < _server.TimeMin ||
-                    from > _server.TimeMax)
-                {
-                    throw new Exception();
-                }
             }
             catch (Exception)
             {
+                TextBoxFrom.Text = _server.TimeStart.ToString(_currentCulture);
+                return;
+            }
+
+            // without the data we do not trim dates, the server will decide it on the data load
+            if (HasDataRange && (from < _server.TimeMin || from > _server.TimeMax))
+            {
+                RejectDateOutsideData();
                 TextBoxFrom.Text = _server.TimeStart.ToString(_currentCulture);
                 return;
             }
@@ -1993,5 +2270,1042 @@ namespace OsEngine.Market.Servers.Tester
         }
 
         #endregion
+
+        #region Dividends
+
+        private DataGridView _gridDividends;
+        private bool _needToRePaintDividendsGrid;
+
+        private void CheckBoxDividendsIsOn_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                _server.DividendsIsOn = CheckBoxDividendsIsOn.IsChecked.Value;
+            }
+            catch (Exception ex)
+            {
+                _server?.SendLogMessage(ex.ToString(), LogMessageType.Error);
+            }
+        }
+
+        private void ButtonOpenDataBaseDividends_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                string path = AppDomain.CurrentDomain.BaseDirectory + "Wiki\\Dividends";
+
+                if (!Directory.Exists(path))
+                {
+                    Directory.CreateDirectory(path);
+                }
+
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "explorer.exe",
+                    Arguments = path,
+                    UseShellExecute = true
+                });
+            }
+            catch (Exception ex)
+            {
+                _server?.SendLogMessage(ex.ToString(), LogMessageType.Error);
+            }
+        }
+
+        private async void ButtonDivsUpdateBase_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (WikiMaster.IsUpdating)
+                {
+                    return;
+                }
+
+                AcceptDialogUi dialog = new AcceptDialogUi(OsLocalization.Market.Label339);
+                dialog.ShowDialog();
+
+                if (!dialog.UserAcceptAction)
+                {
+                    return;
+                }
+
+                ButtonDivsUpdateBase.IsEnabled = false;
+
+                await Task.Run(() => WikiMaster.UpdateDividendsBase());
+
+                if (IsLoaded)
+                {
+                    ButtonDivsUpdateBase.IsEnabled = true;
+                    PaintDividendsGrid();
+                }
+            }
+            catch (Exception error)
+            {
+                if (IsLoaded)
+                {
+                    ButtonDivsUpdateBase.IsEnabled = true;
+                }
+
+                _server?.SendLogMessage($"ButtonDivsUpdateBase_Click error: {error}", LogMessageType.Error);
+            }
+        }
+
+        public void CreateDividendsGrid()
+        {
+            _gridDividends = DataGridFactory.GetDataGridView(DataGridViewSelectionMode.FullRowSelect, DataGridViewAutoSizeRowsMode.AllCells);
+            _gridDividends.ScrollBars = ScrollBars.Vertical;
+            _gridDividends.Dock = DockStyle.Fill;
+
+            DataGridViewTextBoxCell cell0 = new DataGridViewTextBoxCell();
+            cell0.Style = _gridDividends.DefaultCellStyle;
+
+            DataGridViewColumn column0 = new DataGridViewColumn();
+            column0.CellTemplate = cell0;
+            column0.HeaderText = OsLocalization.Market.Label333;
+            column0.ReadOnly = true;
+            column0.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+            column0.FillWeight = 25;
+            column0.MinimumWidth = 80;
+            _gridDividends.Columns.Add(column0);
+
+            DataGridViewColumn column1 = new DataGridViewColumn();
+            column1.CellTemplate = cell0;
+            column1.HeaderText = OsLocalization.Market.Label334;
+            column1.ReadOnly = true;
+            column1.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+            column1.FillWeight = 20;
+            column1.MinimumWidth = 90;
+            _gridDividends.Columns.Add(column1);
+
+            DataGridViewColumn column2 = new DataGridViewColumn();
+            column2.CellTemplate = cell0;
+            column2.HeaderText = OsLocalization.Market.LabelPaymentDate;
+            column2.ReadOnly = true;
+            column2.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+            column2.FillWeight = 25;
+            column2.MinimumWidth = 90;
+            _gridDividends.Columns.Add(column2);
+
+            DataGridViewColumn column3 = new DataGridViewColumn();
+            column3.CellTemplate = cell0;
+            column3.HeaderText = OsLocalization.Market.Label335;
+            column3.ReadOnly = true;
+            column3.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+            column3.FillWeight = 25;
+            column3.MinimumWidth = 90;
+            _gridDividends.Columns.Add(column3);
+
+            DataGridViewColumn column4 = new DataGridViewColumn();
+            column4.CellTemplate = cell0;
+            column4.HeaderText = OsLocalization.Market.Label336;
+            column4.ReadOnly = true;
+            column4.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+            column4.FillWeight = 25;
+            column4.MinimumWidth = 90;
+            _gridDividends.Columns.Add(column4);
+
+            HostDividends.Child = _gridDividends;
+        }
+
+        public void PaintDividendsGrid()
+        {
+            try
+            {
+                if (_gridDividends.InvokeRequired)
+                {
+                    _gridDividends.Invoke(new Action(PaintDividendsGrid));
+                    return;
+                }
+
+                _gridDividends.Rows.Clear();
+
+                List<DividendInfo> payments;
+
+                lock (_server.DividendPayments)
+                {
+                    payments = new List<DividendInfo>(_server.DividendPayments);
+                }
+
+                payments = payments.OrderByDescending(p => p.PaymentDate).ToList();
+
+                for (int i = 0; i < payments.Count; i++)
+                {
+                    DividendInfo payment = payments[i];
+
+                    DataGridViewRow row = new DataGridViewRow();
+                    row.Cells.Add(new DataGridViewTextBoxCell());
+                    row.Cells[0].Value = payment.SecurityName;
+
+                    row.Cells.Add(new DataGridViewTextBoxCell());
+                    row.Cells[1].Value = payment.PositionCreateDate.ToString("dd.MM.yyyy", _currentCulture);
+
+                    row.Cells.Add(new DataGridViewTextBoxCell());
+                    row.Cells[2].Value = payment.PaymentDate.ToString("dd.MM.yyyy", _currentCulture);
+
+                    row.Cells.Add(new DataGridViewTextBoxCell());
+                    row.Cells[3].Value = payment.Sum.ToString(_currentCulture);
+
+                    row.Cells.Add(new DataGridViewTextBoxCell());
+                    row.Cells[4].Value = payment.BotName;
+
+                    _gridDividends.Rows.Add(row);
+                }
+            }
+            catch (Exception error)
+            {
+                try
+                {
+                    _server.SendLogMessage(error.ToString(), LogMessageType.Error);
+                }
+                catch
+                {
+                    // ignore
+                }
+            }
+        }
+
+        private void _server_DividendPaymentsChangedEvent()
+        {
+            _needToRePaintDividendsGrid = true;
+        }
+
+        private void DividendsGridPainterWorkerPlace()
+        {
+            while (true)
+            {
+                Thread.Sleep(5000);
+
+                if (_uiIsClosed)
+                {
+                    return;
+                }
+
+                if (_needToRePaintDividendsGrid)
+                {
+                    _needToRePaintDividendsGrid = false;
+                    PaintDividendsGrid();
+                }
+
+                if (_needToRePaintMarginGrid)
+                {
+                    _needToRePaintMarginGrid = false;
+                    PaintMarginPaymentsGrid();
+                }
+
+                if (_needToRePaintTaxesGrid)
+                {
+                    _needToRePaintTaxesGrid = false;
+                    PaintTaxPaymentsGrid();
+                }
+            }
+        }
+
+        #endregion
+
+        #region Help buttons
+
+        private List<string> _availableDataTypes = new List<string>();
+
+        private SecurityTesterDataType? GetRequiredDataType(TesterDataType type)
+        {
+            if (type == TesterDataType.Candle)
+            {
+                return SecurityTesterDataType.Candle;
+            }
+            if (type == TesterDataType.TickAllCandleState || type == TesterDataType.TickOnlyReadyCandle)
+            {
+                return SecurityTesterDataType.Tick;
+            }
+            if (type == TesterDataType.MarketDepthAllCandleState || type == TesterDataType.MarketDepthOnlyReadyCandle)
+            {
+                return SecurityTesterDataType.MarketDepth;
+            }
+            return null;
+        }
+
+        private void CheckDataTypeMatch()
+        {
+            try
+            {
+                if (_server == null)
+                {
+                    return;
+                }
+
+                SecurityTesterDataType? required = GetRequiredDataType(_server.TypeTesterData);
+
+                bool mismatch = false;
+                List<string> available = new List<string>();
+
+                if (required.HasValue && _server.SecuritiesTester != null && _server.SecuritiesTester.Count > 0)
+                {
+                    for (int i = 0; i < _server.SecuritiesTester.Count; i++)
+                    {
+                        string name = _server.SecuritiesTester[i].DataType.ToString();
+                        if (available.Contains(name) == false)
+                        {
+                            available.Add(name);
+                        }
+                    }
+
+                    bool haveRequired = false;
+                    for (int i = 0; i < _server.SecuritiesTester.Count; i++)
+                    {
+                        if (_server.SecuritiesTester[i].DataType == required.Value)
+                        {
+                            haveRequired = true;
+                            break;
+                        }
+                    }
+
+                    mismatch = haveRequired == false;
+                }
+
+                if (mismatch)
+                {
+                    Label25.Foreground = System.Windows.Media.Brushes.Red;
+                    ComboBoxDataType.Foreground = System.Windows.Media.Brushes.Red;
+                    ButtonHelpDataType.Visibility = Visibility.Visible;
+                }
+            else
+            {
+                Label25.ClearValue(System.Windows.Controls.Control.ForegroundProperty);
+                ComboBoxDataType.ClearValue(System.Windows.Controls.Control.ForegroundProperty);
+                ButtonHelpDataType.Visibility = Visibility.Collapsed;
+            }
+
+                _availableDataTypes = available;
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+            }
+        }
+
+        private void ButtonHelpDataType_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                string available = string.Join(", ", _availableDataTypes);
+
+                string eng = "The selected transmission type " + _server.TypeTesterData + " does not match the loaded data. The data set contains " + available + ". Switch the transmission type to match the available data.";
+                string ru = "Выбранный тип трансляции " + _server.TypeTesterData + " не соответствует загруженным данным. В выбранном наборе данных есть " + available + ". Переключите тип трансляции на доступный в данных.";
+
+                CustomMessageBoxUi boxUi = new CustomMessageBoxUi(OsLocalization.ConvertToLocString("Eng:" + eng + "_Ru:" + ru + "_"));
+                boxUi.ShowDialog();
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+            }
+        }
+
+        private void ButtonHelpDividends_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                CustomMessageBoxUi boxUi = new CustomMessageBoxUi(OsLocalization.Market.LabelHelpDividends);
+                boxUi.ShowDialog();
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+            }
+        }
+
+        private void ButtonHelpMargin_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                CustomMessageBoxUi boxUi = new CustomMessageBoxUi(OsLocalization.Market.LabelHelpMargin);
+                boxUi.ShowDialog();
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+            }
+        }
+
+        private void ButtonHelpTaxes_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                CustomMessageBoxUi boxUi = new CustomMessageBoxUi(OsLocalization.Market.LabelHelpTaxes);
+                boxUi.ShowDialog();
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+            }
+        }
+
+        #endregion
+
+        #region Margin
+
+        private DataGridView _gridMarginSumm;
+        private DataGridView _gridMarginPayments;
+        private YearRateGridEditor _marginPercentEditor;
+        private bool _needToRePaintMarginGrid;
+
+        private void ComboBoxMarginRegime_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            try
+            {
+                if (ComboBoxMarginRegime.SelectedItem == null)
+                {
+                    return;
+                }
+
+                _server.MarginRegime = ComboBoxMarginRegime.SelectedItem.ToString();
+                UpdateMarginSettingsGrid();
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+            }
+        }
+
+        private void UpdateMarginSettingsGrid()
+        {
+            try
+            {
+                // таблица настроек видна всегда, в режиме Off — по последнему рабочему режиму
+                if (_server.MarginRegime == "Summ"
+                    || _server.MarginRegime == "Percent")
+                {
+                    _marginSettingsGridRegime = _server.MarginRegime;
+                }
+
+                if (_marginSettingsGridRegime == "Summ")
+                {
+                    HostMarginSettings.Child = _gridMarginSumm;
+                }
+                else
+                {
+                    HostMarginSettings.Child = _marginPercentEditor.Grid;
+                }
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+            }
+        }
+
+        private string _marginSettingsGridRegime = "Percent";
+
+        private void CreateMarginGrids()
+        {
+            _gridMarginSumm = DataGridFactory.GetDataGridView(DataGridViewSelectionMode.FullRowSelect, DataGridViewAutoSizeRowsMode.AllCells);
+            _gridMarginSumm.Dock = DockStyle.Fill;
+            _gridMarginSumm.ScrollBars = ScrollBars.Vertical;
+            _gridMarginSumm.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
+            _gridMarginSumm.ColumnCount = 3;
+            _gridMarginSumm.RowCount = 31;
+            _gridMarginSumm.Columns[0].HeaderText = "#";
+            _gridMarginSumm.Columns[1].HeaderText = OsLocalization.ConvertToLocString("Eng:Year_" + "Ru:Год_");
+            _gridMarginSumm.Columns[2].HeaderText = "";
+            _gridMarginSumm.Columns[0].ReadOnly = true;
+            _gridMarginSumm.Columns[1].ReadOnly = true;
+            _gridMarginSumm.Columns[2].ReadOnly = true;
+            _gridMarginSumm.Columns[0].FillWeight = 10;
+            _gridMarginSumm.Columns[1].FillWeight = 45;
+            _gridMarginSumm.Columns[2].FillWeight = 45;
+
+            foreach (DataGridViewColumn column in _gridMarginSumm.Columns)
+            {
+                column.SortMode = DataGridViewColumnSortMode.NotSortable;
+                column.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+            }
+
+            for (int i = 0; i < _gridMarginSumm.Rows.Count; i++)
+            {
+                DataGridViewButtonCell buttonCell = new DataGridViewButtonCell();
+                _gridMarginSumm.Rows[i].Cells[2] = buttonCell;
+
+                _gridMarginSumm.Rows[i].Cells[0].Value = i + 1;
+                _gridMarginSumm.Rows[i].Cells[1].Value = 2000 + i;
+                _gridMarginSumm.Rows[i].Cells[2].Value = OsLocalization.ConvertToLocString("Eng:Settings_Ru:Настроить_");
+            }
+
+            _gridMarginSumm.CellClick += _gridMarginSumm_CellClick;
+            _gridMarginSumm.DataError += _grid_DataError;
+
+            _marginPercentEditor = new YearRateGridEditor(_server.GetMarginTablePercent, _server.SetMarginTablePercent);
+
+            _gridMarginPayments = CreateChargesGrid();
+            HostMarginPayments.Child = _gridMarginPayments;
+        }
+
+        private void _gridMarginSumm_CellClick(object sender, DataGridViewCellEventArgs e)
+        {
+            try
+            {
+                if (e.ColumnIndex != 2
+                    || e.RowIndex < 0)
+                {
+                    return;
+                }
+
+                int year = 0;
+                int.TryParse(_gridMarginSumm.Rows[e.RowIndex].Cells[1].Value?.ToString(), out year);
+
+                if (year == 0)
+                {
+                    return;
+                }
+
+                Dictionary<int, List<ListTableSumm>> table = _server.GetMarginTableSumm();
+
+                if (table == null
+                    || table.ContainsKey(year) == false)
+                {
+                    return;
+                }
+
+                TesterMarginRatesEditUi window = new TesterMarginRatesEditUi(_server, table[year], year);
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+            }
+        }
+
+        public void PaintMarginPaymentsGrid()
+        {
+            try
+            {
+                if (_gridMarginPayments.InvokeRequired)
+                {
+                    _gridMarginPayments.Invoke(new Action(PaintMarginPaymentsGrid));
+                    return;
+                }
+
+                PaintChargesGrid(_gridMarginPayments, _server.MarginPayments);
+            }
+            catch (Exception error)
+            {
+                try
+                {
+                    _server.SendLogMessage(error.ToString(), LogMessageType.Error);
+                }
+                catch
+                {
+                    // ignore
+                }
+            }
+        }
+
+        private void _server_MarginPaymentsChangedEvent()
+        {
+            _needToRePaintMarginGrid = true;
+        }
+
+        #endregion
+
+        #region Taxes
+
+        private DataGridView _gridTaxPayments;
+        private YearRateGridEditor _taxRateEditor;
+        private bool _needToRePaintTaxesGrid;
+
+        private void CheckBoxTaxesIsOn_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                _server.TaxesIsOn = CheckBoxTaxesIsOn.IsChecked.Value;
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+            }
+        }
+
+        private void CreateTaxGrids()
+        {
+            _taxRateEditor = new YearRateGridEditor(_server.GetTaxTable, _server.SetTaxTable);
+            HostTaxSettings.Child = _taxRateEditor.Grid;
+
+            _gridTaxPayments = CreateChargesGrid();
+            HostTaxPayments.Child = _gridTaxPayments;
+        }
+
+        public void PaintTaxPaymentsGrid()
+        {
+            try
+            {
+                if (_gridTaxPayments.InvokeRequired)
+                {
+                    _gridTaxPayments.Invoke(new Action(PaintTaxPaymentsGrid));
+                    return;
+                }
+
+                PaintChargesGrid(_gridTaxPayments, _server.TaxPayments);
+            }
+            catch (Exception error)
+            {
+                try
+                {
+                    _server.SendLogMessage(error.ToString(), LogMessageType.Error);
+                }
+                catch
+                {
+                    // ignore
+                }
+            }
+        }
+
+        private void _server_TaxPaymentsChangedEvent()
+        {
+            _needToRePaintTaxesGrid = true;
+        }
+
+        #endregion
+
+        #region Charges grids service
+
+        private DataGridView CreateChargesGrid()
+        {
+            DataGridView grid = DataGridFactory.GetDataGridView(DataGridViewSelectionMode.FullRowSelect, DataGridViewAutoSizeRowsMode.AllCells);
+            grid.ScrollBars = ScrollBars.Vertical;
+            grid.Dock = DockStyle.Fill;
+
+            DataGridViewTextBoxCell cell0 = new DataGridViewTextBoxCell();
+            cell0.Style = grid.DefaultCellStyle;
+
+            DataGridViewColumn column0 = new DataGridViewColumn();
+            column0.CellTemplate = cell0;
+            column0.HeaderText = OsLocalization.Market.LabelChargeDate;
+            column0.ReadOnly = true;
+            column0.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+            column0.FillWeight = 25;
+            column0.MinimumWidth = 90;
+            grid.Columns.Add(column0);
+
+            DataGridViewColumn column1 = new DataGridViewColumn();
+            column1.CellTemplate = cell0;
+            column1.HeaderText = OsLocalization.Market.Label335;
+            column1.ReadOnly = true;
+            column1.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+            column1.FillWeight = 20;
+            column1.MinimumWidth = 80;
+            grid.Columns.Add(column1);
+
+            DataGridViewColumn column2 = new DataGridViewColumn();
+            column2.CellTemplate = cell0;
+            column2.HeaderText = OsLocalization.Market.Label336;
+            column2.ReadOnly = true;
+            column2.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+            column2.FillWeight = 25;
+            column2.MinimumWidth = 80;
+            grid.Columns.Add(column2);
+
+            DataGridViewColumn column3 = new DataGridViewColumn();
+            column3.CellTemplate = cell0;
+            column3.HeaderText = OsLocalization.Market.LabelComment;
+            column3.ReadOnly = true;
+            column3.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+            column3.FillWeight = 30;
+            column3.MinimumWidth = 90;
+            grid.Columns.Add(column3);
+
+            grid.DataError += _grid_DataError;
+
+            return grid;
+        }
+
+        private void PaintChargesGrid(DataGridView grid, List<ChargeInfo> payments)
+        {
+            grid.Rows.Clear();
+
+            List<ChargeInfo> paymentsCopy;
+
+            lock (payments)
+            {
+                paymentsCopy = new List<ChargeInfo>(payments);
+            }
+
+            paymentsCopy = paymentsCopy.OrderByDescending(p => p.Date).ToList();
+
+            for (int i = 0; i < paymentsCopy.Count; i++)
+            {
+                ChargeInfo payment = paymentsCopy[i];
+
+                DataGridViewRow row = new DataGridViewRow();
+                row.Cells.Add(new DataGridViewTextBoxCell());
+                row.Cells[0].Value = payment.Date.ToString("dd.MM.yyyy", _currentCulture);
+
+                row.Cells.Add(new DataGridViewTextBoxCell());
+                row.Cells[1].Value = payment.Sum.ToString(_currentCulture);
+
+                row.Cells.Add(new DataGridViewTextBoxCell());
+                row.Cells[2].Value = payment.BotName;
+
+                row.Cells.Add(new DataGridViewTextBoxCell());
+                row.Cells[3].Value = payment.Comment;
+
+                grid.Rows.Add(row);
+            }
+        }
+
+        private void _grid_DataError(object sender, DataGridViewDataErrorEventArgs e)
+        {
+            ServerMaster.SendNewLogMessage(e.ToString(), LogMessageType.Error);
+        }
+
+        private void DeleteMarginAndTaxGrids()
+        {
+            try
+            {
+                if (_gridMarginSumm != null)
+                {
+                    _gridMarginSumm.CellClick -= _gridMarginSumm_CellClick;
+                    _gridMarginSumm.DataError -= _grid_DataError;
+                    DataGridFactory.ClearLinks(_gridMarginSumm);
+                    _gridMarginSumm.Rows.Clear();
+                    _gridMarginSumm.Columns.Clear();
+                    _gridMarginSumm.DataSource = null;
+                    _gridMarginSumm.Dispose();
+                    _gridMarginSumm = null;
+                }
+
+                if (_gridMarginPayments != null)
+                {
+                    _gridMarginPayments.DataError -= _grid_DataError;
+                    DataGridFactory.ClearLinks(_gridMarginPayments);
+                    _gridMarginPayments.Rows.Clear();
+                    _gridMarginPayments.Columns.Clear();
+                    _gridMarginPayments.DataSource = null;
+                    _gridMarginPayments.Dispose();
+                    _gridMarginPayments = null;
+                }
+
+                if (_gridTaxPayments != null)
+                {
+                    _gridTaxPayments.DataError -= _grid_DataError;
+                    DataGridFactory.ClearLinks(_gridTaxPayments);
+                    _gridTaxPayments.Rows.Clear();
+                    _gridTaxPayments.Columns.Clear();
+                    _gridTaxPayments.DataSource = null;
+                    _gridTaxPayments.Dispose();
+                    _gridTaxPayments = null;
+                }
+
+                _marginPercentEditor?.Dispose();
+                _marginPercentEditor = null;
+
+                _taxRateEditor?.Dispose();
+                _taxRateEditor = null;
+
+                HostMarginSettings.Child = null;
+                HostMarginPayments.Child = null;
+                HostTaxSettings.Child = null;
+                HostTaxPayments.Child = null;
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+            }
+        }
+
+        #endregion
+
+        #region Year rate grid editor
+
+        private class YearRateGridEditor
+        {
+            public DataGridView Grid { get; private set; }
+
+            private List<ListTablePeriods> _listTable;
+            private Func<List<ListTablePeriods>> _getTable;
+            private Action<List<ListTablePeriods>> _saveTable;
+
+            public YearRateGridEditor(Func<List<ListTablePeriods>> getTable, Action<List<ListTablePeriods>> saveTable)
+            {
+                _getTable = getTable;
+                _saveTable = saveTable;
+
+                CreateGrid();
+                LoadTable();
+            }
+
+            private void CreateGrid()
+            {
+                Grid = DataGridFactory.GetDataGridView(DataGridViewSelectionMode.CellSelect, DataGridViewAutoSizeRowsMode.AllCells);
+
+                Grid.Dock = DockStyle.Fill;
+                Grid.ScrollBars = ScrollBars.Vertical;
+                Grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
+
+                Grid.ColumnCount = 4;
+                Grid.RowCount = 1;
+
+                Grid.Columns[0].HeaderText = "#";
+                Grid.Columns[1].HeaderText = OsLocalization.ConvertToLocString("Eng:Year_" + "Ru:Год_");
+                Grid.Columns[2].HeaderText = OsLocalization.ConvertToLocString("Eng:Rate_" + "Ru:Ставка_");
+                Grid.Columns[3].HeaderText = "";
+
+                Grid.Columns[0].ReadOnly = true;
+                Grid.Columns[0].FillWeight = 10;
+                Grid.Columns[1].FillWeight = 35;
+                Grid.Columns[2].FillWeight = 35;
+                Grid.Columns[3].FillWeight = 20;
+
+                DataGridViewButtonCell cellButton = new DataGridViewButtonCell();
+
+                Grid.Rows[Grid.RowCount - 1].Cells[0] = cellButton;
+                Grid.Rows[Grid.RowCount - 1].Cells[0].Value = OsLocalization.ConvertToLocString("Eng:Add row_" + "Ru:Добавить строку_");
+                Grid.Rows[Grid.RowCount - 1].Cells[1].ReadOnly = true;
+                Grid.Rows[Grid.RowCount - 1].Cells[2].ReadOnly = true;
+                Grid.Rows[Grid.RowCount - 1].Cells[3].ReadOnly = true;
+
+                foreach (DataGridViewColumn column in Grid.Columns)
+                {
+                    column.SortMode = DataGridViewColumnSortMode.NotSortable;
+                    column.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+                }
+
+                Grid.CellClick += Grid_CellClick;
+                Grid.CellValueChanged += Grid_CellValueChanged;
+                Grid.DataError += Grid_DataError;
+            }
+
+            private void Grid_DataError(object sender, DataGridViewDataErrorEventArgs e)
+            {
+                ServerMaster.SendNewLogMessage(e.ToString(), LogMessageType.Error);
+            }
+
+            private void Grid_CellClick(object sender, DataGridViewCellEventArgs e)
+            {
+                try
+                {
+                    if (e.RowIndex == Grid.RowCount - 1 && e.ColumnIndex == 0)
+                    {
+                        AddRow();
+                    }
+
+                    if (e.ColumnIndex == 3)
+                    {
+                        if (e.RowIndex > -1 && e.RowIndex < Grid.RowCount - 1)
+                        {
+                            DeleteRow(e.RowIndex);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ServerMaster.SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+                }
+            }
+
+            private void AddRow()
+            {
+                DataGridViewButtonCell cellButton = new DataGridViewButtonCell();
+                Grid.Rows.Insert(Grid.RowCount - 1);
+
+                Grid.Rows[Grid.RowCount - 2].Cells[3] = cellButton;
+                Grid.Rows[Grid.RowCount - 2].Cells[3].Value = OsLocalization.ConvertToLocString("Eng:Delete row_" + "Ru:Удалить строку_");
+                Grid.Rows[Grid.RowCount - 2].Cells[3].ReadOnly = true;
+
+                RenumberRows();
+            }
+
+            private void DeleteRow(int rowIndex)
+            {
+                int year = 0;
+
+                if (int.TryParse(Grid[1, rowIndex].Value?.ToString(), out year))
+                {
+                    int deleteIndex = _listTable.FindIndex(x => x.Year == year);
+
+                    if (deleteIndex > -1)
+                    {
+                        _listTable.RemoveAt(deleteIndex);
+                    }
+                }
+
+                Grid.Rows.RemoveAt(rowIndex);
+
+                SaveTable();
+
+                RenumberRows();
+            }
+
+            private void RenumberRows()
+            {
+                for (int i = 0; i < Grid.RowCount - 1; i++)
+                {
+                    Grid.Rows[i].Cells[0].Value = i + 1;
+                }
+            }
+
+            private void Grid_CellValueChanged(object sender, DataGridViewCellEventArgs e)
+            {
+                try
+                {
+                    if (e.RowIndex < 0
+                        || e.RowIndex == Grid.RowCount - 1
+                        || e.ColumnIndex == 0
+                        || e.ColumnIndex == 3)
+                    {
+                        return;
+                    }
+
+                    int year = 0;
+                    int.TryParse(Grid.Rows[e.RowIndex].Cells[1].Value?.ToString(), out year);
+
+                    if (year == 0)
+                    {
+                        return;
+                    }
+
+                    decimal rate = Grid.Rows[e.RowIndex].Cells[2].Value?.ToString().ToDecimal() ?? 0;
+
+                    ListTablePeriods list = new ListTablePeriods();
+                    list.Year = year;
+                    list.Rate = rate;
+
+                    for (int i = 0; i < Grid.RowCount - 1; i++)
+                    {
+                        int valueYear = 0;
+                        int.TryParse(Grid.Rows[i].Cells[1].Value?.ToString(), out valueYear);
+
+                        if (valueYear == year)
+                        {
+                            if (i == e.RowIndex)
+                            {
+                                int index = _listTable.FindIndex(x => x.Year == year);
+
+                                if (index > -1)
+                                {
+                                    _listTable[index] = list;
+                                }
+                                else
+                                {
+                                    _listTable.Add(list);
+                                }
+
+                                SaveTable();
+                            }
+                            else
+                            {
+                                Grid.Rows[e.RowIndex].Cells[1].Value = "";
+
+                                string message = OsLocalization.ConvertToLocString("Eng:There is already such a year in the table._" + "Ru:В таблице уже есть такой год._");
+                                ServerMaster.SendNewLogMessage(message, LogMessageType.Error);
+                            }
+                        }
+                    }
+
+                    for (int i = 0; i < _listTable.Count; i++)
+                    {
+                        int count = 0;
+
+                        for (int j = 0; j < Grid.RowCount - 1; j++)
+                        {
+                            int valueYear = 0;
+                            int.TryParse(Grid.Rows[j].Cells[1].Value?.ToString(), out valueYear);
+
+                            if (_listTable[i].Year == valueYear)
+                            {
+                                count++;
+                                break;
+                            }
+                        }
+
+                        if (count == 0)
+                        {
+                            _listTable.RemoveAt(i);
+                            i--;
+                            SaveTable();
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ServerMaster.SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+                }
+            }
+
+            private void LoadTable()
+            {
+                try
+                {
+                    _listTable = _getTable();
+
+                    if (_listTable == null
+                        || _listTable.Count == 0)
+                    {
+                        _listTable = new List<ListTablePeriods>();
+
+                        for (int i = 0; i < 31; i++)
+                        {
+                            _listTable.Add(new ListTablePeriods() { Year = 2000 + i, Rate = 13 });
+                        }
+
+                        SaveTable();
+                    }
+
+                    for (int i = 0; i < _listTable.Count; i++)
+                    {
+                        DataGridViewRow row = new DataGridViewRow();
+                        row.Cells.Add(new DataGridViewTextBoxCell() { Value = i + 1 });
+                        row.Cells.Add(new DataGridViewTextBoxCell() { Value = _listTable[i].Year });
+                        row.Cells.Add(new DataGridViewTextBoxCell() { Value = _listTable[i].Rate });
+                        row.Cells.Add(new DataGridViewButtonCell() { Value = OsLocalization.ConvertToLocString("Eng:Delete row_" + "Ru:Удалить строку_") });
+
+                        Grid.Rows.Insert(Grid.RowCount - 1, row);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ServerMaster.SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+                }
+            }
+
+            private void SaveTable()
+            {
+                try
+                {
+                    _saveTable(_listTable);
+                }
+                catch (Exception ex)
+                {
+                    ServerMaster.SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+                }
+            }
+
+            public void Dispose()
+            {
+                try
+                {
+                    if (Grid != null)
+                    {
+                        Grid.CellClick -= Grid_CellClick;
+                        Grid.CellValueChanged -= Grid_CellValueChanged;
+                        Grid.DataError -= Grid_DataError;
+
+                        DataGridFactory.ClearLinks(Grid);
+
+                        Grid.Rows.Clear();
+                        Grid.Columns.Clear();
+                        Grid.DataSource = null;
+                        Grid.Dispose();
+                        Grid = null;
+                    }
+
+                    _listTable = null;
+                    _getTable = null;
+                    _saveTable = null;
+                }
+                catch (Exception ex)
+                {
+                    ServerMaster.SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+                }
+            }
+        }
+
+        #endregion
+
     }
 }

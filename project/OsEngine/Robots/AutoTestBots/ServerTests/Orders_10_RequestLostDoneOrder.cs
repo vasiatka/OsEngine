@@ -37,14 +37,14 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
             if (serverPermission.CanQueryOrderStatus == false)
             {
-                SetNewServiceInfo("No permission. CanQueryOrderStatus == false. Test over");
+                SetTestSkipped("No permission. CanQueryOrderStatus == false. Test over");
                 TestEnded();
                 return;
             }
 
             List<Security> securities = Server.Securities;
 
-            if (securities == null &&
+            if (securities == null ||
                 securities.Count == 0)
             {
                 SetNewError("Error 2. No securities found");
@@ -121,7 +121,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
             // 2 выставляем ордер на покупку. Чтобы исполнился
 
-            decimal price = Math.Round(md.Asks[0].Price.ToDecimal() + md.Asks[0].Price.ToDecimal() * 0.01m , mySecurity.Decimals);
+            decimal price = Math.Round(md.Asks[0].Price.ToDecimal() + mySecurity.PriceStep * 2, mySecurity.Decimals); // смещение на 2 тика выше аска для гарантированного исполнения
             decimal volume = VolumeToTrade;
             Order newOrder = CreateOrder(mySecurity, price, volume, Side.Buy);
             _awaitOrderFirstStep = newOrder;
@@ -188,7 +188,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                 this.SetNewError("Error 9. No MyTrade for Done order");
             }
 
-            for(int i = 0;i < _myTradesToOrder.Count;i++)
+            for (int i = 0; i < _myTradesToOrder.Count; i++)
             {
                 SetNewServiceInfo("API send MyTrade. NumOrderParent: " + _myTradesToOrder[i].NumberOrderParent +
                       " Num trade: " + _myTradesToOrder[i].NumberTrade +
@@ -196,7 +196,221 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                       " Security: " + _myTradesToOrder[i].SecurityNameCode);
             }
 
+            // 7 закрываем позицию продажей по доступному балансу
+
+            SendSellOrder(mySecurity, _md.Bids[0].Price.ToDecimal());
+
             TestEnded();
+        }
+
+        private void SendSellOrder(Security mySec, decimal price)
+        {
+            ClearOrders();
+            _myTradesToOrder.Clear();
+
+            // объём закрытия: VolumeToTrade, на споте ограниченный доступным балансом.
+            // трейды для расчёта не используются, чтобы не зависеть от дублей и комиссий
+            decimal volume = VolumeToTrade;
+            decimal availableBalance = 0;
+
+            bool isFutures = mySec.SecurityType == SecurityType.Futures;
+
+            if (isFutures == false)
+            {
+                availableBalance = GetAvailableBaseAssetBalance(mySec);
+
+                if (availableBalance <= 0)
+                {
+                    SetNewServiceInfo("Skip close. No available base asset on board");
+                    return;
+                }
+
+                // крышка, чтобы не продать активы, лежавшие на аккаунте до теста
+                volume = Math.Min(volume, availableBalance);
+            }
+
+            decimal volumeBeforeRounding = volume;
+
+            // округляем вниз до шага объёма, пыль меньше лота не продаётся
+            decimal volumeStep = mySec.DecimalsVolume.GetValueByDecimals();
+
+            if (volumeStep > 0)
+            {
+                volume = Math.Floor(volume / volumeStep) * volumeStep;
+                volume = Math.Round(volume, mySec.DecimalsVolume);
+            }
+
+            SetNewServiceInfo($"Close volume calc: VolumeToTrade={VolumeToTrade} AvailableBalance={availableBalance} " +
+                $"BeforeRounding={volumeBeforeRounding} AfterRounding={volume}");
+
+            if (volume <= 0)
+            {
+                SetNewServiceInfo("Skip close. No volume to sell after rounding");
+                return;
+            }
+
+            price = Math.Round(price - mySec.PriceStep * 2, mySec.Decimals); // смещение на 2 тика ниже бида для гарантированного исполнения
+
+            Order newOrder = CreateOrder(mySec, price, volume, Side.Sell);
+            newOrder.PositionConditionType = OrderPositionConditionType.Close;
+
+            // перепривязываем сбор трейдов на ордер закрытия
+            _awaitOrderFirstStep = newOrder;
+            _awaitOrderSecondStep = null;
+
+            Server.ExecuteOrder(newOrder);
+
+            DateTime timeEndWait = DateTime.Now.AddMinutes(2);
+
+            // нужно дождаться когда будет Active order
+            while (true)
+            {
+                if (timeEndWait < DateTime.Now)
+                {
+                    this.SetNewError("Error 29. No Active order from server SellLimit");
+                    return;
+                }
+
+                if (_ordersFail.Find(o => o.NumberUser == newOrder.NumberUser) != null)
+                {
+                    this.SetNewError("Error 30. Order FAIL found from server SellLimit");
+                    return;
+                }
+
+                if (_ordersActive.Find(o => o.NumberUser == newOrder.NumberUser) != null
+                    || _ordersDone.Find(o => o.NumberUser == newOrder.NumberUser) != null)
+                {
+                    this.SetNewServiceInfo("SellLimit Active order income Check!");
+                    break;
+                }
+                else
+                {
+                    Thread.Sleep(1000);
+                }
+            }
+
+            timeEndWait = DateTime.Now.AddMinutes(2);
+
+            // нужно дождаться когда будет Done order
+            while (true)
+            {
+                if (timeEndWait < DateTime.Now)
+                {
+                    this.SetNewError("Error 31. No Done order from server SellLimit");
+                    return;
+                }
+
+                if (_ordersFail.Find(o => o.NumberUser == newOrder.NumberUser) != null)
+                {
+                    this.SetNewError("Error 32. Order FAIL found from server SellLimit");
+                    return;
+                }
+
+                if (_ordersDone.Find(o => o.NumberUser == newOrder.NumberUser) != null)
+                {
+                    this.SetNewServiceInfo("SellLimit Done order income Check!");
+                    break;
+                }
+                else
+                {
+                    Thread.Sleep(1000);
+                }
+            }
+
+            timeEndWait = DateTime.Now.AddMinutes(2);
+
+            // нужно дождаться когда придёт MyTrade
+            while (true)
+            {
+                if (timeEndWait < DateTime.Now)
+                {
+                    this.SetNewError("Error 33. No MyTrade SellLimit");
+                    return;
+                }
+
+                if (_myTradesToOrder.Count != 0)
+                {
+                    this.SetNewServiceInfo("SellLimit Done myTrade income Check!");
+                    break;
+                }
+                else
+                {
+                    Thread.Sleep(1000);
+                }
+            }
+
+            ClearOrders();
+        }
+
+        private decimal GetAvailableBaseAssetBalance(Security sec)
+        {
+            try
+            {
+                // обновляем портфели, чтобы баланс был свежим после покупки
+                Server.ServerRealization.GetPortfolios();
+                Thread.Sleep(2000);
+
+                // на OKX имя бумаги ADA-USDT, базовый актив - часть до первого дефиса.
+                // для коннекторов без дефиса (ADAUSDT) - префиксная эвристика
+                string baseAsset = sec.Name;
+                int dashIndex = baseAsset.IndexOf('-');
+
+                if (dashIndex > 0)
+                {
+                    baseAsset = baseAsset.Substring(0, dashIndex);
+                }
+
+                DateTime timeEndWait = DateTime.Now.AddSeconds(15);
+                decimal available = 0;
+
+                while (true)
+                {
+                    available = 0;
+
+                    if (Server.Portfolios != null)
+                    {
+                        for (int i = 0; i < Server.Portfolios.Count; i++)
+                        {
+                            Portfolio portfolio = Server.Portfolios[i];
+
+                            if (string.IsNullOrEmpty(PortfolioName) == false
+                                && portfolio.Number != PortfolioName)
+                            {
+                                continue;
+                            }
+
+                            List<PositionOnBoard> positions = portfolio.GetPositionOnBoard();
+
+                            for (int j = 0; j < positions.Count; j++)
+                            {
+                                string code = positions[j].SecurityNameCode;
+
+                                if (code == baseAsset
+                                    || (dashIndex < 0 && code.Length > 1 && sec.Name.StartsWith(code)))
+                                {
+                                    // доступный баланс = equity - locked (замороженное в открытых ордерах)
+                                    available += Math.Max(0, positions[j].ValueCurrent - positions[j].ValueBlocked);
+                                }
+                            }
+                        }
+                    }
+
+                    if (available > 0
+                        || timeEndWait < DateTime.Now)
+                    {
+                        break;
+                    }
+
+                    Thread.Sleep(500);
+                }
+
+                return available;
+            }
+            catch (Exception ex)
+            {
+                SetNewError("GetAvailableBaseAssetBalance: " + ex.Message);
+                return 0;
+            }
         }
 
         MarketDepth _md;
@@ -218,6 +432,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
             order.Volume = volume;
             order.Side = side;
             order.NumberUser = NumberGen.GetNumberOrder(StartProgram.IsOsTrader);
+            _myOrderNumbers.Add(order.NumberUser);
             order.ServerType = Server.ServerType;
             order.TypeOrder = OrderPriceType.Limit;
             order.SecurityNameCode = sec.Name;
@@ -228,6 +443,8 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
         }
 
         List<Order> _ordersActive = new List<Order>();
+
+        private HashSet<int> _myOrderNumbers = new HashSet<int>();
         List<Order> _ordersCancel = new List<Order>();
         List<Order> _ordersDone = new List<Order>();
         List<Order> _ordersFail = new List<Order>();
@@ -250,6 +467,11 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
         private void Server_NewOrderIncomeEvent(Order order)
         {
+            if (_myOrderNumbers.Contains(order.NumberUser) == false)
+            {
+                return;
+            }
+
             if (order.State == OrderStateType.None)
             {
                 this.SetNewError("Error 10. Order with state NONE");
@@ -286,7 +508,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                 _ordersPending.Add(order);
             }
 
-            if(order.NumberUser != 0 &&
+            if (order.NumberUser != 0 &&
                 _awaitOrderFirstStep.NumberUser == order.NumberUser)
             {
                 _awaitOrderSecondStep = order;
@@ -385,16 +607,16 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
         private void Server_NewMyTradeEvent(MyTrade myTrade)
         {
-            if(_awaitOrderSecondStep == null)
+            if (_awaitOrderSecondStep == null)
             {
                 return;
             }
 
-            if(string.IsNullOrEmpty(_awaitOrderSecondStep.NumberMarket) == true)
+            if (string.IsNullOrEmpty(_awaitOrderSecondStep.NumberMarket) == true)
             {
                 return;
             }
-            if(_awaitOrderSecondStep.NumberMarket == myTrade.NumberOrderParent)
+            if (_awaitOrderSecondStep.NumberMarket == myTrade.NumberOrderParent)
             {
                 _myTradesToOrder.Add(myTrade);
                 MyTradeIsNormal(myTrade);

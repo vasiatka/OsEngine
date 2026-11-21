@@ -70,14 +70,14 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
             if (serverPermission.CanGetOrderLists == false)
             {
-                SetNewServiceInfo("No permission. CanGetOrderLists == false. Test over");
+                SetTestSkipped("No permission. CanGetOrderLists == false. Test over");
                 TestEnded();
                 return;
             }
 
             List<Security> securities = Server.Securities;
 
-            if (securities == null &&
+            if (securities == null ||
                 securities.Count == 0)
             {
                 SetNewError("Error 2. No securities found");
@@ -148,8 +148,8 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
             // ПРОВЕРКА 1. Активные ордера
 
-            decimal priceToBuyOrdersNoExecution = Math.Round(md.Bids[0].Price.ToDecimal() - md.Bids[0].Price.ToDecimal() * 0.01m, mySecurity.Decimals); 
-            decimal priceToSellOrdersNoExecution = Math.Round(md.Asks[0].Price.ToDecimal() + md.Asks[0].Price.ToDecimal() * 0.01m, mySecurity.Decimals);
+            decimal priceToBuyOrdersNoExecution = AlignPriceToStep(md.Bids[0].Price.ToDecimal() - md.Bids[0].Price.ToDecimal() * 0.01m, mySecurity);
+            decimal priceToSellOrdersNoExecution = AlignPriceToStep(md.Asks[0].Price.ToDecimal() + md.Asks[0].Price.ToDecimal() * 0.01m, mySecurity);
 
             if (CheckActiveOrders(Side.Buy, priceToBuyOrdersNoExecution, VolumeToTrade, mySecurity, _awaitOrderFirstStepBuy) == false)
             {
@@ -158,7 +158,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
             }
             else
             {
-                 this.SetNewServiceInfo("Active orders request test OK. Side: " + Side.Buy.ToString());
+                this.SetNewServiceInfo("Active orders request test OK. Side: " + Side.Buy.ToString());
             }
 
             if (CheckActiveOrders(Side.Sell, priceToSellOrdersNoExecution, VolumeToTrade, mySecurity, _awaitOrderFirstStepSell) == false)
@@ -205,7 +205,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
             ordersArray.Clear();
             ClearOrders();
 
-            for (int i = 0;i < OrdersCount;i++)
+            for (int i = 0; i < OrdersCount; i++)
             {
                 Order newOrder = CreateOrder(mySecurity, price, volume, side);
 
@@ -244,7 +244,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
             List<Order> ordersFromRequest = Server.GetActiveOrders();
 
-            if(ordersFromRequest == null)
+            if (ordersFromRequest == null)
             {
                 this.SetNewError("Error 9. ordersFromRequest == null");
                 return false;
@@ -261,9 +261,9 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                 return false;
             }
 
-            for(int i = 0;i < ordersFromRequest.Count;i++)
+            for (int i = 0; i < ordersFromRequest.Count; i++)
             {
-                if(OrderIsNormal(ordersFromRequest[i])== false)
+                if (OrderIsNormal(ordersFromRequest[i]) == false)
                 {
                     this.SetNewError("Error 12. OrderIsNormal(ordersFromRequest[i])== false");
                     return false;
@@ -274,19 +274,19 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
             List<Order> ordersFromPartRequests = new List<Order>();
 
-            for(int i = 0; i < ordersArray.Count + 2; i += 2)
+            for (int i = 0; i < ordersArray.Count + 2; i += 2)
             {
                 List<Order> currentOrders = Server.GetActiveOrders(i, 2);
 
-                if(currentOrders == null ||
+                if (currentOrders == null ||
                     currentOrders.Count == 0)
                 {
                     break;
                 }
 
-                for(int j = 0; j < currentOrders.Count; j++)
+                for (int j = 0; j < currentOrders.Count; j++)
                 {
-                    if (ordersFromPartRequests.Find( order => order.NumberMarket == currentOrders[j].NumberMarket) != null)
+                    if (ordersFromPartRequests.Find(order => order.NumberMarket == currentOrders[j].NumberMarket) != null)
                     {
                         this.SetNewError("Error 12/1. duplicate orders");
                         return false;
@@ -319,7 +319,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
             // 3 отзываем всё
 
-            for(int i = 0;i < ordersFromPartRequests.Count;i++)
+            for (int i = 0; i < ordersFromPartRequests.Count; i++)
             {
                 Server.CancelOrder(ordersFromPartRequests[i]);
                 ordersArray[i].State = OrderStateType.Cancel;
@@ -337,26 +337,36 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
             // 2.1) Запрос на возврат 100 активных ордеров.
 
-            List<Order> ordersFromRequest = Server.GetHistoricalOrders();
+            // История коннектора за день содержит ордера всех тестов сессии — сверяем только свои
+            List<int> myOrderNumbers = new List<int>();
+            for (int i = 0; i < ordersArrayBuy.Count; i++) myOrderNumbers.Add(ordersArrayBuy[i].NumberUser);
+            for (int i = 0; i < orderArraySell.Count; i++) myOrderNumbers.Add(orderArraySell[i].NumberUser);
 
-            if (ordersFromRequest == null)
+            DateTime timeEndWait = DateTime.Now.AddMinutes(2); // канон ожидания прихода данных в файле (:217/:525/:562)
+            List<Order> ordersFromRequest = null;
+            int rawCount = 0;
+            // shortcut: кап AServer :4461 = 100, при истории>100 asc-срез не отдаёт мои свежие — по подтверждению raw=100 в ретесте отдельная заявка (count/постраничность), в этот фикс не тащить
+            while (true)
             {
-                this.SetNewError("Error 16. ordersFromRequest == null");
-                return false;
+                List<Order> raw = Server.GetHistoricalOrders();
+                rawCount = raw == null ? 0 : raw.Count;
+                if (raw != null && raw.Count != 0)
+                {
+                    ordersFromRequest = raw.FindAll(o => myOrderNumbers.Contains(o.NumberUser));
+                    if (ordersFromRequest.Count == countOfAllOrdersInTest) break;
+                }
+                if (timeEndWait < DateTime.Now)
+                {
+                    if (raw == null) { this.SetNewError("Error 16. ordersFromRequest == null"); return false; }
+                    if (raw.Count == 0) { this.SetNewError("Error 17. ordersFromRequest.Count == 0"); return false; }
+                    this.SetNewError("Error 18. ordersFromRequest.Count != countOfAllOrdersInTest. Mine " + ordersFromRequest.Count
+                        + " of " + countOfAllOrdersInTest + ", raw " + rawCount + (rawCount == 100 ? " (cap)" : ""));
+                    return false;
+                }
+                this.SetNewServiceInfo("Waiting history. Mine " + (ordersFromRequest == null ? "-" : ordersFromRequest.Count.ToString()) + " of " + countOfAllOrdersInTest + ", raw " + rawCount);
+                Thread.Sleep(5000);
             }
-            if (ordersFromRequest.Count == 0)
-            {
-                this.SetNewError("Error 17. ordersFromRequest.Count == 0");
-                return false;
-            }
-
-            ordersFromRequest = ordersFromRequest.GetRange(0, countOfAllOrdersInTest);
-
-            if (ordersFromRequest.Count != countOfAllOrdersInTest)
-            {
-                this.SetNewError("Error 18. ordersFromRequest.Count != countOfAllOrdersInTest");
-                return false;
-            }
+            int historyCount = rawCount;
 
             for (int i = 0; i < ordersFromRequest.Count; i++)
             {
@@ -376,7 +386,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
                 Order orderSocket = null;
 
-                for(int j = 0; j < orderArraySell.Count; j++)
+                for (int j = 0; j < orderArraySell.Count; j++)
                 {
                     if (orderArraySell[j].NumberUser == orderRequest.NumberUser)
                     {
@@ -385,7 +395,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                     }
                 }
 
-                if(orderSocket == null)
+                if (orderSocket == null)
                 {
                     for (int j = 0; j < ordersArrayBuy.Count; j++)
                     {
@@ -403,7 +413,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                     return false;
                 }
 
-                if(OrdersIsCompare(orderSocket,orderRequest) == false)
+                if (OrdersIsCompare(orderSocket, orderRequest) == false)
                 {
                     this.SetNewError("Error 22. OrdersIsCompare(orderSocket,orderRequest) == false");
                     return false;
@@ -414,7 +424,8 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
             List<Order> ordersFromPartRequests = new List<Order>();
 
-            for (int i = 0; i < countOfAllOrdersInTest; i += 1)
+            // обход всей истории (historyCount зафиксирован с 2.1; +1 страница = «последний пустой» по замыслу :14/:18, при конкурентном росте истории декоративен)
+            for (int i = 0; i <= historyCount; i += 1)
             {
                 List<Order> currentOrders = Server.GetHistoricalOrders(i, 1);
 
@@ -424,7 +435,13 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                     break;
                 }
 
-                ordersFromPartRequests.AddRange(currentOrders);
+                for (int j = 0; j < currentOrders.Count; j++)
+                {
+                    if (myOrderNumbers.Contains(currentOrders[j].NumberUser))
+                    {
+                        ordersFromPartRequests.Add(currentOrders[j]);
+                    }
+                }
             }
 
             if (ordersFromPartRequests.Count == 0)
@@ -505,13 +522,13 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
         private bool CheckDoneOrders(MarketDepth md, Security mySecurity)
         {
-           
+
             ClearOrders();
 
             // 1 высылаем ордера на покупку
 
             List<Order> ordersArrayBuy = new List<Order>();
-            decimal priceToBuyOrders = Math.Round(md.Asks[0].Price.ToDecimal() + md.Asks[0].Price.ToDecimal() * 0.01m, mySecurity.Decimals);
+            decimal priceToBuyOrders = Math.Round(md.Asks[0].Price.ToDecimal() + mySecurity.PriceStep * 2, mySecurity.Decimals); // смещение на 2 тика выше аска для гарантированного исполнения
 
             for (int i = 0; i < OrdersCount; i++)
             {
@@ -547,13 +564,13 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
             // 2 высылаем ордера на продажу
 
             List<Order> orderArraySell = new List<Order>();
-            decimal priceToSellOrders = Math.Round(md.Bids[0].Price.ToDecimal() - md.Bids[0].Price.ToDecimal() * 0.01m, mySecurity.Decimals);
+            decimal priceToSellOrders = Math.Round(md.Bids[0].Price.ToDecimal() - mySecurity.PriceStep * 2, mySecurity.Decimals); // смещение на 2 тика ниже бида для гарантированного исполнения
 
             for (int i = 0; i < OrdersCount; i++)
             {
                 Order newOrder = CreateOrder(mySecurity, priceToSellOrders, VolumeToTrade, Side.Sell);
                 newOrder.State = OrderStateType.Done;
-                
+
                 orderArraySell.Add(newOrder);
                 Server.ExecuteOrder(newOrder);
                 Thread.Sleep(500);
@@ -605,8 +622,12 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
             order.SecurityClassCode = sec.NameClass;
             order.PortfolioNumber = PortfolioName;
 
+            _myOrderNumbers.Add(order.NumberUser);
+
             return order;
         }
+
+        private HashSet<int> _myOrderNumbers = new HashSet<int>();
 
         List<Order> _ordersActive = new List<Order>();
         List<Order> _ordersCancel = new List<Order>();
@@ -629,10 +650,15 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
         private List<Order> _awaitOrderFirstStepSell = new List<Order>();
 
-        private List<Order> _awaitOrderSecondStep = new List<Order>(); 
+        private List<Order> _awaitOrderSecondStep = new List<Order>();
 
         private void Server_NewOrderIncomeEvent(Order order)
         {
+            if (_myOrderNumbers.Contains(order.NumberUser) == false)
+            {
+                return;
+            }
+
             if (order.State == OrderStateType.None)
             {
                 this.SetNewError("Error 10. Order with state NONE");
@@ -648,7 +674,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
             {
                 bool isInArray = false;
 
-                for(int i = 0;i < _ordersActive.Count;i++)
+                for (int i = 0; i < _ordersActive.Count; i++)
                 {
                     if (_ordersActive[i].NumberUser == order.NumberUser)
                     {
@@ -762,7 +788,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
         private bool OrdersIsCompare(Order orderFromSocket, Order orderFromRequest)
         {
-            if(orderFromSocket.State != orderFromRequest.State)
+            if (orderFromSocket.State != orderFromRequest.State)
             {
                 this.SetNewError("Error 32. orderFromSocket.State != orderFromRequest.State");
                 return false;

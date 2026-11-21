@@ -1,5 +1,6 @@
 ﻿using OsEngine.Language;
 using OsEngine.Market;
+using System;
 using System.Windows;
 
 
@@ -19,26 +20,47 @@ namespace OsEngine.OsTrader.Gui.BlockInterface
             LabelPassword.Content = OsLocalization.Trader.Label423;
             ButtonAccept.Content = OsLocalization.Trader.Label429;
             Title = OsLocalization.Trader.Label430;
+
+            Closed += RobotsUiLightUnblock_Closed;
+        }
+
+        private void RobotsUiLightUnblock_Closed(object sender, EventArgs e)
+        {
+            try
+            {
+                ButtonAccept.Click -= ButtonAccept_Click;
+                Closed -= RobotsUiLightUnblock_Closed;
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
         }
 
         public bool IsUnBlocked;
 
         private void ButtonAccept_Click(object sender, RoutedEventArgs e)
         {
-            string password = TextBoxPassword.Text;
-
-            string passwordInReal = BlockMaster.Password;
-
-            if(passwordInReal == password)
+            try
             {
-                IsUnBlocked = true;
-                BlockMaster.IsBlocked = false;
-                Close();
+                string password = TextBoxPassword.Text;
+
+                if (BlockMaster.CheckPassword(password))
+                {
+                    IsUnBlocked = true;
+                    BlockMaster.IsBlocked = false;
+                    Close();
+                }
+                else
+                {
+                    ServerMaster.SendNewLogMessage("Error password. ", Logging.LogMessageType.Error);
+                    LabelError.Content = OsLocalization.Trader.Label758;
+                    TextBoxPassword.Text = "";
+                }
             }
-            else
+            catch (Exception error)
             {
-                ServerMaster.SendNewLogMessage("Error password. ",Logging.LogMessageType.Error);
-                Close();
+                ServerMaster.SendNewLogMessage(error.ToString(), Logging.LogMessageType.Error);
             }
         }
     }

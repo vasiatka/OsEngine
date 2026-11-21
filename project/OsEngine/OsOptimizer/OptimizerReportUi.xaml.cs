@@ -1,23 +1,24 @@
-﻿/*
+/*
  * Your rights to use code governed by this license https://github.com/AlexWan/OsEngine/blob/master/LICENSE
  * Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
 */
 
 using OsEngine.Entity;
 using OsEngine.Language;
+using OsEngine.Logging;
+using OsEngine.Market;
+using OsEngine.OsOptimizer.OptEntity;
 using OsEngine.OsTrader.Panels;
 using System;
 using System.Collections.Generic;
+using System.Drawing;
+using System.IO;
+using System.Linq;
+using System.Text;
 using System.Windows;
 using System.Windows.Forms;
-using OsEngine.Logging;
-using MessageBox = System.Windows.MessageBox;
-using OsEngine.OsOptimizer.OptEntity;
-using System.IO;
-using System.Text;
 using System.Windows.Forms.DataVisualization.Charting;
-using System.Drawing;
-using System.Linq;
+using MessageBox = System.Windows.MessageBox;
 
 namespace OsEngine.OsOptimizer
 {
@@ -55,6 +56,8 @@ namespace OsEngine.OsOptimizer
             LabelTableResults.Content = OsLocalization.Optimizer.Label31;
             TabControlResultsSeries.Header = OsLocalization.Optimizer.Label37;
             TabControlResultsOutOfSampleResults.Header = OsLocalization.Optimizer.Label38;
+            TabItemResults.Header = OsLocalization.Optimizer.Label29;
+            Title = OsLocalization.Optimizer.LabelReportTitle;
             ButtonSaveInFile.Content = OsLocalization.Optimizer.Label45;
             ButtonLoadFromFile.Content = OsLocalization.Optimizer.Label46;
             LabelRobustnessMetric.Content = OsLocalization.Optimizer.Label53;
@@ -78,10 +81,33 @@ namespace OsEngine.OsOptimizer
                 {
                     WindowsFormsHostFazeNumOnTubResult.Child = null;
                 }
-
                 if (WindowsFormsHostResults != null)
                 {
                     WindowsFormsHostResults.Child = null;
+                }
+                if (WindowsFormsHostResultsChart != null)
+                {
+                    WindowsFormsHostResultsChart.Child = null;
+                }
+                if (HostStepsOfOptimizationTable != null)
+                {
+                    HostStepsOfOptimizationTable.Child = null;
+                }
+                if (HostRobustness != null)
+                {
+                    HostRobustness.Child = null;
+                }
+                if (HostTotalProfit != null)
+                {
+                    HostTotalProfit.Child = null;
+                }
+                if (HostAverageProfit != null)
+                {
+                    HostAverageProfit.Child = null;
+                }
+                if (HostProfitFactor != null)
+                {
+                    HostProfitFactor.Child = null;
                 }
 
                 if (_gridFazesEnd != null)
@@ -89,19 +115,57 @@ namespace OsEngine.OsOptimizer
                     _gridFazesEnd.CellClick -= _gridFazesEnd_CellClick;
                     _gridFazesEnd.DataError -= _gridFazesEnd_DataError;
                     DataGridFactory.ClearLinks(_gridFazesEnd);
+                    _gridFazesEnd.Rows.Clear();
+                    _gridFazesEnd.Columns.Clear();
+                    _gridFazesEnd.DataSource = null;
+                    _gridFazesEnd.Dispose();
                     _gridFazesEnd = null;
                 }
 
                 if (_gridResults != null)
                 {
                     _gridResults.DataError -= _gridFazesEnd_DataError;
+                    _gridResults.SelectionChanged -= _gridResults_SelectionChanged;
+                    _gridResults.CellMouseClick -= _gridResults_CellMouseClick;
                     DataGridFactory.ClearLinks(_gridResults);
+                    _gridResults.Rows.Clear();
+                    _gridResults.Columns.Clear();
+                    _gridResults.DataSource = null;
+                    _gridResults.Dispose();
                     _gridResults = null;
                 }
+
+                if (_chartSeriesResult != null)
+                {
+                    try
+                    {
+                        _chartSeriesResult.Click -= _chartSeriesResult_Click;
+                        _chartSeriesResult.Series.Clear();
+                        _chartSeriesResult.ChartAreas.Clear();
+                        _chartSeriesResult.Dispose();
+                    }
+                    catch (Exception ex)
+                    {
+                        ServerMaster.SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+                    }
+                    _chartSeriesResult = null;
+                }
+
+                if (_resultsCharting != null)
+                {
+                    _resultsCharting.Delete();
+                    _resultsCharting.LogMessageEvent -= _master.SendLogMessage;
+                    _resultsCharting = null;
+                }
+
+                _master = null;
+                _reports = null;
+
+                Closed -= OptimizerReportUi_Closed;
             }
-            catch
+            catch (Exception ex)
             {
-                // ignore
+                ServerMaster.SendNewLogMessage(ex.ToString(), LogMessageType.Error);
             }
         }
 
@@ -275,7 +339,7 @@ namespace OsEngine.OsOptimizer
 
         private void ButtonLoadFromFile_Click(object sender, RoutedEventArgs e)
         {
-            Title = "Optimizer Report";
+            Title = OsLocalization.Optimizer.LabelReportTitle;
 
             try
             {
@@ -438,8 +502,15 @@ namespace OsEngine.OsOptimizer
 
         private void _gridFazesEnd_CellClick(object sender, DataGridViewCellEventArgs e)
         {
-            PaintTableResults();
-            PaintSeriesResultsChart();
+            try
+            {
+                PaintTableResults();
+                PaintSeriesResultsChart();
+            }
+            catch (Exception ex)
+            {
+                _master.SendLogMessage(ex.ToString(), LogMessageType.Error);
+            }
         }
 
         #endregion
@@ -581,7 +652,7 @@ namespace OsEngine.OsOptimizer
 
             _gridResults.Columns[2].HeaderText = "Pos Count";
 
-            Color cellColor = Color.Black;
+            Color cellColor = Themes.ThemeManager.GetColorWinForms("GridSelectionBackColor");
 
             for (int i = 0; i < _gridResults.Columns.Count; i++)
             {
@@ -749,7 +820,7 @@ namespace OsEngine.OsOptimizer
                     row.Cells.Add(cell3);
 
                     DataGridViewTextBoxCell cell33 = new DataGridViewTextBoxCell();
-                    cell33.Value = Math.Round(report.ProfitPositionPercent,2);
+                    cell33.Value = Math.Round(report.ProfitPositionPercent, 3);
                     row.Cells.Add(cell33);
 
                     DataGridViewTextBoxCell cell34 = new DataGridViewTextBoxCell();
@@ -766,35 +837,35 @@ namespace OsEngine.OsOptimizer
                     row.Cells.Add(cell34);
 
                     DataGridViewTextBoxCell cell4 = new DataGridViewTextBoxCell();
-                    cell4.Value = Math.Round(report.TotalProfit, 5).ToStringWithNoEndZero() + " (" + report.TotalProfitPercent.ToStringWithNoEndZero() + "%)";
+                    cell4.Value = Math.Round(report.TotalProfit, 3).ToStringWithNoEndZero() + " (" + Math.Round(report.TotalProfitPercent, 3).ToStringWithNoEndZero() + "%)";
                     row.Cells.Add(cell4);
 
                     DataGridViewTextBoxCell cell5 = new DataGridViewTextBoxCell();
-                    cell5.Value = Math.Round(report.MaxDrawDawn, 5).ToStringWithNoEndZero();
+                    cell5.Value = Math.Round(report.MaxDrawDawn, 3).ToStringWithNoEndZero();
                     row.Cells.Add(cell5);
 
                     DataGridViewTextBoxCell cell6 = new DataGridViewTextBoxCell();
-                    cell6.Value = Math.Round(report.AverageProfit, 5).ToStringWithNoEndZero();
+                    cell6.Value = Math.Round(report.AverageProfit, 3).ToStringWithNoEndZero();
                     row.Cells.Add(cell6);
 
                     DataGridViewTextBoxCell cell7 = new DataGridViewTextBoxCell();
-                    cell7.Value = Math.Round(report.AverageProfitPercentOneContract, 5).ToStringWithNoEndZero();
+                    cell7.Value = Math.Round(report.AverageProfitPercentOneContract, 3).ToStringWithNoEndZero();
                     row.Cells.Add(cell7);
 
                     DataGridViewTextBoxCell cell8 = new DataGridViewTextBoxCell();
-                    cell8.Value = Math.Round(report.ProfitFactor, 5).ToStringWithNoEndZero();
+                    cell8.Value = Math.Round(report.ProfitFactor, 3).ToStringWithNoEndZero();
                     row.Cells.Add(cell8);
 
                     DataGridViewTextBoxCell cell9 = new DataGridViewTextBoxCell();
-                    cell9.Value = Math.Round(report.PayOffRatio, 5).ToStringWithNoEndZero();
+                    cell9.Value = Math.Round(report.PayOffRatio, 3).ToStringWithNoEndZero();
                     row.Cells.Add(cell9);
 
                     DataGridViewTextBoxCell cell10 = new DataGridViewTextBoxCell();
-                    cell10.Value = Math.Round(report.Recovery, 5).ToStringWithNoEndZero();
+                    cell10.Value = Math.Round(report.Recovery, 3).ToStringWithNoEndZero();
                     row.Cells.Add(cell10);
 
                     DataGridViewTextBoxCell cell11 = new DataGridViewTextBoxCell();
-                    cell11.Value = Math.Round(report.SharpRatio, 5).ToStringWithNoEndZero();
+                    cell11.Value = Math.Round(report.SharpRatio, 3).ToStringWithNoEndZero();
                     row.Cells.Add(cell11);
 
                     DataGridViewButtonCell cell12 = new DataGridViewButtonCell();
@@ -828,19 +899,26 @@ namespace OsEngine.OsOptimizer
 
         private void _gridResults_CellMouseClick(object sender, DataGridViewCellMouseEventArgs e)
         {
-            if (e.RowIndex < 0)
+            try
             {
-                return;
-            }
+                if (e.RowIndex < 0)
+                {
+                    return;
+                }
 
-            if (e.ColumnIndex == 13)
-            {
-                ShowBotChartDialog(e);
-            }
+                if (e.ColumnIndex == 13)
+                {
+                    ShowBotChartDialog(e);
+                }
 
-            if (e.ColumnIndex == 14)
+                if (e.ColumnIndex == 14)
+                {
+                    ShowParametersDialog(e);
+                }
+            } 
+            catch (Exception ex)
             {
-                ShowParametersDialog(e);
+                _master.SendLogMessage(ex.ToString(), LogMessageType.Error);
             }
         }
 
@@ -942,6 +1020,9 @@ namespace OsEngine.OsOptimizer
 
         private void PaintBotInTable(string botName)
         {
+            Color selectBotColor = Themes.ThemeManager.GetColorWinForms("OptimizerCursorColor");
+            Color normalBotColor = Themes.ThemeManager.GetColorWinForms("GridTextColor");
+
             for (int i2 = 0; i2 < _gridResults.Rows.Count; i2++)
             {
                 DataGridViewRow row = _gridResults.Rows[i2];
@@ -950,14 +1031,23 @@ namespace OsEngine.OsOptimizer
                 {
                     for (int i = 0; i < row.Cells.Count; i++)
                     {
-                        row.Cells[i].Style.ForeColor = Color.FromArgb(255, 83, 0);
+                        // клон: иначе ячейки делят один объект стиля
+                        // и покраска протекает на всю таблицу
+                        row.Cells[i].Style = (DataGridViewCellStyle)_gridResults.DefaultCellStyle.Clone();
+                        row.Cells[i].Style.ForeColor = selectBotColor;
                     }
                 }
                 else
                 {
                     for (int i = 0; i < row.Cells.Count; i++)
                     {
-                        row.Cells[i].Style = _gridResults.DefaultCellStyle;
+                        if(row.Cells[i].Style.ForeColor == selectBotColor)
+                        {
+                            // у DefaultCellStyle этого грида чёрный ForeColor,
+                            // поэтому обычный цвет текста ставим из темы явно
+                            row.Cells[i].Style = (DataGridViewCellStyle)_gridResults.DefaultCellStyle.Clone();
+                            row.Cells[i].Style.ForeColor = normalBotColor;
+                        }
                     }
                 }
             }
@@ -977,22 +1067,22 @@ namespace OsEngine.OsOptimizer
 
             _chartSeriesResult.ChartAreas.Clear();
             _chartSeriesResult.ChartAreas.Add(area);
-            _chartSeriesResult.BackColor = Color.FromArgb(21, 26, 30);
-            _chartSeriesResult.ChartAreas[0].AxisX.TitleForeColor = Color.FromArgb(149, 159, 176);
+            _chartSeriesResult.BackColor = Themes.ThemeManager.GetColorWinForms("StandardBackGroundColorLight");
+            _chartSeriesResult.ChartAreas[0].AxisX.TitleForeColor = Themes.ThemeManager.GetColorWinForms("OptimizerChartTextColor");
 
             for (int i = 0; _chartSeriesResult.ChartAreas != null && i < _chartSeriesResult.ChartAreas.Count; i++)
             {
-                _chartSeriesResult.ChartAreas[i].BackColor = Color.FromArgb(21, 26, 30);
+                _chartSeriesResult.ChartAreas[i].BackColor = Themes.ThemeManager.GetColorWinForms("StandardBackGroundColorLight");
                 _chartSeriesResult.ChartAreas[i].CursorX.IsUserSelectionEnabled = false;
                 _chartSeriesResult.ChartAreas[i].CursorX.IsUserEnabled = true;
-                _chartSeriesResult.ChartAreas[i].CursorX.LineColor = Color.FromArgb(255, 83, 0);
+                _chartSeriesResult.ChartAreas[i].CursorX.LineColor = Themes.ThemeManager.GetColorWinForms("OptimizerCursorColor");
                 _chartSeriesResult.ChartAreas[i].CursorX.LineWidth = 2;
-                _chartSeriesResult.ChartAreas[i].BorderColor = Color.FromArgb(17, 18, 23);
-                _chartSeriesResult.ChartAreas[i].CursorY.LineColor = Color.FromArgb(149, 159, 176);
+                _chartSeriesResult.ChartAreas[i].BorderColor = Themes.ThemeManager.GetColorWinForms("StandardBackGroundColor");
+                _chartSeriesResult.ChartAreas[i].CursorY.LineColor = Themes.ThemeManager.GetColorWinForms("OptimizerChartTextColor");
 
                 foreach (var axe in _chartSeriesResult.ChartAreas[i].Axes)
                 {
-                    axe.LabelStyle.ForeColor = Color.FromArgb(149, 159, 176);
+                    axe.LabelStyle.ForeColor = Themes.ThemeManager.GetColorWinForms("OptimizerChartTextColor");
                 }
             }
 
@@ -1033,7 +1123,7 @@ namespace OsEngine.OsOptimizer
                         continue;
                     }
                     _chartSeriesResult.Series[0].Points[i].Label = null;
-                    _chartSeriesResult.Series[0].Points[i].LabelForeColor = Color.White;
+                    _chartSeriesResult.Series[0].Points[i].LabelForeColor = Themes.ThemeManager.GetColorWinForms("JournalEquityTotalColor");
                 }
 
                 if (index >= _chartSeriesResult.Series[0].Points.Count)
@@ -1229,7 +1319,7 @@ namespace OsEngine.OsOptimizer
                     for (int i = 0; i < _chartSeriesResult.Series[0].Points.Count; i++)
                     {
                         _chartSeriesResult.Series[0].Points[i].Label = null;
-                        _chartSeriesResult.Series[0].Points[i].LabelForeColor = Color.White;
+                        _chartSeriesResult.Series[0].Points[i].LabelForeColor = Themes.ThemeManager.GetColorWinForms("JournalEquityTotalColor");
                     }
 
                     int index = (int)_chartSeriesResult.ChartAreas[0].CursorX.Position;

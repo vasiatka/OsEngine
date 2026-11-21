@@ -215,6 +215,13 @@ namespace OsEngine.Charts.CandleChart.Indicators
             {
                 Values.Clear();
             }
+            // сталые протоки отравляют окно новой серии: инкремент после Clear читал бы старые записи по новым индексам свечей
+            if (_tp != null)
+            {
+                _tp.Clear();
+                _fp.Clear();
+                _fn.Clear();
+            }
             _myCandles = null;
         }
 
@@ -415,14 +422,17 @@ namespace OsEngine.Charts.CandleChart.Indicators
                 }
                 if (sumFn == 0)
                 {
-                    ratio = 0;
+                    if (sumFp != 0)
+                    {
+                        value = 100; // чистый рост: нет отрицательного money flow (зеркало 2034)
+                    }
+                    // флэт — легаси value=0 (:381)
                 }
                 else
                 {
                     ratio = sumFp / sumFn;
+                    value = 100 - 100 / (1 + ratio);
                 }
-
-                value = 100 - 100 / (1 + ratio);
 
             }
 

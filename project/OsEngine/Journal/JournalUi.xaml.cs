@@ -1,6 +1,6 @@
 /*
 * Your rights to use code governed by this license http://o-s-a.net/doc/license_simple_engine.pdf
-* Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
+* пїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ http://o-s-a.net/doc/license_simple_engine.pdf
 */
 
 using System;
@@ -32,7 +32,7 @@ namespace OsEngine.Journal
 {
     /// <summary>
     /// Interaction logic for JournalNewUi.xaml
-    /// Логика взаимодействия для JournalNewUi.xaml
+    /// пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅ JournalNewUi.xaml
     /// </summary>
     public partial class JournalUi
     {
@@ -48,6 +48,7 @@ namespace OsEngine.Journal
             _currentCulture = OsLocalization.CurCulture;
 
             OsEngine.Layout.StickyBorders.Listen(this);
+            OsEngine.Layout.StartupLocation.Start_FitHeightToWorkArea(this);
 
             TabBots.SizeChanged += TabBotsSizeChanged;
             TabControlPrime.SelectionChanged += TabControlPrime_SelectionChanged;
@@ -117,9 +118,9 @@ namespace OsEngine.Journal
                 TabBots.Items.Clear();
                 TabControlPrime.SelectionChanged -= TabControlPrime_SelectionChanged;
                 TabControlPrime.Items.Clear();
+                ComboBoxChartType.SelectionChanged -= ComboBoxChartType_SelectionChanged;
 
                 Closing -= JournalUi_Closing;
-                _botsJournals.Clear();
                 _botsJournals = null;
 
                 if (_allPositions != null)
@@ -145,42 +146,85 @@ namespace OsEngine.Journal
 
                 if (_chartEquity != null)
                 {
-                    _chartEquity.Series.Clear();
-                    _chartEquity.ChartAreas.Clear();
-                    _chartEquity.Click -= _chartEquity_Click;
-                    _chartEquity = null;
-                    HostEquity.Child.Hide();
-                    HostEquity.Child = null;
-                    HostEquity = null;
+                    try
+                    {
+                        _chartEquity.Click -= _chartEquity_Click;
+                        _chartEquity.MouseMove -= _chartEquity_MouseMove;
+
+                        _chartEquity.Series.Clear();
+                        _chartEquity.ChartAreas.Clear();
+
+                        if (HostEquity != null)
+                        {
+                            HostEquity.Child = null;
+                        }
+
+                        _chartEquity.Dispose();
+                        _chartEquity = null;
+                        HostEquity = null;
+                    }
+                    catch (Exception error)
+                    {
+                        SendNewLogMessage(error.ToString(), LogMessageType.Error);
+                    }
                 }
 
                 if (_chartVolume != null)
                 {
-                    _chartVolume.Series.Clear();
-                    _chartVolume.ChartAreas.Clear();
-                    _chartVolume.Click -= _chartVolume_Click;
-                    _chartVolume = null;
-                    HostVolume.Child.Hide();
-                    HostVolume.Child = null;
-                    HostVolume = null;
+                    try
+                    {
+                        _chartVolume.Click -= _chartVolume_Click;
+                        _chartVolume.MouseWheel -= _chartVolume_MouseWheel;
+
+                        _chartVolume.Series.Clear();
+                        _chartVolume.ChartAreas.Clear();
+
+                        if (HostVolume != null)
+                        {
+                            HostVolume.Child = null;
+                        }
+
+                        _chartVolume.Dispose();
+                        _chartVolume = null;
+                        HostVolume = null;
+                    }
+                    catch (Exception error)
+                    {
+                        SendNewLogMessage(error.ToString(), LogMessageType.Error);
+                    }
                 }
 
                 if (_chartDd != null)
                 {
-                    _chartDd.Series.Clear();
-                    _chartDd.ChartAreas.Clear();
-                    _chartDd.Click -= _chartDd_Click;
-                    _chartDd = null;
-                    HostDrawdown.Child.Hide();
-                    HostDrawdown.Child = null;
-                    HostDrawdown = null;
+                    try
+                    {
+                        _chartDd.Click -= _chartDd_Click;
+
+                        _chartDd.Series.Clear();
+                        _chartDd.ChartAreas.Clear();
+
+                        if (HostDrawdown != null)
+                        {
+                            HostDrawdown.Child = null;
+                        }
+
+                        _chartDd.Dispose();
+                        _chartDd = null;
+                        HostDrawdown = null;
+                    }
+                    catch (Exception error)
+                    {
+                        SendNewLogMessage(error.ToString(), LogMessageType.Error);
+                    }
                 }
 
                 if (_gridStatistics != null)
                 {
                     DataGridFactory.ClearLinks(_gridStatistics);
-                    _gridStatistics.Rows.Clear();
                     _gridStatistics.DataError -= _gridStatistics_DataError;
+                    _gridStatistics.Rows.Clear();
+                    _gridStatistics.Columns.Clear();
+                    _gridStatistics.DataSource = null;
                     _gridStatistics.Dispose();
                     _gridStatistics = null;
                     HostStatistics.Child.Hide();
@@ -191,10 +235,12 @@ namespace OsEngine.Journal
                 if (_openPositionGrid != null)
                 {
                     DataGridFactory.ClearLinks(_openPositionGrid);
-                    _openPositionGrid.Rows.Clear();
                     _openPositionGrid.Click -= _openPositionGrid_Click;
                     _openPositionGrid.DoubleClick -= _openPositionGrid_DoubleClick;
                     _openPositionGrid.DataError -= _gridStatistics_DataError;
+                    _openPositionGrid.Rows.Clear();
+                    _openPositionGrid.Columns.Clear();
+                    _openPositionGrid.DataSource = null;
                     _openPositionGrid.Dispose();
                     _openPositionGrid = null;
                     HostOpenPosition.Child.Hide();
@@ -205,10 +251,12 @@ namespace OsEngine.Journal
                 if (_closePositionGrid != null)
                 {
                     DataGridFactory.ClearLinks(_closePositionGrid);
-                    _closePositionGrid.Rows.Clear();
                     _closePositionGrid.Click -= _closePositionGrid_Click;
                     _closePositionGrid.DoubleClick -= _closePositionGrid_DoubleClick;
                     _closePositionGrid.DataError -= _gridStatistics_DataError;
+                    _closePositionGrid.Rows.Clear();
+                    _closePositionGrid.Columns.Clear();
+                    _closePositionGrid.DataSource = null;
                     _closePositionGrid.Dispose();
                     _closePositionGrid = null;
                     HostClosePosition.Child.Hide();
@@ -367,21 +415,21 @@ namespace OsEngine.Journal
                 }
 
                 // 1 collecting all journals.
-                // 1 собираем все журналы
+                // 1 пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ
                 List<Journal> myJournals = new List<Journal>();
 
                 for (int i = 0; i < _botsJournals.Count; i++)
                 {
                     string name = ((TabItem)TabBots.SelectedItem).Header.ToString();
                     // 1 only take our bots
-                    // 1 берём только нашего бота
+                    // 1 пїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ
                     if (name == "V" || name == _botsJournals[i].BotName)
                     {
                         for (int i2 = 0; i2 < _botsJournals[i]._Tabs.Count; i2++)
                         {
                             string nameTab = ((TabItem)TabControlLeft.SelectedItem).Header.ToString().Replace(" ", "");
                             // 2 only take our tabs
-                            // 2 берём только наши вкладки
+                            // 2 пїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ
                             if (name == "V" || nameTab == "V" || nameTab == _botsJournals[i]._Tabs[i2].TabNum.ToString())
                             {
                                 myJournals.Add(_botsJournals[i]._Tabs[i2].Journal);
@@ -396,7 +444,7 @@ namespace OsEngine.Journal
                 }
 
                 // 2 sorting deals on ALL / Long / Short
-                // 2 сортируем сделки на ВСЕ / Лонг / Шорт
+                // 2 пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅ / пїЅпїЅпїЅпїЅ / пїЅпїЅпїЅпїЅ
 
                 List<Position> positionsAll = new List<Position>();
 
@@ -545,7 +593,7 @@ namespace OsEngine.Journal
                 for (int i = 0; i < _botsJournals.Count; i++)
                 {
                     // addition of a new element
-                    // добавление нового элемента
+                    // пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ
                     TabItem item = new TabItem() { Header = _botsJournals[i].BotName.ToString(), FontSize = 12 };
                     TabBots.Items.Add(item);
                 }
@@ -706,10 +754,13 @@ namespace OsEngine.Journal
                 column3.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
                 _gridStatistics.Columns.Add(column3);
 
-                for (int i = 0; i < 31; i++)
+                for (int i = 0; i < 32; i++)
                 {
-                    _gridStatistics.Rows.Add(); //string addition/ добавление строки
+                    _gridStatistics.Rows.Add(); //string addition/ РґРѕР±Р°РІР»РµРЅРёРµ СЃС‚СЂРѕРєРё
                 }
+
+                // РєРѕР»РѕРЅРєР° РїРѕРґРїРёСЃРµР№ Р±РµР· СЏРІРЅРѕРіРѕ СЃС‚РёР»СЏ РїРѕРєР°Р·С‹РІР°РµС‚ РґРµС„РѕР»С‚РЅС‹Р№ С‡С‘СЂРЅС‹Р№ С‚РµРєСЃС‚
+                _gridStatistics.Columns[0].DefaultCellStyle.ForeColor = Themes.ThemeManager.GetColorWinForms("GridTextColor");
 
                 _gridStatistics.Rows[0].Cells[0].Value = OsLocalization.Journal.GridRow1;
                 _gridStatistics.Rows[1].Cells[0].Value = OsLocalization.Journal.GridRow2;
@@ -744,6 +795,16 @@ namespace OsEngine.Journal
                 _gridStatistics.Rows[28].Cells[0].Value = "";
                 _gridStatistics.Rows[29].Cells[0].Value = OsLocalization.Journal.GridRow15;
                 _gridStatistics.Rows[30].Cells[0].Value = OsLocalization.Journal.GridRow16;
+                _gridStatistics.Rows[31].Cells[0].Value = OsLocalization.Journal.GridRow19;
+
+                // СЏС‡РµР№РєРё СЃРѕР·РґР°РЅС‹ РёР· С€Р°Р±Р»РѕРЅР° РєРѕР»РѕРЅРєРё вЂ” РїСЂРёСЃРІР°РёРІР°РµРј Р°РєС‚СѓР°Р»СЊРЅС‹Р№ СЃС‚РёР»СЊ С‚РµРјС‹ РїСЂРёРЅСѓРґРёС‚РµР»СЊРЅРѕ
+                for (int i = 0; i < _gridStatistics.Rows.Count; i++)
+                {
+                    for (int y = 0; y < _gridStatistics.Rows[i].Cells.Count; y++)
+                    {
+                        _gridStatistics.Rows[i].Cells[y].Style = _gridStatistics.DefaultCellStyle;
+                    }
+                }
             }
             catch (Exception error)
             {
@@ -754,6 +815,21 @@ namespace OsEngine.Journal
         private void _gridStatistics_DataError(object sender, DataGridViewDataErrorEventArgs e)
         {
             ServerMaster.SendNewLogMessage(e.ToString(), Logging.LogMessageType.Error);
+        }
+
+        private static readonly int[] _unreliableStatRows = new int[] { 1, 11, 18, 26, 29 };
+
+        private bool IsUnreliableStatRow(int index)
+        {
+            for (int i = 0; i < _unreliableStatRows.Length; i++)
+            {
+                if (_unreliableStatRows[i] == index)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private void PaintStatTable(List<Position> positionsAll, List<Position> positionsLong, List<Position> positionsShort, bool needShowTickState)
@@ -771,44 +847,75 @@ namespace OsEngine.Journal
 
                 if (positionsAllState == null)
                 {
-                    for (int i = 0; i < 31; i++)
+                    for (int i = 0; i < 32; i++)
                     {
                         _gridStatistics.Rows[i].Cells[1].Value = "";
                     }
                 }
                 if (positionsLongState == null)
                 {
-                    for (int i = 0; i < 31; i++)
+                    for (int i = 0; i < 32; i++)
                     {
                         _gridStatistics.Rows[i].Cells[2].Value = "";
                     }
                 }
                 if (positionsShortState == null)
                 {
-                    for (int i = 0; i < 31; i++)
+                    for (int i = 0; i < 32; i++)
                     {
                         _gridStatistics.Rows[i].Cells[3].Value = "";
                     }
                 }
                 if (positionsLongState != null)
                 {
-                    for (int i = 0; i < 31; i++)
+                    for (int i = 0; i < 32; i++)
                     {
-                        _gridStatistics.Rows[i].Cells[2].Value = positionsLongState[i].ToString();
+                        string value = positionsLongState[i].ToString();
+
+                        if (_startProgram == StartProgram.IsOsTrader && IsUnreliableStatRow(i))
+                        {
+                            value = OsLocalization.Journal.NotAvailable;
+                        }
+
+                        _gridStatistics.Rows[i].Cells[2].Value = value;
                     }
                 }
                 if (positionsShortState != null)
                 {
-                    for (int i = 0; i < 31; i++)
+                    for (int i = 0; i < 32; i++)
                     {
-                        _gridStatistics.Rows[i].Cells[3].Value = positionsShortState[i].ToString();
+                        string value = positionsShortState[i].ToString();
+
+                        if (_startProgram == StartProgram.IsOsTrader && IsUnreliableStatRow(i))
+                        {
+                            value = OsLocalization.Journal.NotAvailable;
+                        }
+
+                        _gridStatistics.Rows[i].Cells[3].Value = value;
                     }
                 }
                 if (positionsAllState != null)
                 {
-                    for (int i = 0; i < 31; i++)
+                    for (int i = 0; i < 32; i++)
                     {
-                        _gridStatistics.Rows[i].Cells[1].Value = positionsAllState[i].ToString();
+                        string value = positionsAllState[i].ToString();
+
+                        if (_startProgram == StartProgram.IsOsTrader && IsUnreliableStatRow(i))
+                        {
+                            value = OsLocalization.Journal.NotAvailable;
+                        }
+
+                        _gridStatistics.Rows[i].Cells[1].Value = value;
+                    }
+                }
+
+                // С€Р°Р±Р»РѕРЅС‹ РєРѕР»РѕРЅРѕРє Р·Р°С…РІР°С‚С‹РІР°СЋС‚ СЃС‚РёР»СЊ РїСЂРё СЃРѕР·РґР°РЅРёРё РіСЂРёРґР° вЂ”
+                // РїСЂРёСЃРІР°РёРІР°РµРј Р°РєС‚СѓР°Р»СЊРЅС‹Р№ СЃС‚РёР»СЊ С‚РµРјС‹ РІСЃРµРј СЏС‡РµР№РєР°Рј РїСЂРёРЅСѓРґРёС‚РµР»СЊРЅРѕ
+                for (int i = 0; i < _gridStatistics.Rows.Count; i++)
+                {
+                    for (int y = 0; y < _gridStatistics.Rows[i].Cells.Count; y++)
+                    {
+                        _gridStatistics.Rows[i].Cells[y].Style = _gridStatistics.DefaultCellStyle;
                     }
                 }
             }
@@ -834,7 +941,7 @@ namespace OsEngine.Journal
 
                 _chartEquity.Series.Clear();
                 _chartEquity.ChartAreas.Clear();
-                _chartEquity.BackColor = Color.FromArgb(17, 18, 23);
+                _chartEquity.BackColor = Themes.ThemeManager.GetColorWinForms("JournalChartBackColor");
                 _chartEquity.Click += _chartEquity_Click;
                 _chartEquity.MouseMove += _chartEquity_MouseMove;
 
@@ -842,8 +949,8 @@ namespace OsEngine.Journal
                 areaLineProfit.Position.Height = areaLayout[0].Item1;
                 areaLineProfit.Position.Width = 100;
                 areaLineProfit.Position.Y = areaLayout[0].Item2;
-                areaLineProfit.CursorX.IsUserSelectionEnabled = false; //allow the user to change the view scope/ разрешаем пользователю изменять рамки представления
-                areaLineProfit.CursorX.IsUserEnabled = true; //trait/чертa
+                areaLineProfit.CursorX.IsUserSelectionEnabled = false; //allow the user to change the view scope/ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ
+                areaLineProfit.CursorX.IsUserEnabled = true; //trait/пїЅпїЅпїЅпїЅa
 
                 _chartEquity.ChartAreas.Add(areaLineProfit);
 
@@ -853,61 +960,63 @@ namespace OsEngine.Journal
                 areaLineProfitBar.Position.Width = 100;
                 areaLineProfitBar.Position.Y = areaLayout[1].Item2;
                 areaLineProfitBar.AxisX.Enabled = AxisEnabled.False;
-                areaLineProfitBar.CursorX.IsUserEnabled = true; //trait/чертa
+                areaLineProfitBar.CursorX.IsUserEnabled = true; //trait/пїЅпїЅпїЅпїЅa
 
                 _chartEquity.ChartAreas.Add(areaLineProfitBar);
 
                 if (areaLayout.Count == 3)
                 {
 
-                    // НИЖНЯЯ область для месячной гистограммы
+                    // пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ
                     ChartArea areaMonthlyBar = new ChartArea("ChartAreaMonthlyBar");
-                    areaMonthlyBar.AlignWithChartArea = "ChartAreaProfit"; // Синхронизация по X с верхней
+                    areaMonthlyBar.AlignWithChartArea = "ChartAreaProfit"; // пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅ X пїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ
                     areaMonthlyBar.Position.Height = areaLayout[2].Item1;
                     areaMonthlyBar.Position.Width = 100;
                     areaMonthlyBar.Position.Y = areaLayout[2].Item2;
                     areaMonthlyBar.AxisX.Enabled = AxisEnabled.False;
-                    areaMonthlyBar.CursorX.IsUserEnabled = true; //trait/чертa
+                    areaMonthlyBar.CursorX.IsUserEnabled = true; //trait/пїЅпїЅпїЅпїЅa
 
                     _chartEquity.ChartAreas.Add(areaMonthlyBar);
                 }
                 else if (areaLayout.Count == 4)
                 {
-                    // НИЖНЯЯ область для месячной гистограммы
+                    // пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ
                     ChartArea areaMonthlyBar = new ChartArea("ChartAreaMonthlyBar");
-                    areaMonthlyBar.AlignWithChartArea = "ChartAreaProfit"; // Синхронизация по X с верхней
+                    areaMonthlyBar.AlignWithChartArea = "ChartAreaProfit"; // пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅ X пїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ
                     areaMonthlyBar.Position.Height = areaLayout[2].Item1;
                     areaMonthlyBar.Position.Width = 100;
                     areaMonthlyBar.Position.Y = areaLayout[2].Item2;
                     areaMonthlyBar.AxisX.Enabled = AxisEnabled.False;
-                    areaMonthlyBar.CursorX.IsUserEnabled = true; //trait/чертa
+                    areaMonthlyBar.CursorX.IsUserEnabled = true; //trait/пїЅпїЅпїЅпїЅa
 
                     _chartEquity.ChartAreas.Add(areaMonthlyBar);
 
-                    // НИЖНЯЯ область для годовой гистограммы
+                    // пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ
                     ChartArea areaYearlyBar = new ChartArea("ChartAreaYearlyBar");
-                    areaYearlyBar.AlignWithChartArea = "ChartAreaProfit"; // Синхронизация по X с верхней
+                    areaYearlyBar.AlignWithChartArea = "ChartAreaProfit"; // пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅ X пїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ
                     areaYearlyBar.Position.Height = areaLayout[3].Item1;
                     areaYearlyBar.Position.Width = 100;
                     areaYearlyBar.Position.Y = areaLayout[3].Item2;
                     areaYearlyBar.AxisX.Enabled = AxisEnabled.False;
-                    areaYearlyBar.CursorX.IsUserEnabled = true; //trait/чертa
+                    areaYearlyBar.CursorX.IsUserEnabled = true; //trait/пїЅпїЅпїЅпїЅa
 
                     _chartEquity.ChartAreas.Add(areaYearlyBar);
                 }
 
                 for (int i = 0; i < _chartEquity.ChartAreas.Count; i++)
                 {
-                    _chartEquity.ChartAreas[i].BorderColor = Color.Black;
-                    _chartEquity.ChartAreas[i].BackColor = Color.FromArgb(17, 18, 23);
-                    _chartEquity.ChartAreas[i].CursorY.LineColor = Color.Gainsboro;
-                    _chartEquity.ChartAreas[i].CursorX.LineColor = Color.Black;
-                    _chartEquity.ChartAreas[i].AxisX.TitleForeColor = Color.Gainsboro;
-                    _chartEquity.ChartAreas[i].AxisY.TitleForeColor = Color.Gainsboro;
+                    _chartEquity.ChartAreas[i].BorderColor = Themes.ThemeManager.GetColorWinForms("JournalChartBorderColor");
+                    _chartEquity.ChartAreas[i].BackColor = Themes.ThemeManager.GetColorWinForms("JournalChartBackColor");
+                    _chartEquity.ChartAreas[i].CursorY.LineColor = Themes.ThemeManager.GetColorWinForms("JournalChartTextColor");
+                    _chartEquity.ChartAreas[i].CursorX.LineColor = Themes.ThemeManager.GetColorWinForms("JournalChartCursorXColor");
+                    _chartEquity.ChartAreas[i].AxisX.TitleForeColor = Themes.ThemeManager.GetColorWinForms("JournalChartTextColor");
+                    _chartEquity.ChartAreas[i].AxisY.TitleForeColor = Themes.ThemeManager.GetColorWinForms("JournalChartTextColor");
 
                     foreach (var axe in _chartEquity.ChartAreas[i].Axes)
                     {
-                        axe.LabelStyle.ForeColor = Color.Gainsboro;
+                        axe.LabelStyle.ForeColor = Themes.ThemeManager.GetColorWinForms("JournalChartTextColor");
+                    axe.LabelStyle.Font = Themes.ThemeManager.GetChartAxisFont();
+                        axe.LabelStyle.Font = Themes.ThemeManager.GetChartAxisFont();
                     }
                 }
             }
@@ -921,7 +1030,7 @@ namespace OsEngine.Journal
         {
             try
             {
-                // Проверяем, есть ли месячная гистограмма
+                // пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ, пїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ
                 Series monthlySeries = _chartEquity.Series.OfType<Series>()
                     .FirstOrDefault(s => s.Name == "SeriesMonthlyProfitBar");
 
@@ -931,10 +1040,10 @@ namespace OsEngine.Journal
                     return;
                 }
 
-                // HitTest возвращает ОДИН результат
+                // HitTest пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ
                 HitTestResult hitTestResult = _chartEquity.HitTest(e.X, e.Y);
 
-                // Проверяем, попали ли мы на точку данных месячной гистограммы
+                // пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ, пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ
                 if (hitTestResult.ChartElementType == ChartElementType.DataPoint &&
                     hitTestResult.Series != null && hitTestResult.PointIndex >= 0 &&
                     (hitTestResult.Series.Name == "SeriesMonthlyProfitBar" || hitTestResult.Series.Name == "SeriesYearlyProfitBar"))
@@ -945,10 +1054,10 @@ namespace OsEngine.Journal
                     {
                         DataPoint point = monthlySeries.Points[pointIndex];
 
-                        // Показываем всплывающую подсказку
+                        // пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ
                         if (!string.IsNullOrEmpty(point.ToolTip))
                         {
-                            // В WinForms Chart ToolTip отображается автоматически
+                            // пїЅ WinForms Chart ToolTip пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ
                             _chartEquity.Cursor = Cursors.Hand;
                         }
                         return;
@@ -964,11 +1073,11 @@ namespace OsEngine.Journal
         }
 
         /// <summary>
-        /// Анализирует список позиций и возвращает параметры для построения графиков
+        /// пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ
         /// </summary>
-        /// <param name="positionsAll">Список всех позиций</param>
-        /// <param name="chartType">Тип отображения прибыли (Absolute или Percent 1 contract)</param>
-        /// <returns>Кортеж с параметрами: массив (Height, Y) для каждой области, месячные данные, годовые данные</returns>
+        /// <param name="positionsAll">пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ</param>
+        /// <param name="chartType">пїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ (Absolute пїЅпїЅпїЅ Percent 1 contract)</param>
+        /// <returns>пїЅпїЅпїЅпїЅпїЅпїЅ пїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ: пїЅпїЅпїЅпїЅпїЅпїЅ (Height, Y) пїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ, пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ, пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ</returns>
         private (List<(float Height, float Y)> areaLayout, Dictionary<DateTime, decimal> monthlyProfit, Dictionary<int, decimal> yearlyProfit) GetChartParameters(
             List<Position> positionsAll, string chartType)
         {
@@ -990,37 +1099,37 @@ namespace OsEngine.Journal
                 double totalDays = difference.TotalDays;
                 double totalYears = totalDays / 365.25;
 
-                // Определяем количество областей, их высоты и Y-координаты
-                if (totalDays <= 30) // Меньше или равно месяцу (~30 дней)
+                // пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ, пїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅ Y-пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ
+                if (totalDays <= 30) // пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ (~30 пїЅпїЅпїЅпїЅ)
                 {
-                    // 2 области: эквити (70%) и гистограмма сделок (30%)
+                    // 2 пїЅпїЅпїЅпїЅпїЅпїЅпїЅ: пїЅпїЅпїЅпїЅпїЅпїЅ (70%) пїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ (30%)
                     float height1 = 70f;
                     float height2 = 30f;
 
                     areaLayout = new List<(float, float)>
                 {
-                    (height1, 0f),           // 1-я область: Y = 0
-                    (height2, height1)       // 2-я область: Y = высота предыдущей
+                    (height1, 0f),           // 1-пїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ: Y = 0
+                    (height2, height1)       // 2-пїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ: Y = пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ
                 };
                 }
-                else if (totalYears < 1) // Больше месяца, но меньше года
+                else if (totalYears < 1) // пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ, пїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ
                 {
-                    // 3 области: эквити (50%), гистограмма сделок (25%), месячная гистограмма (25%)
+                    // 3 пїЅпїЅпїЅпїЅпїЅпїЅпїЅ: пїЅпїЅпїЅпїЅпїЅпїЅ (50%), пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ (25%), пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ (25%)
                     float height1 = 50f;
                     float height2 = 25f;
                     float height3 = 25f;
 
                     areaLayout = new List<(float, float)>
                 {
-                    (height1, 0f),                    // 1-я область: Y = 0
-                    (height2, height1),               // 2-я область: Y = 50
-                    (height3, height1 + height2)      // 3-я область: Y = 75
+                    (height1, 0f),                    // 1-пїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ: Y = 0
+                    (height2, height1),               // 2-пїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ: Y = 50
+                    (height3, height1 + height2)      // 3-пїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ: Y = 75
                 };
 
-                    // Агрегируем данные по месяцам
+                    // пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ
                     monthlyProfit = new Dictionary<DateTime, decimal>();
 
-                    // Группируем позиции по месяцам
+                    // пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ
                     var monthlyGroups = positionsAll.GroupBy(p => new DateTime(p.TimeCreate.Year, p.TimeCreate.Month, 1));
 
                     foreach (IGrouping<DateTime, Position> group in monthlyGroups)
@@ -1040,9 +1149,9 @@ namespace OsEngine.Journal
                         monthlyProfit[group.Key] = monthlySum;
                     }
                 }
-                else // Больше или равно году
+                else // пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ
                 {
-                    // 4 области: эквити (40%), гистограмма сделок (20%), месячная гистограмма (20%), годовая гистограмма (20%)
+                    // 4 пїЅпїЅпїЅпїЅпїЅпїЅпїЅ: пїЅпїЅпїЅпїЅпїЅпїЅ (40%), пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ (20%), пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ (20%), пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ (20%)
                     float height1 = 40f;
                     float height2 = 20f;
                     float height3 = 20f;
@@ -1050,16 +1159,16 @@ namespace OsEngine.Journal
 
                     areaLayout = new List<(float, float)>
                 {
-                    (height1, 0f),                          // 1-я область: Y = 0
-                    (height2, height1),                     // 2-я область: Y = 40
-                    (height3, height1 + height2),           // 3-я область: Y = 60
-                    (height4, height1 + height2 + height3)  // 4-я область: Y = 80
+                    (height1, 0f),                          // 1-пїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ: Y = 0
+                    (height2, height1),                     // 2-пїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ: Y = 40
+                    (height3, height1 + height2),           // 3-пїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ: Y = 60
+                    (height4, height1 + height2 + height3)  // 4-пїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ: Y = 80
                 };
 
-                    // Агрегируем данные по месяцам
+                    // пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ
                     monthlyProfit = new Dictionary<DateTime, decimal>();
 
-                    // Группируем позиции по месяцам
+                    // пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ
                     IEnumerable<IGrouping<DateTime, Position>> monthlyGroups = positionsAll.GroupBy(p => new DateTime(p.TimeCreate.Year, p.TimeCreate.Month, 1));
 
                     foreach (IGrouping<DateTime, Position> group in monthlyGroups)
@@ -1080,10 +1189,10 @@ namespace OsEngine.Journal
                         monthlyProfit[group.Key] = monthlySum;
                     }
 
-                    // Агрегируем данные по годам
+                    // пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅ
                     yearlyProfit = new Dictionary<int, decimal>();
 
-                    // Группируем позиции по годам
+                    // пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅ
                     IEnumerable<IGrouping<int, Position>> yearlyGroups = positionsAll.GroupBy(p => p.TimeCreate.Year);
 
                     foreach (IGrouping<int, Position> group in yearlyGroups)
@@ -1132,7 +1241,7 @@ namespace OsEngine.Journal
 
                 string chartType = ComboBoxChartType.SelectedItem.ToString();
 
-                // получить количество нужных областей в зависимости от периода сделок
+                // пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ
                 (List<(float Height, float Y)> areaLayout, Dictionary<DateTime, decimal> monthlyProfit, Dictionary<int, decimal> yearlyProfit) = GetChartParameters(positionsAll, chartType);
 
                 if (_chartEquity == null)
@@ -1144,33 +1253,33 @@ namespace OsEngine.Journal
 
                 Series profit = new Series("SeriesProfit");
                 profit.ChartType = SeriesChartType.Line;
-                profit.Color = Color.White;   //DeepSkyBlue;
+                profit.Color = Themes.ThemeManager.GetColorWinForms("JournalEquityTotalColor");   //DeepSkyBlue;
                 profit.YAxisType = AxisType.Secondary;
                 profit.ChartArea = "ChartAreaProfit";
                 profit.BorderWidth = 4;
-                profit.ShadowOffset = 2;
+                profit.ShadowOffset = Themes.ThemeManager.GetChartSeriesShadow();
 
                 Series profitLong = new Series("SeriesProfitLong");
                 profitLong.ChartType = SeriesChartType.Line;
-                profitLong.Color = Color.DeepSkyBlue;   //DeepSkyBlue;
+                profitLong.Color = Themes.ThemeManager.GetColorWinForms("ChartEquityColor");   //DeepSkyBlue;
                 profitLong.YAxisType = AxisType.Secondary;
                 profitLong.ChartArea = "ChartAreaProfit";
                 profitLong.BorderWidth = 2;
-                profitLong.ShadowOffset = 2;
+                profitLong.ShadowOffset = Themes.ThemeManager.GetChartSeriesShadow();
 
                 Series profitShort = new Series("SeriesProfitShort");
                 profitShort.ChartType = SeriesChartType.Line;
-                profitShort.Color = Color.DarkOrange;  //DeepSkyBlue;
+                profitShort.Color = Themes.ThemeManager.GetColorWinForms("JournalShortColor");  //DeepSkyBlue;
                 profitShort.YAxisType = AxisType.Secondary;
                 profitShort.ChartArea = "ChartAreaProfit";
-                profitShort.ShadowOffset = 2;
+                profitShort.ShadowOffset = Themes.ThemeManager.GetChartSeriesShadow();
                 profitShort.BorderWidth = 2;
 
                 Series profitBar = new Series("SeriesProfitBar");
                 profitBar.ChartType = SeriesChartType.Column;
                 profitBar.YAxisType = AxisType.Secondary;
                 profitBar.ChartArea = "ChartAreaProfitBar";
-                profitBar.ShadowOffset = 2;
+                profitBar.ShadowOffset = Themes.ThemeManager.GetChartSeriesShadow();
 
                 Series nullLine = new Series("SeriesNullLine");
                 nullLine.ChartType = SeriesChartType.Line;
@@ -1187,7 +1296,7 @@ namespace OsEngine.Journal
                     profitMonthlyBar.ChartType = SeriesChartType.Column;
                     profitMonthlyBar.YAxisType = AxisType.Secondary;
                     profitMonthlyBar.ChartArea = "ChartAreaMonthlyBar";
-                    profitMonthlyBar.ShadowOffset = 2;
+                    profitMonthlyBar.ShadowOffset = Themes.ThemeManager.GetChartSeriesShadow();
                     profitMonthlyBar.SetCustomProperty("PointWidth", "1.0");
                 }
 
@@ -1197,7 +1306,7 @@ namespace OsEngine.Journal
                     profitYearlyBar.ChartType = SeriesChartType.Column;
                     profitYearlyBar.YAxisType = AxisType.Secondary;
                     profitYearlyBar.ChartArea = "ChartAreaYearlyBar";
-                    profitYearlyBar.ShadowOffset = 2;
+                    profitYearlyBar.ShadowOffset = Themes.ThemeManager.GetChartSeriesShadow();
                     profitYearlyBar.SetCustomProperty("PointWidth", "1.0");
                 }
 
@@ -1253,9 +1362,9 @@ namespace OsEngine.Journal
                         profitMonthlyBar.Points[^1].AxisLabel = string.Format("{0}", monthLabel);
 
                         if (monthlyProfit[keyDate] > 0)
-                            profitMonthlyBar.Points[i].Color = Color.Gainsboro;
+                            profitMonthlyBar.Points[i].Color = Themes.ThemeManager.GetColorWinForms("JournalBarPlusColor");
                         else if (monthlyProfit[keyDate] < 0)
-                            profitMonthlyBar.Points[i].Color = Color.DarkRed;
+                            profitMonthlyBar.Points[i].Color = Themes.ThemeManager.GetColorWinForms("ChartBarMinusColor");
 
                         if (monthProfit > maxYValMonBars)
                         {
@@ -1279,9 +1388,9 @@ namespace OsEngine.Journal
                         profitYearlyBar.Points[^1].AxisLabel = string.Format("{0}", year);
 
                         if (yearlyProfit[year] > 0)
-                            profitYearlyBar.Points[i].Color = Color.Gainsboro;
+                            profitYearlyBar.Points[i].Color = Themes.ThemeManager.GetColorWinForms("JournalBarPlusColor");
                         else if (yearlyProfit[year] < 0)
-                            profitYearlyBar.Points[i].Color = Color.DarkRed;
+                            profitYearlyBar.Points[i].Color = Themes.ThemeManager.GetColorWinForms("ChartBarMinusColor");
 
                         if (yearProfit > maxYValYearBars)
                         {
@@ -1343,11 +1452,11 @@ namespace OsEngine.Journal
 
                     if (curProfit > 0)
                     {
-                        profitBar.Points[profitBar.Points.Count - 1].Color = Color.Gainsboro;
+                        profitBar.Points[profitBar.Points.Count - 1].Color = Themes.ThemeManager.GetColorWinForms("JournalBarPlusColor");
                     }
                     else
                     {
-                        profitBar.Points[profitBar.Points.Count - 1].Color = Color.DarkRed;
+                        profitBar.Points[profitBar.Points.Count - 1].Color = Themes.ThemeManager.GetColorWinForms("ChartBarMinusColor");
                     }
                 }
 
@@ -1377,9 +1486,15 @@ namespace OsEngine.Journal
 
                     if (maxYVal != minYval)
                     {
-                        _chartEquity.ChartAreas[0].AxisY2.Maximum = Math.Round((double)maxYVal, 3);
-                        _chartEquity.ChartAreas[0].AxisY2.Minimum = Math.Round((double)minYval, 3);
-                        _chartEquity.ChartAreas[0].AxisY2.LabelStyle.Format = "F3";
+                        double axisMax = Math.Round((double)maxYVal, 3);
+                        double axisMin = Math.Round((double)minYval, 3);
+
+                        if (axisMax > axisMin)
+                        {
+                            _chartEquity.ChartAreas[0].AxisY2.Maximum = axisMax;
+                            _chartEquity.ChartAreas[0].AxisY2.Minimum = axisMin;
+                            _chartEquity.ChartAreas[0].AxisY2.LabelStyle.Format = "F3";
+                        }
                     }
 
                 }
@@ -1394,9 +1509,15 @@ namespace OsEngine.Journal
 
                     if (maxYValBars != minYValBars)
                     {
-                        _chartEquity.ChartAreas[1].AxisY2.Maximum = Math.Round((double)maxYValBars, 3);
-                        _chartEquity.ChartAreas[1].AxisY2.Minimum = Math.Round((double)minYValBars, 3);
-                        _chartEquity.ChartAreas[1].AxisY2.LabelStyle.Format = "F3";
+                        double axisMax = Math.Round((double)maxYValBars, 3);
+                        double axisMin = Math.Round((double)minYValBars, 3);
+
+                        if (axisMax > axisMin)
+                        {
+                            _chartEquity.ChartAreas[1].AxisY2.Maximum = axisMax;
+                            _chartEquity.ChartAreas[1].AxisY2.Minimum = axisMin;
+                            _chartEquity.ChartAreas[1].AxisY2.LabelStyle.Format = "F3";
+                        }
                     }
                 }
 
@@ -1410,9 +1531,15 @@ namespace OsEngine.Journal
 
                     if (maxYValMonBars != minYValMonBars)
                     {
-                        _chartEquity.ChartAreas[2].AxisY2.Maximum = Math.Round((double)maxYValMonBars, 3);
-                        _chartEquity.ChartAreas[2].AxisY2.Minimum = Math.Round((double)minYValMonBars, 3);
-                        _chartEquity.ChartAreas[2].AxisY2.LabelStyle.Format = "F3";
+                        double axisMax = Math.Round((double)maxYValMonBars, 3);
+                        double axisMin = Math.Round((double)minYValMonBars, 3);
+
+                        if (axisMax > axisMin)
+                        {
+                            _chartEquity.ChartAreas[2].AxisY2.Maximum = axisMax;
+                            _chartEquity.ChartAreas[2].AxisY2.Minimum = axisMin;
+                            _chartEquity.ChartAreas[2].AxisY2.LabelStyle.Format = "F3";
+                        }
                     }
                 }
 
@@ -1426,9 +1553,15 @@ namespace OsEngine.Journal
 
                     if (maxYValYearBars != minYValYearBars)
                     {
-                        _chartEquity.ChartAreas[3].AxisY2.Maximum = Math.Round((double)maxYValYearBars, 3);
-                        _chartEquity.ChartAreas[3].AxisY2.Minimum = Math.Round((double)minYValYearBars, 3);
-                        _chartEquity.ChartAreas[3].AxisY2.LabelStyle.Format = "F3";
+                        double axisMax = Math.Round((double)maxYValYearBars, 3);
+                        double axisMin = Math.Round((double)minYValYearBars, 3);
+
+                        if (axisMax > axisMin)
+                        {
+                            _chartEquity.ChartAreas[3].AxisY2.Maximum = axisMax;
+                            _chartEquity.ChartAreas[3].AxisY2.Minimum = axisMin;
+                            _chartEquity.ChartAreas[3].AxisY2.LabelStyle.Format = "F3";
+                        }
                     }
                 }
             }
@@ -1483,7 +1616,7 @@ namespace OsEngine.Journal
 
                     _chartEquity.Series[i].Points[index].Label = label;
                     _chartEquity.Series[i].Points[index].LabelForeColor = _chartEquity.Series[i].Points[index].Color;
-                    _chartEquity.Series[i].Points[index].LabelBackColor = Color.FromArgb(17, 18, 23);
+                    _chartEquity.Series[i].Points[index].LabelBackColor = Themes.ThemeManager.GetColorWinForms("JournalChartBackColor");
                 }
             }
             catch (Exception error)
@@ -1506,7 +1639,7 @@ namespace OsEngine.Journal
                 HostVolume.Child = _chartVolume;
                 HostVolume.Child.Show();
 
-                _chartVolume.BackColor = Color.FromArgb(17, 18, 23);
+                _chartVolume.BackColor = Themes.ThemeManager.GetColorWinForms("JournalChartBackColor");
                 _chartVolume.Click += _chartVolume_Click;
                 _chartVolume.MouseWheel += _chartVolume_MouseWheel;
             }
@@ -1625,7 +1758,7 @@ namespace OsEngine.Journal
                 }
 
                 //  take the number of tools
-                // берём кол-во инструментов
+                // пїЅпїЅпїЅпїЅ пїЅпїЅпїЅ-пїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ
                 List<VolumeSecurity> volumes = new List<VolumeSecurity>();
 
                 for (int i = 0; i < positionsAll.Count; i++)
@@ -1641,7 +1774,7 @@ namespace OsEngine.Journal
                     return;
                 }
 
-                // 1 создаём общую линию времени со всеми изменениями
+                // 1 пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ
 
                 List<DateTime> allChange = new List<DateTime>();
 
@@ -1665,17 +1798,17 @@ namespace OsEngine.Journal
                     }
                 }
 
-                // 2 сортировка
+                // 2 пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ
                 allChange = allChange.OrderBy(x => x).ToList();
 
-                // 3 активируем массив Volume по бумагам
+                // 3 пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ Volume пїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ
 
                 for (int i = 0; i < volumes.Count; i++)
                 {
                     volumes[i].Volume = new decimal[allChange.Count].ToList();
                 }
 
-                // 4 считаем по каждой временной точке объёмы
+                // 4 пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅ
 
                 for (int i = 0; i < positionsAll.Count; i++)
                 {
@@ -1726,7 +1859,7 @@ namespace OsEngine.Journal
                     }
                 }
 
-                // 5 прорисовываем значения на чарте
+                // 5 пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅ
 
                 int volumesStartNum = 0;
 
@@ -1739,11 +1872,11 @@ namespace OsEngine.Journal
                 {
                     if (i % 2 == 0)
                     {
-                        PaintValuesVolume(volumes[i].Volume, volumes[i].Security, Color.DeepSkyBlue, allChange);
+                        PaintValuesVolume(volumes[i].Volume, volumes[i].Security, Themes.ThemeManager.GetColorWinForms("ChartEquityColor"), allChange);
                     }
                     else
                     {
-                        PaintValuesVolume(volumes[i].Volume, volumes[i].Security, Color.DarkOrange, allChange);
+                        PaintValuesVolume(volumes[i].Volume, volumes[i].Security, Themes.ThemeManager.GetColorWinForms("JournalShortColor"), allChange);
                     }
                 }
 
@@ -1778,21 +1911,22 @@ namespace OsEngine.Journal
 
                 ChartArea areaLineSecurity = new ChartArea("ChartArea" + name);
 
-                areaLineSecurity.CursorX.IsUserSelectionEnabled = true; //allow the user to change the view scope/ разрешаем пользователю изменять рамки представления
-                areaLineSecurity.CursorX.IsUserEnabled = true; //trait/чертa
+                areaLineSecurity.CursorX.IsUserSelectionEnabled = true; //allow the user to change the view scope/ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ
+                areaLineSecurity.CursorX.IsUserEnabled = true; //trait/пїЅпїЅпїЅпїЅa
 
-                areaLineSecurity.BorderColor = Color.Black;
-                areaLineSecurity.BackColor = Color.FromArgb(17, 18, 23);
-                areaLineSecurity.CursorY.LineColor = Color.Gainsboro;
-                areaLineSecurity.CursorX.LineColor = Color.Black;
-                areaLineSecurity.AxisX.TitleForeColor = Color.Gainsboro;
-                areaLineSecurity.AxisY.TitleForeColor = Color.Gainsboro;
+                areaLineSecurity.BorderColor = Themes.ThemeManager.GetColorWinForms("JournalChartBorderColor");
+                areaLineSecurity.BackColor = Themes.ThemeManager.GetColorWinForms("JournalChartBackColor");
+                areaLineSecurity.CursorY.LineColor = Themes.ThemeManager.GetColorWinForms("JournalChartTextColor");
+                areaLineSecurity.CursorX.LineColor = Themes.ThemeManager.GetColorWinForms("JournalChartCursorXColor");
+                areaLineSecurity.AxisX.TitleForeColor = Themes.ThemeManager.GetColorWinForms("JournalChartTextColor");
+                areaLineSecurity.AxisY.TitleForeColor = Themes.ThemeManager.GetColorWinForms("JournalChartTextColor");
                 areaLineSecurity.AxisY2.IntervalAutoMode = IntervalAutoMode.FixedCount;
                 areaLineSecurity.AxisY2.Enabled = AxisEnabled.False;
 
                 foreach (var axe in areaLineSecurity.Axes)
                 {
-                    axe.LabelStyle.ForeColor = Color.Gainsboro;
+                    axe.LabelStyle.ForeColor = Themes.ThemeManager.GetColorWinForms("JournalChartTextColor");
+                    axe.LabelStyle.Font = Themes.ThemeManager.GetChartAxisFont();
                 }
 
                 _chartVolume.ChartAreas.Add(areaLineSecurity);
@@ -1803,7 +1937,7 @@ namespace OsEngine.Journal
                 volumeSeries.YAxisType = AxisType.Secondary;
                 volumeSeries.ChartArea = areaLineSecurity.Name;
                 volumeSeries.BorderWidth = 3;
-                volumeSeries.ShadowOffset = 2;
+                volumeSeries.ShadowOffset = Themes.ThemeManager.GetChartSeriesShadow();
 
                 decimal maxVolume = 0;
                 decimal minVolume = decimal.MaxValue;
@@ -1826,17 +1960,17 @@ namespace OsEngine.Journal
 
                 Series nameSeries = new Series("Name" + name);
                 nameSeries.ChartType = SeriesChartType.Point;
-                nameSeries.Color = Color.White;
+                nameSeries.Color = Themes.ThemeManager.GetColorWinForms("JournalEquityTotalColor");
                 nameSeries.YAxisType = AxisType.Secondary;
                 nameSeries.ChartArea = areaLineSecurity.Name;
                 nameSeries.BorderWidth = 3;
-                nameSeries.ShadowOffset = 2;
+                nameSeries.ShadowOffset = Themes.ThemeManager.GetChartSeriesShadow();
                 nameSeries.MarkerStyle = MarkerStyle.Square;
                 nameSeries.MarkerSize = 4;
 
                 nameSeries.Points.Add(Convert.ToDouble(maxVolume));
                 nameSeries.Points[0].Label = name;
-                nameSeries.Points[0].LabelForeColor = Color.White;
+                nameSeries.Points[0].LabelForeColor = Themes.ThemeManager.GetColorWinForms("JournalEquityTotalColor");
 
                 _chartVolume.Series.Add(nameSeries);
 
@@ -1906,7 +2040,7 @@ namespace OsEngine.Journal
 
                     _chartVolume.Series[i].Points[index].Label = label;
                     _chartVolume.Series[i].Points[index].LabelForeColor = _chartVolume.Series[i].Points[index].Color;
-                    _chartVolume.Series[i].Points[index].LabelBackColor = Color.FromArgb(17, 18, 23);
+                    _chartVolume.Series[i].Points[index].LabelBackColor = Themes.ThemeManager.GetColorWinForms("JournalChartBackColor");
                 }
             }
             catch (Exception error)
@@ -1978,15 +2112,15 @@ namespace OsEngine.Journal
 
                 _chartDd.Series.Clear();
                 _chartDd.ChartAreas.Clear();
-                _chartDd.BackColor = Color.FromArgb(17, 18, 23);
+                _chartDd.BackColor = Themes.ThemeManager.GetColorWinForms("JournalChartBackColor");
                 _chartDd.Click += _chartDd_Click;
 
                 ChartArea areaDdPunct = new ChartArea("ChartAreaDdPunct");
                 areaDdPunct.Position.Height = 50;
                 areaDdPunct.Position.Width = 100;
                 areaDdPunct.Position.Y = 0;
-                areaDdPunct.CursorX.IsUserSelectionEnabled = false; //allow the user to change the view scope/ разрешаем пользователю изменять рамки представления
-                areaDdPunct.CursorX.IsUserEnabled = true; //trait/чертa
+                areaDdPunct.CursorX.IsUserSelectionEnabled = false; //allow the user to change the view scope/ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ
+                areaDdPunct.CursorX.IsUserEnabled = true; //trait/пїЅпїЅпїЅпїЅa
 
                 _chartDd.ChartAreas.Add(areaDdPunct);
 
@@ -1996,22 +2130,24 @@ namespace OsEngine.Journal
                 areaDdPercent.Position.Width = 100;
                 areaDdPercent.Position.Y = 50;
                 areaDdPercent.AxisX.Enabled = AxisEnabled.False;
-                areaDdPercent.CursorX.IsUserEnabled = true; //trait/чертa
+                areaDdPercent.CursorX.IsUserEnabled = true; //trait/пїЅпїЅпїЅпїЅa
 
                 _chartDd.ChartAreas.Add(areaDdPercent);
 
                 for (int i = 0; i < _chartDd.ChartAreas.Count; i++)
                 {
-                    _chartDd.ChartAreas[i].BorderColor = Color.Black;
-                    _chartDd.ChartAreas[i].BackColor = Color.FromArgb(17, 18, 23);
-                    _chartDd.ChartAreas[i].CursorY.LineColor = Color.Gainsboro;
-                    _chartDd.ChartAreas[i].CursorX.LineColor = Color.Black;
-                    _chartDd.ChartAreas[i].AxisX.TitleForeColor = Color.Gainsboro;
-                    _chartDd.ChartAreas[i].AxisY.TitleForeColor = Color.Gainsboro;
+                    _chartDd.ChartAreas[i].BorderColor = Themes.ThemeManager.GetColorWinForms("JournalChartBorderColor");
+                    _chartDd.ChartAreas[i].BackColor = Themes.ThemeManager.GetColorWinForms("JournalChartBackColor");
+                    _chartDd.ChartAreas[i].CursorY.LineColor = Themes.ThemeManager.GetColorWinForms("JournalChartTextColor");
+                    _chartDd.ChartAreas[i].CursorX.LineColor = Themes.ThemeManager.GetColorWinForms("JournalChartCursorXColor");
+                    _chartDd.ChartAreas[i].AxisX.TitleForeColor = Themes.ThemeManager.GetColorWinForms("JournalChartTextColor");
+                    _chartDd.ChartAreas[i].AxisY.TitleForeColor = Themes.ThemeManager.GetColorWinForms("JournalChartTextColor");
 
                     foreach (var axe in _chartDd.ChartAreas[i].Axes)
                     {
-                        axe.LabelStyle.ForeColor = Color.Gainsboro;
+                        axe.LabelStyle.ForeColor = Themes.ThemeManager.GetColorWinForms("JournalChartTextColor");
+                    axe.LabelStyle.Font = Themes.ThemeManager.GetChartAxisFont();
+                        axe.LabelStyle.Font = Themes.ThemeManager.GetChartAxisFont();
                     }
                 }
             }
@@ -2059,17 +2195,17 @@ namespace OsEngine.Journal
 
                 Series drowDownPunct = new Series("SeriesDdPunct");
                 drowDownPunct.ChartType = SeriesChartType.Line;
-                drowDownPunct.Color = Color.DeepSkyBlue;
-                drowDownPunct.LabelForeColor = Color.White;
+                drowDownPunct.Color = Themes.ThemeManager.GetColorWinForms("ChartEquityColor");
+                drowDownPunct.LabelForeColor = Themes.ThemeManager.GetColorWinForms("JournalEquityTotalColor");
                 drowDownPunct.YAxisType = AxisType.Secondary;
                 drowDownPunct.ChartArea = "ChartAreaDdPunct";
                 drowDownPunct.BorderWidth = 2;
-                drowDownPunct.ShadowOffset = 2;
+                drowDownPunct.ShadowOffset = Themes.ThemeManager.GetChartSeriesShadow();
 
                 Series nullLine = new Series("SeriesNullLine");
                 nullLine.ChartType = SeriesChartType.Line;
                 nullLine.YAxisType = AxisType.Secondary;
-                nullLine.LabelForeColor = Color.White;
+                nullLine.LabelForeColor = Themes.ThemeManager.GetColorWinForms("JournalEquityTotalColor");
                 nullLine.ChartArea = "ChartAreaDdPunct";
                 nullLine.ShadowOffset = 0;
 
@@ -2104,14 +2240,20 @@ namespace OsEngine.Journal
                 if (minOnY != decimal.MaxValue &&
                     minOnY != 0)
                 {
-                    _chartDd.ChartAreas[0].AxisY2.IntervalType = DateTimeIntervalType.Number;
-                    _chartDd.ChartAreas[0].AxisY2.IntervalOffsetType = DateTimeIntervalType.Number;
-                    _chartDd.ChartAreas[0].AxisY2.Maximum = Math.Round(-Convert.ToDouble(minOnY) * 0.05, 6);
-                    _chartDd.ChartAreas[0].AxisY2.Minimum = Math.Round(Convert.ToDouble(minOnY) + Convert.ToDouble(minOnY) * 0.05, 6);
+                    double axisMax = Math.Round(-Convert.ToDouble(minOnY) * 0.05, 6);
+                    double axisMin = Math.Round(Convert.ToDouble(minOnY) + Convert.ToDouble(minOnY) * 0.05, 6);
+
+                    if (axisMax > axisMin)
+                    {
+                        _chartDd.ChartAreas[0].AxisY2.IntervalType = DateTimeIntervalType.Number;
+                        _chartDd.ChartAreas[0].AxisY2.IntervalOffsetType = DateTimeIntervalType.Number;
+                        _chartDd.ChartAreas[0].AxisY2.Maximum = axisMax;
+                        _chartDd.ChartAreas[0].AxisY2.Minimum = axisMin;
+                    }
                 }
 
                 // dd in %
-                // дд в %
+                // пїЅпїЅ пїЅ %
 
                 List<decimal> ddPepcent = new decimal[positionsAll.Count].ToList();
 
@@ -2147,13 +2289,13 @@ namespace OsEngine.Journal
 
                     if (thisSumm < 0)
                     {
-                        // уже ушли ниже нулевой отметки по счёту
+                        // пїЅпїЅпїЅ пїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅ
 
                         thisDown = -thisPik + thisSumm;
                     }
                     else if (thisSumm > 0)
                     {
-                        // выше нулевой отметки по счёту
+                        // пїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅ
                         thisDown = -(thisPik - thisSumm);
                     }
 
@@ -2162,12 +2304,12 @@ namespace OsEngine.Journal
 
                 Series drowDownPercent = new Series("SeriesDdPercent");
                 drowDownPercent.ChartType = SeriesChartType.Line;
-                drowDownPercent.Color = Color.DarkOrange;
-                drowDownPercent.LabelForeColor = Color.White;
+                drowDownPercent.Color = Themes.ThemeManager.GetColorWinForms("JournalShortColor");
+                drowDownPercent.LabelForeColor = Themes.ThemeManager.GetColorWinForms("JournalEquityTotalColor");
                 drowDownPercent.YAxisType = AxisType.Secondary;
                 drowDownPercent.ChartArea = "ChartAreaDdPercent";
                 drowDownPercent.BorderWidth = 2;
-                drowDownPercent.ShadowOffset = 2;
+                drowDownPercent.ShadowOffset = Themes.ThemeManager.GetChartSeriesShadow();
                 drowDownPercent.XAxisType = AxisType.Primary;
 
                 for (int i = 0; i < ddPepcent.Count; i++)
@@ -2193,10 +2335,16 @@ namespace OsEngine.Journal
                 if (minOnY2 != decimal.MaxValue &&
                     minOnY2 != 0)
                 {
-                    _chartDd.ChartAreas[1].AxisY2.IntervalType = DateTimeIntervalType.Number;
-                    _chartDd.ChartAreas[1].AxisY2.IntervalOffsetType = DateTimeIntervalType.Number;
-                    _chartDd.ChartAreas[1].AxisY2.Maximum = Math.Round(-Convert.ToDouble(minOnY2) * 0.05, 6);
-                    _chartDd.ChartAreas[1].AxisY2.Minimum = Math.Round(Convert.ToDouble(minOnY2) + Convert.ToDouble(minOnY2) * 0.05, 6);
+                    double axisMax = Math.Round(-Convert.ToDouble(minOnY2) * 0.05, 6);
+                    double axisMin = Math.Round(Convert.ToDouble(minOnY2) + Convert.ToDouble(minOnY2) * 0.05, 6);
+
+                    if (axisMax > axisMin)
+                    {
+                        _chartDd.ChartAreas[1].AxisY2.IntervalType = DateTimeIntervalType.Number;
+                        _chartDd.ChartAreas[1].AxisY2.IntervalOffsetType = DateTimeIntervalType.Number;
+                        _chartDd.ChartAreas[1].AxisY2.Maximum = axisMax;
+                        _chartDd.ChartAreas[1].AxisY2.Minimum = axisMin;
+                    }
                 }
             }
             catch (Exception ex)
@@ -2251,7 +2399,7 @@ namespace OsEngine.Journal
 
                     _chartDd.Series[i].Points[index].Label = label;
                     _chartDd.Series[i].Points[index].LabelForeColor = _chartDd.Series[i].Points[index].Color;
-                    _chartDd.Series[i].Points[index].LabelBackColor = Color.Black;
+                    _chartDd.Series[i].Points[index].LabelBackColor = Themes.ThemeManager.GetColorWinForms("JournalChartBorderColor");
                 }
             }
             catch (Exception error)
@@ -2311,11 +2459,11 @@ namespace OsEngine.Journal
 
                 if (position.ProfitPortfolioAbs > 0)
                 {
-                    nRow.DefaultCellStyle.ForeColor = Color.FromArgb(57, 157, 54);
+                    nRow.DefaultCellStyle.ForeColor = Themes.ThemeManager.GetColorWinForms("MarketDepthBidColor");
                 }
                 else if (position.ProfitPortfolioAbs <= 0)
                 {
-                    nRow.DefaultCellStyle.ForeColor = Color.FromArgb(254, 84, 0);
+                    nRow.DefaultCellStyle.ForeColor = Themes.ThemeManager.GetColorWinForms("MarketDepthAskColor");
                 }
 
                 nRow.Cells.Add(new DataGridViewTextBoxCell());
@@ -2346,13 +2494,13 @@ namespace OsEngine.Journal
 
                 if (position.Direction == Side.Buy)
                 {
-                    nRow.Cells[5].Style.ForeColor = Color.DodgerBlue;
+                    nRow.Cells[5].Style.ForeColor = Themes.ThemeManager.GetColorWinForms("JournalDodgerBlueColor");
                     //nRow.Cells[5].Style.SelectionBackColor = Color.DodgerBlue;
                 }
                 else
                 {
-                    nRow.Cells[5].Style.ForeColor = Color.DarkRed;
-                    //nRow.Cells[5].Style.SelectionBackColor = Color.DarkOrange;
+                    nRow.Cells[5].Style.ForeColor = Themes.ThemeManager.GetColorWinForms("ChartBarMinusColor");
+                    //nRow.Cells[5].Style.SelectionBackColor = Themes.ThemeManager.GetColorWinForms("JournalShortColor");
                 }
 
                 int decimalsPrice = position.PriceStep.ToStringWithNoEndZero().DecimalsCount();
@@ -2884,7 +3032,7 @@ namespace OsEngine.Journal
                         }
                     }
 
-                    // Группируем позиции по имени бота
+                    // пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ
                     Dictionary<string, List<Position>> positionsByBot = new Dictionary<string, List<Position>>();
 
                     for (int i = 0; i < allPositions.Count; i++)
@@ -2902,13 +3050,13 @@ namespace OsEngine.Journal
                         positionsByBot[botName].Add(pos);
                     }
 
-                    // Для каждого бота создаем файл
+                    // пїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ
                     foreach (KeyValuePair<string, List<Position>> kvp in positionsByBot)
                     {
                         string botName = kvp.Key;
                         List<Position> positions = kvp.Value;
 
-                        // Сортируем позиции по времени открытия (второй столбец)
+                        // пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ (пїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ)
                         positions.Sort((p1, p2) => p1.TimeOpen.CompareTo(p2.TimeOpen));
 
                         string fileName = $"{botName}_Deals.txt";
@@ -2927,7 +3075,7 @@ namespace OsEngine.Journal
                     }
                 }
 
-                // оповещение об успешном сохранении
+                // пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ
                 string[] files = Directory.GetFiles(selectedFolder);
 
                 if (files.Length > 0)

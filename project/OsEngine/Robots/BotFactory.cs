@@ -13,7 +13,7 @@ using System.Threading;
 using OsEngine.Entity;
 using OsEngine.OsTrader.Panels;
 using OsEngine.Robots.Engines;
-using System.Windows; // For MessageBox
+using OsEngine.Market;
 
 // Roslyn specific usings
 using Microsoft.CodeAnalysis;
@@ -21,6 +21,7 @@ using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.Emit;
 using Microsoft.CodeAnalysis.Text;
 using System.Text;
+using OsEngine.Logging;
 
 namespace OsEngine.Robots
 {
@@ -75,7 +76,8 @@ namespace OsEngine.Robots
                     }
                     catch (Exception ex)
                     {
-                        MessageBox.Show($"Error activating attribute-based bot '{nameClass}': {ex.Message}\nEnsure it has a constructor (string name, StartProgram startProgram).");
+                        ServerMaster.SendNewLogMessage($"Error activating attribute-based bot '{nameClass}': " +
+                            $"{ex.Message}\nEnsure it has a constructor (string name, StartProgram startProgram).", LogMessageType.Error);
                         // Optionally log ex.ToString()
                         return null;
                     }
@@ -101,8 +103,8 @@ namespace OsEngine.Robots
                     {
                        return GetStrategyForName(nameClass, nameInstance, startProgram, false);
                     }
-                  
-                    MessageBox.Show($"BotFactory. Script compilation/instantiation error for '{nameClass}': {e.ToString()}");
+
+                    ServerMaster.SendNewLogMessage($"BotFactory. Script compilation/instantiation error for '{nameClass}': {e.ToString()}", LogMessageType.Error);
                     return null;
                 }
             }
@@ -279,6 +281,48 @@ namespace OsEngine.Robots
                                 }
                             }
                         }
+                        // All .NET runtime assemblies, loaded or not: which ones are in memory depends on what ran
+                        // before the first compile (at startup the saved robots are built before the connectors load
+                        // e.g. System.Private.Uri), and a missing one fails the script with CS0012. Only the runtime's
+                        // own folder is taken — metadata is read from the files, nothing is loaded.
+                        string runtimeFolder = Path.GetDirectoryName(typeof(object).Assembly.Location);
+                        if (AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES") is string platformAssemblies
+                            && !string.IsNullOrEmpty(runtimeFolder))
+                        {
+                            foreach (string file in platformAssemblies.Split(Path.PathSeparator))
+                            {
+                                // a self-contained build keeps the app's own libraries in the same folder — runtime names only
+                                string name = Path.GetFileName(file);
+                                bool runtimeName = name.StartsWith("System.", StringComparison.OrdinalIgnoreCase)
+                                    || name.StartsWith("Microsoft.Win32.", StringComparison.OrdinalIgnoreCase)
+                                    || name.Equals("Microsoft.CSharp.dll", StringComparison.OrdinalIgnoreCase)
+                                    || name.Equals("netstandard.dll", StringComparison.OrdinalIgnoreCase)
+                                    || name.Equals("mscorlib.dll", StringComparison.OrdinalIgnoreCase);
+
+                                if (!runtimeName
+                                    || !string.Equals(Path.GetDirectoryName(file), runtimeFolder, StringComparison.OrdinalIgnoreCase)
+                                    || !File.Exists(file))
+                                {
+                                    continue;
+                                }
+
+                                try
+                                {
+                                    using (FileStream stream = File.OpenRead(file))
+                                    using (System.Reflection.PortableExecutable.PEReader pe = new System.Reflection.PortableExecutable.PEReader(stream))
+                                    {
+                                        if (!pe.HasMetadata) continue; // native library
+                                    }
+
+                                    references.Add(MetadataReference.CreateFromFile(file));
+                                }
+                                catch
+                                {
+                                    // not a managed assembly
+                                }
+                            }
+                        }
+
                         _baseReferences = references.ToList();
                     }
                 }
@@ -353,6 +397,19 @@ namespace OsEngine.Robots
                         {
                             Console.WriteLine($"Warning: Could not create metadata reference for custom DLL {dllPath}. {ex.Message}");
                         }
+                    }
+                }
+
+                // load custom DLLs into runtime so compiled script can resolve them
+                foreach (string dllPath in customDlls.Distinct())
+                {
+                    try
+                    {
+                        Assembly.LoadFrom(dllPath);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Warning: Could not load custom DLL into runtime {dllPath}. {ex.Message}");
                     }
                 }
             }

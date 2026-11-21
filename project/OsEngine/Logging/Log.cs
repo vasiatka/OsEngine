@@ -1,4 +1,4 @@
-﻿/*
+/*
 *Your rights to use the code are governed by this license https://github.com/AlexWan/OsEngine/blob/master/LICENSE
 *Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
 */
@@ -10,6 +10,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.IO;
 using System.Media;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.Windows.Forms.Integration;
@@ -82,15 +83,23 @@ namespace OsEngine.Logging
                 {
                     await Task.Delay(2000);
 
-                    for (int i = 0; i < Math.Min(LogsToCheck.Count, LogsToCheck.Capacity); i++)// не потокобезопасная работа с LogsToCheck приводит к Capacity<Count
+                    // снимок под LogLocker: обход без гонки с Add/Delete; save/paint вне лока, чтобы не держать LogLocker на file I/O
+                    Log[] logs = null;
+                    lock (LogLocker)
                     {
-                        if (LogsToCheck[i] == null)
+                        logs = LogsToCheck.ToArray();
+                    }
+
+                    for (int i = 0; i < logs.Length; i++)
+                    {
+                        Log log = logs[i];
+                        if (log == null)
                         {
                             continue;
                         }
 
-                        LogsToCheck[i].TrySaveLog();
-                        LogsToCheck[i].TryPaintLog();
+                        log.TrySaveLog();
+                        log.TryPaintLog();
                     }
 
                     if (!MainWindow.ProccesIsWorked)
@@ -100,7 +109,7 @@ namespace OsEngine.Logging
                 }
                 catch (Exception error)
                 {
-                    System.Windows.MessageBox.Show(error.ToString());
+                    System.Diagnostics.Debug.WriteLine("Log watcher error: " + error.ToString());
                 }
             }
         }
@@ -137,7 +146,8 @@ namespace OsEngine.Logging
                 AddToLogsToCheck(this);
             }
 
-            if (_startProgram == StartProgram.IsOsTrader)
+            if (_startProgram == StartProgram.IsOsTrader
+                || _startProgram == StartProgram.IsMainWindow)
             {
                 _messageSender = new MessageSender(uniqName, _startProgram);
                 TryLoadLog();
@@ -178,6 +188,57 @@ namespace OsEngine.Logging
             _grid.DoubleClick += _grid_DoubleClick;
             _grid.Click += _grid_Click;
             _grid.DataError += _grid_DataError;
+
+            Themes.ThemeManager.ThemeChangedEvent += Log_ThemeChangedEvent;
+        }
+
+        private void Log_ThemeChangedEvent()
+        {
+            try
+            {
+                if (_grid == null)
+                {
+                    return;
+                }
+
+                WindowsFormsHost host = _host;
+                if (host != null)
+                {
+                    // BUG-0282: Control.InvokeRequired лжёт на grid с несозданным handle (скрытая вкладка) —
+                    // маршалинг через Dispatcher WPF-хоста, как в StartPaint
+                    System.Windows.Threading.Dispatcher dispatcher = host.Dispatcher;
+                    if (dispatcher != null
+                        && !dispatcher.CheckAccess())
+                    {
+                        dispatcher.Invoke(new Action(Log_ThemeChangedEvent));
+                        return;
+                    }
+                }
+                else if (_grid.InvokeRequired)
+                {
+                    _grid.Invoke(new Action(Log_ThemeChangedEvent));
+                    return;
+                }
+
+                DataGridFactory.ApplyTheme(_grid);
+
+                // строки, созданные до смены темы (в т.ч. пустая заглушка),
+                // могут держать старый стиль на уровне ячеек (клон из шаблона) —
+                // в Log кастомных цветов нет, перекрашиваем принудительно
+                for (int i = 0; i < _grid.Rows.Count; i++)
+                {
+                    _grid.Rows[i].DefaultCellStyle = _grid.DefaultCellStyle;
+
+                    for (int y = 0; y < _grid.Rows[i].Cells.Count; y++)
+                    {
+                        _grid.Rows[i].Cells[y].Style = _grid.DefaultCellStyle;
+                    }
+                }
+            }
+            catch (Exception error)
+            {
+                ServerMaster.SendNewLogMessage(error.ToString(), Logging.LogMessageType.Error);
+            }
         }
 
         private void _grid_DataError(object sender, DataGridViewDataErrorEventArgs e)
@@ -321,6 +382,8 @@ namespace OsEngine.Logging
 
             if (_grid != null)
             {
+                Themes.ThemeManager.ThemeChangedEvent -= Log_ThemeChangedEvent;
+
                 _grid.DoubleClick -= _grid_DoubleClick;
                 _grid.DataError -= _grid_DataError;
                 _grid.Rows.Clear();
@@ -452,8 +515,20 @@ namespace OsEngine.Logging
         /// </summary>
         public void Clear()
         {
-            if (_grid != null &&
-                _grid.InvokeRequired)
+            WindowsFormsHost host = _host;
+            if (host != null)
+            {
+                // BUG-0282: InvokeRequired лжёт на grid с несозданным handle — маршалинг через Dispatcher хоста
+                System.Windows.Threading.Dispatcher dispatcher = host.Dispatcher;
+                if (dispatcher != null
+                    && !dispatcher.CheckAccess())
+                {
+                    dispatcher.Invoke(new Action(Clear));
+                    return;
+                }
+            }
+            else if (_grid != null
+                && _grid.InvokeRequired)
             {
                 _grid.Invoke(new Action(Clear));
                 return;
@@ -480,7 +555,7 @@ namespace OsEngine.Logging
             }
             catch (Exception error)
             {
-                System.Windows.MessageBox.Show(error.ToString());
+                System.Diagnostics.Debug.WriteLine("Log Clear error: " + error.ToString());
             }
         }
 
@@ -646,7 +721,44 @@ namespace OsEngine.Logging
 
         private ConcurrentQueue<LogMessage> _incomingMessages = new ConcurrentQueue<LogMessage>();
 
+        /// <summary>
+        /// ring of last Error messages, read-only by contract: write only through the Log.ProcessMessage Error path,
+        /// read via GetLastErrorMessagesSnapshot(). Direct enumeration is not thread-safe, direct assignment (e.g. null) breaks the snapshot with NRE
+        /// кольцо последних Error-сообщений, только для чтения по контракту: писать только через Error-путь Log.ProcessMessage,
+        /// читать через GetLastErrorMessagesSnapshot(). Прямое перечисление не потокобезопасно, прямое присваивание (например null) ломает snapshot (NRE)
+        /// </summary>
         public List<LogMessage> LastErrorMessages = new List<LogMessage>();
+
+        /// <summary>
+        /// guard for LastErrorMessages ring: ProcessMessage writes it on the publishing thread
+        /// защита кольца LastErrorMessages: ProcessMessage пишет его на потоке издателя
+        /// </summary>
+        private readonly object _lastErrorMessagesLock = new object();
+
+        /// <summary>
+        /// thread-safe snapshot of the last error messages ring (shallow copy under the ring lock; items are not mutated after publishing)
+        /// потокобезопасная копия кольца последних Error-сообщений (поверхностная копия под локом кольца; элементы после публикации не мутируются)
+        /// </summary>
+        public List<LogMessage> GetLastErrorMessagesSnapshot()
+        {
+            lock (_lastErrorMessagesLock)
+            {
+                return new List<LogMessage>(LastErrorMessages);
+            }
+        }
+
+        private int MaxMessagesCount
+        {
+            get
+            {
+                if (_startProgram == StartProgram.IsTester)
+                {
+                    return 10000;
+                }
+
+                return 500;
+            }
+        }
 
         /// <summary>
         /// incoming message
@@ -671,7 +783,7 @@ namespace OsEngine.Logging
                 LogMessage messageLog = new LogMessage { Message = message, Time = DateTime.Now, Type = type };
                 _incomingMessages.Enqueue(messageLog);
 
-                if (_incomingMessages.Count > 500)
+                if (_incomingMessages.Count > MaxMessagesCount)
                 {
                     LogMessage mes;
                     _incomingMessages.TryDequeue(out mes);
@@ -688,11 +800,16 @@ namespace OsEngine.Logging
                 LogMessage messageLog = new LogMessage { Message = message, Time = DateTime.Now, Type = type };
                 SetNewErrorMessage(messageLog);
 
-                LastErrorMessages.Add(messageLog);
-
-                while (LastErrorMessages.Count > 20)
+                // BUG-0321: кольцо пишется на потоке издателя — Add/trim под локом;
+                // SetNewErrorMessage остаётся вне лока (UI BeginInvoke, нота AB-BA BUG-0176)
+                lock (_lastErrorMessagesLock)
                 {
-                    LastErrorMessages.RemoveAt(0);
+                    LastErrorMessages.Add(messageLog);
+
+                    while (LastErrorMessages.Count > 20)
+                    {
+                        LastErrorMessages.RemoveAt(0);
+                    }
                 }
             }
         }
@@ -730,23 +847,63 @@ namespace OsEngine.Logging
                     return;
                 }
 
+                // BUG-0282 R1: очередь файла вне UI-гейта — файл цел, даже если UI не стартовал
+                // или поток не UI; в grid сообщение донесёт маршалинг ниже
+                if (messageLog.Type != LogMessageType.OldSession)
+                {
+                    _messagesToSaveInFile.Enqueue(messageLog);
+                }
+
+                if (_grid == null)
+                {
+                    return;
+                }
+
+                WindowsFormsHost host = _host;
+                if (host == null)
+                {
+                    // StartPaint ещё не было: на экране grid не виден и измерен быть не может,
+                    // но и лезть в него с чужого потока незачем — ждём StartPaint
+                    return;
+                }
+
+                // BUG-0282: Control.InvokeRequired лжёт на grid с несозданным handle (скрытая вкладка
+                // WindowsFormsHost) — маршалинг через Dispatcher WPF-хоста, как в StartPaint
+                System.Windows.Threading.Dispatcher dispatcher = host.Dispatcher;
+                if (dispatcher != null
+                    && !dispatcher.CheckAccess())
+                {
+                    LogMessage message = messageLog;
+                    dispatcher.Invoke(new Action(delegate ()
+                    {
+                        PaintMessageGrid(message);
+                    }));
+                    return;
+                }
+
+                PaintMessageGrid(messageLog);
+            }
+            catch (Exception error)
+            {
+                System.Diagnostics.Debug.WriteLine("Log paint error: " + error.ToString());
+            }
+        }
+
+        // BUG-0282: grid-часть вынесена, чтобы ре-ентр на UI не дублировал Enqueue в очередь файла
+        private void PaintMessageGrid(LogMessage messageLog)
+        {
+            try
+            {
+                if (_isDelete == true)
+                {
+                    return;
+                }
+
                 if (_grid != null
                     && _grid.Rows != null
                     && _grid.Rows.Count > 15000)
                 {
                     return;
-                }
-
-                if (_grid != null
-                    && _grid.InvokeRequired)
-                {
-                    _grid.Invoke(new Action<LogMessage>(PaintMessage), messageLog);
-                    return;
-                }
-
-                if (messageLog.Type != LogMessageType.OldSession)
-                {
-                    _messagesToSaveInFile.Enqueue(messageLog);
                 }
 
                 if (_grid != null)
@@ -769,7 +926,7 @@ namespace OsEngine.Logging
             }
             catch (Exception error)
             {
-                System.Windows.MessageBox.Show(error.ToString());
+                System.Diagnostics.Debug.WriteLine("Log paint grid error: " + error.ToString());
             }
         }
 
@@ -787,6 +944,12 @@ namespace OsEngine.Logging
         /// </summary>
         public void TrySaveLog()
         {
+            // удалённый лог не должен воскресать: Delete() дренирует очереди уже после File.Delete, окно между ними закрывает этот гейт
+            if (_isDelete)
+            {
+                return;
+            }
+
             if (_startProgram == StartProgram.IsOsOptimizer)
             {
                 return;
@@ -827,7 +990,7 @@ namespace OsEngine.Logging
             }
             catch (Exception error)
             {
-                System.Windows.MessageBox.Show(error.ToString());
+                System.Diagnostics.Debug.WriteLine("Log save to file error: " + error.ToString());
             }
         }
 
@@ -1050,6 +1213,31 @@ namespace OsEngine.Logging
             _gridErrorLog.Columns.Add(column);
 
             _gridErrorLog.DataError += _gridErrorLog_DataError;
+
+            Themes.ThemeManager.ThemeChangedEvent += Log_ThemeChangedEventStatic;
+        }
+
+        private static void Log_ThemeChangedEventStatic()
+        {
+            try
+            {
+                if (_gridErrorLog == null)
+                {
+                    return;
+                }
+
+                if (_gridErrorLog.InvokeRequired)
+                {
+                    _gridErrorLog.Invoke(new Action(Log_ThemeChangedEventStatic));
+                    return;
+                }
+
+                DataGridFactory.ApplyTheme(_gridErrorLog);
+            }
+            catch (Exception error)
+            {
+                ServerMaster.SendNewLogMessage(error.ToString(), Logging.LogMessageType.Error);
+            }
         }
 
         private static void _gridErrorLog_DataError(object sender, DataGridViewDataErrorEventArgs e)
@@ -1057,7 +1245,14 @@ namespace OsEngine.Logging
             ServerMaster.SendNewLogMessage(e.ToString(), Logging.LogMessageType.Error);
         }
 
-        private static bool _errorLogShutDown = false;
+        // volatile: single UI-thread writer, cross-thread readers. Do not remove.
+        private static volatile bool _errorLogShutDown = false;
+
+        /// <summary>
+        /// count of Error messages posted to UI dispatcher but not yet processed
+        /// страховка от наводнения очереди диспетчера при шторме ошибок
+        /// </summary>
+        private static int _errorUiPending = 0;
 
         /// <summary>
         /// send new error message
@@ -1069,9 +1264,20 @@ namespace OsEngine.Logging
             {
                 if (!MainWindow.GetDispatcher.CheckAccess())
                 {
-                    MainWindow.GetDispatcher.Invoke(new Action<LogMessage>(SetNewErrorMessage), message);
+                    // торговый поток не должен ждать очередь UI: блокирующий Invoke при зависании
+                    // диспетчера останавливает поток заявок (риск AB-BA дедлока). Переадресация — через
+                    // BeginInvoke; дроп поверх лимита гасит только строки Error-бокса, файл-лог и LastErrorMessages не затронуты
+                    if (Interlocked.Increment(ref _errorUiPending) > 1000)
+                    {
+                        Interlocked.Decrement(ref _errorUiPending);
+                        return;
+                    }
+                    MainWindow.GetDispatcher.BeginInvoke(new Action<LogMessage>(SetNewErrorMessage), message);
                     return;
                 }
+
+                // освободить слот in-flight до вставки строки
+                Interlocked.Decrement(ref _errorUiPending);
 
                 if (_gridErrorLog.Rows.Count == 500)
                 {
@@ -1143,6 +1349,8 @@ namespace OsEngine.Logging
 
         private static DateTime _lastTimeShowErrorLog = DateTime.Now;
 
+        private static bool _errorLogCreationPending = false;
+
         public static void ShowErrorLogUi()
         {
             try
@@ -1152,15 +1360,48 @@ namespace OsEngine.Logging
                     MainWindow.GetDispatcher.Invoke(new Action(ShowErrorLogUi));
                     return;
                 }
-                else
+
+                if (_logErrorUi == null)
                 {
-                    if (_lastTimeShowErrorLog.AddSeconds(1) < DateTime.Now)
+                    if (_errorLogCreationPending == true)
                     {
-                        _lastTimeShowErrorLog = DateTime.Now;
-                        Task.Run(ShowErrorLogUi);
                         return;
                     }
+
+                    _errorLogCreationPending = true;
+
+                    // Deferred creation at low dispatcher priority.
+                    // Station windows open via ShowDialog, which disables all previously created windows.
+                    // Creating the log window at ApplicationIdle guarantees it appears inside
+                    // the station's modal session and stays clickable.
+                    // Отложенное создание на низком приоритете диспетчера.
+                    // Окна станций открываются через ShowDialog, который дизейблит все ранее созданные окна.
+                    // Создание на ApplicationIdle гарантирует, что окно появится внутри
+                    // модальной сессии станции и останется кликабельным.
+                    MainWindow.GetDispatcher.BeginInvoke(
+                        System.Windows.Threading.DispatcherPriority.ApplicationIdle,
+                        new Action(ShowErrorLogUiDeferred));
+
+                    return;
                 }
+
+                if (_lastTimeShowErrorLog.AddSeconds(1) < DateTime.Now)
+                {
+                    _lastTimeShowErrorLog = DateTime.Now;
+                    _logErrorUi.Activate();
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
+        private static void ShowErrorLogUiDeferred()
+        {
+            try
+            {
+                _errorLogCreationPending = false;
 
                 if (_logErrorUi == null)
                 {
@@ -1184,6 +1425,108 @@ namespace OsEngine.Logging
             _logErrorUi.Closing -= _logErrorUi_Closing;
             _gridErrorLog.DataError -= _gridErrorLog_DataError;
             _logErrorUi = null;
+        }
+
+        /// <summary>
+        /// Get last error messages from the global emergency log.
+        /// Must be called from the UI thread.
+        /// </summary>
+        public static List<LogMessage> GetLastErrorMessages(int count)
+        {
+            var result = new List<LogMessage>();
+
+            if (_gridErrorLog == null || _gridErrorLog.Rows.Count == 0)
+            {
+                return result;
+            }
+
+            int take = Math.Min(count, _gridErrorLog.Rows.Count);
+
+            for (int i = 0; i < take; i++)
+            {
+                DataGridViewRow row = _gridErrorLog.Rows[i];
+                string message = row.Cells[2].Value?.ToString();
+
+                if (string.IsNullOrWhiteSpace(message))
+                {
+                    continue;
+                }
+
+                result.Add(new LogMessage
+                {
+                    Time = ParseLogTime(row.Cells[0].Value),
+                    Type = ParseLogType(row.Cells[1].Value),
+                    Message = message
+                });
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Get last messages from this log instance.
+        /// Must be called from the UI thread.
+        /// </summary>
+        public List<LogMessage> GetLastMessages(int count)
+        {
+            var result = new List<LogMessage>();
+
+            if (_grid == null || _grid.Rows.Count == 0)
+            {
+                return result;
+            }
+
+            int take = Math.Min(count, _grid.Rows.Count);
+
+            for (int i = 0; i < take; i++)
+            {
+                DataGridViewRow row = _grid.Rows[i];
+                string message = row.Cells[2].Value?.ToString();
+
+                if (string.IsNullOrWhiteSpace(message))
+                {
+                    continue;
+                }
+
+                result.Add(new LogMessage
+                {
+                    Time = ParseLogTime(row.Cells[0].Value),
+                    Type = ParseLogType(row.Cells[1].Value),
+                    Message = message
+                });
+            }
+
+            return result;
+        }
+
+        private static DateTime ParseLogTime(object value)
+        {
+            if (value == null)
+            {
+                return DateTime.MinValue;
+            }
+
+            if (DateTime.TryParse(value.ToString(), out DateTime time))
+            {
+                return time;
+            }
+
+            return DateTime.MinValue;
+        }
+
+        private static LogMessageType ParseLogType(object value)
+        {
+            if (value == null)
+            {
+                return LogMessageType.NoName;
+            }
+
+            if (Enum.TryParse(value.ToString(), out LogMessageType type))
+            {
+                return type;
+            }
+
+            return LogMessageType.NoName;
         }
     }
 
@@ -1278,5 +1621,10 @@ namespace OsEngine.Logging
         /// Запись в логе с прошлой сессии
         /// </summary>
         OldSession,
+
+        /// <summary>
+        /// warning. Дефектов нет, но поведение нетривиальное и его не видно (заглушки методов, отказ возможностей)
+        /// </summary>
+        Warning,
     }
 }

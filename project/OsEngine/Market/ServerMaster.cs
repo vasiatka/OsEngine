@@ -35,8 +35,6 @@ using OsEngine.Market.Servers.TInvest;
 using MessageBox = System.Windows.MessageBox;
 using OsEngine.Market.Servers.Bybit;
 using OsEngine.Market.Servers.OKX;
-using OsEngine.Market.Servers.BitGet.BitGetSpot;
-using OsEngine.Market.Servers.BitGet.BitGetFutures;
 using OsEngine.Market.Servers.Alor;
 using OsEngine.Market.Servers.GateIo.GateIoSpot;
 using OsEngine.Market.Servers.GateIo.GateIoFutures;
@@ -55,8 +53,6 @@ using OsEngine.Market.Servers.HTX.Spot;
 using OsEngine.Market.Servers.HTX.Futures;
 using OsEngine.Market.Servers.HTX.Swap;
 using OsEngine.Market.Servers.MoexFixFastSpot;
-using OsEngine.Market.Servers.BitMart;
-using OsEngine.Market.Servers.BitMartFutures;
 using OsEngine.Market.Servers.MoexFixFastCurrency;
 using OsEngine.Market.Servers.MoexFixFastTwimeFutures;
 using OsEngine.Market.Servers.TraderNet;
@@ -65,8 +61,6 @@ using OsEngine.Market.Servers.KiteConnect;
 using OsEngine.Market.Servers.YahooFinance;
 using OsEngine.Market.Servers.Atp;
 using OsEngine.Market.Servers.Polygon;
-using OsEngine.Market.Servers.CoinEx.Spot;
-using OsEngine.Market.Servers.CoinEx.Futures;
 using OsEngine.Market.Servers.RSSNews;
 using OsEngine.Market.Servers.SmartLabNews;
 using OsEngine.Market.Servers.AE;
@@ -81,16 +75,16 @@ using OsEngine.Market.AutoFollow;
 using OsEngine.OsTrader.Panels;
 using OsEngine.OsTrader;
 using System.Linq;
-using OsEngine.Market.Servers.AscendexSpot;
 using OsEngine.Market.Servers.OKXData;
 using System.Windows.Controls;
-using OsEngine.Market.Servers.ExMo.ExmoSpot;
 using OsEngine.Market.Servers.BybitData;
 using OsEngine.Market.Servers.GateIoData;
-using OsEngine.Market.Servers.BitGetData;
 using OsEngine.Market.Servers.MetaTrader5;
 using OsEngine.Market.Servers.QscalpMarketDepth;
 using OsEngine.Market.Servers.TData;
+using OsEngine.Market.Servers.TwelveData;
+using OsEngine.Market.Servers.BCS;
+using OsEngine.Market.ServerEncryption;
 
 namespace OsEngine.Market
 {
@@ -102,6 +96,37 @@ namespace OsEngine.Market
     {
 
         #region Service
+
+        static ServerMaster()
+        {
+            ServerEncryptionMaster.UnlockedEvent += ServerEncryptionMaster_UnlockedEvent;
+        }
+
+        private static void ServerEncryptionMaster_UnlockedEvent()
+        {
+            try
+            {
+                // шифрователь разблокировали позже старта - дозагружаем пароли уже созданных серверов
+                List<IServer> servers = GetServers();
+
+                if (servers == null)
+                {
+                    return;
+                }
+
+                for (int i = 0; i < servers.Count; i++)
+                {
+                    if (servers[i] is AServer aServer)
+                    {
+                        aServer.ReloadPasswordParams();
+                    }
+                }
+            }
+            catch (Exception error)
+            {
+                SendNewLogMessage(error.ToString(), LogMessageType.Error);
+            }
+        }
 
         public static void Activate()
         {
@@ -290,9 +315,9 @@ namespace OsEngine.Market
 
         public static void RealStarted()
         {
-            if (ServerMasterActivateInTesterRegimeEvent != null)
+            if (ServerMasterActivateInRealRegimeEvent != null)
             {
-                ServerMasterActivateInTesterRegimeEvent();
+                ServerMasterActivateInRealRegimeEvent();
             }
         }
 
@@ -335,7 +360,9 @@ namespace OsEngine.Market
                 serverTypes.Add(ServerType.Plaza);
                 serverTypes.Add(ServerType.Transaq);
                 serverTypes.Add(ServerType.TInvest);
+                serverTypes.Add(ServerType.TInvestAutoFollow);
                 serverTypes.Add(ServerType.Finam);
+                serverTypes.Add(ServerType.FinamGrpc);
                 serverTypes.Add(ServerType.MoexDataServer);
                 serverTypes.Add(ServerType.MfdWeb);
                 serverTypes.Add(ServerType.MoexAlgopack);
@@ -354,35 +381,29 @@ namespace OsEngine.Market
                 serverTypes.Add(ServerType.BitfinexFutures);
                 serverTypes.Add(ServerType.KuCoinSpot);
                 serverTypes.Add(ServerType.KuCoinFutures);
-                serverTypes.Add(ServerType.ExmoSpot);
                 serverTypes.Add(ServerType.HTXSpot);
                 serverTypes.Add(ServerType.HTXFutures);
                 serverTypes.Add(ServerType.HTXSwap);
                 serverTypes.Add(ServerType.Bybit);
                 serverTypes.Add(ServerType.OKX);
-                serverTypes.Add(ServerType.BitGetSpot);
-                serverTypes.Add(ServerType.BitGetFutures);
                 serverTypes.Add(ServerType.BingXSpot);
                 serverTypes.Add(ServerType.BingXFutures);
                 serverTypes.Add(ServerType.XTSpot);
                 serverTypes.Add(ServerType.XTFutures);
                 serverTypes.Add(ServerType.PionexSpot);
                 serverTypes.Add(ServerType.Woo);
-                serverTypes.Add(ServerType.BitMartSpot);
-                serverTypes.Add(ServerType.BitMartFutures);
                 serverTypes.Add(ServerType.MoexFixFastCurrency);
                 serverTypes.Add(ServerType.MoexFixFastTwimeFutures);
                 serverTypes.Add(ServerType.MexcSpot);
                 serverTypes.Add(ServerType.AstsBridge);
-                serverTypes.Add(ServerType.CoinExSpot);
-                serverTypes.Add(ServerType.CoinExFutures);
                 serverTypes.Add(ServerType.RSSNews);
                 serverTypes.Add(ServerType.SmartLabNews);
                 serverTypes.Add(ServerType.AExchange);
                 serverTypes.Add(ServerType.BloFinFutures);
                 serverTypes.Add(ServerType.TelegramNews);
                 serverTypes.Add(ServerType.BinanceData);
-                serverTypes.Add(ServerType.AscendexSpot);
+                serverTypes.Add(ServerType.TwelveData);
+                serverTypes.Add(ServerType.BCS);
 
                 // а теперь сортируем в зависимости от предпочтений пользователя
 
@@ -483,6 +504,7 @@ namespace OsEngine.Market
                 serverTypes.Add(ServerType.KuCoinSpot);
                 serverTypes.Add(ServerType.Alor);
                 serverTypes.Add(ServerType.Finam);
+                serverTypes.Add(ServerType.FinamGrpc);
                 serverTypes.Add(ServerType.MoexDataServer);
                 serverTypes.Add(ServerType.MfdWeb);
                 serverTypes.Add(ServerType.MoexAlgopack);
@@ -492,28 +514,23 @@ namespace OsEngine.Market
                 serverTypes.Add(ServerType.BingXFutures);
                 serverTypes.Add(ServerType.BitfinexSpot);
                 serverTypes.Add(ServerType.BitfinexFutures);
-                serverTypes.Add(ServerType.ExmoSpot);
                 serverTypes.Add(ServerType.HTXFutures);
                 serverTypes.Add(ServerType.HTXSwap);
                 serverTypes.Add(ServerType.Bybit);
                 serverTypes.Add(ServerType.Woo);
-                serverTypes.Add(ServerType.BitGetSpot);
-                serverTypes.Add(ServerType.BitGetFutures);
                 serverTypes.Add(ServerType.TraderNet);
                 serverTypes.Add(ServerType.KiteConnect);
                 serverTypes.Add(ServerType.YahooFinance);
                 serverTypes.Add(ServerType.Polygon);
-                serverTypes.Add(ServerType.CoinExSpot);
-                serverTypes.Add(ServerType.CoinExFutures);
                 serverTypes.Add(ServerType.BinanceData);
-                serverTypes.Add(ServerType.AscendexSpot);
                 serverTypes.Add(ServerType.OKXData);
                 serverTypes.Add(ServerType.BybitData);
                 serverTypes.Add(ServerType.GateIoData);
-                serverTypes.Add(ServerType.BitGetData);
                 serverTypes.Add(ServerType.MetaTrader5);
                 serverTypes.Add(ServerType.QscalpMarketDepth);
                 serverTypes.Add(ServerType.TDataHistory);
+                serverTypes.Add(ServerType.TwelveData);
+                serverTypes.Add(ServerType.BCS);
 
                 return serverTypes;
             }
@@ -658,10 +675,6 @@ namespace OsEngine.Market
                     {
                         newServer = new QscalpMarketDepthServer();
                     }
-                    if (type == ServerType.BitGetData)
-                    {
-                        newServer = new BitGetDataServer();
-                    }
                     if (type == ServerType.GateIoData)
                     {
                         newServer = new GateIoDataServer();
@@ -742,14 +755,6 @@ namespace OsEngine.Market
                     {
                         newServer = new AlorServer(uniqueNum);
                     }
-                    else if (type == ServerType.BitGetFutures)
-                    {
-                        newServer = new BitGetServerFutures(uniqueNum);
-                    }
-                    else if (type == ServerType.BitGetSpot)
-                    {
-                        newServer = new BitGetServerSpot(uniqueNum);
-                    }
                     else if (type == ServerType.OKX)
                     {
                         newServer = new OkxServer(uniqueNum);
@@ -766,6 +771,10 @@ namespace OsEngine.Market
                     {
                         newServer = new TInvestServer(uniqueNum);
                     }
+                    else if (type == ServerType.TInvestAutoFollow)
+                    {
+                        newServer = new TInvestAutoFollowServer(uniqueNum);
+                    }
                     else if (type == ServerType.GateIoSpot)
                     {
                         newServer = new GateIoServerSpot(uniqueNum);
@@ -777,10 +786,6 @@ namespace OsEngine.Market
                     else if (type == ServerType.Bybit)
                     {
                         newServer = new BybitServer(uniqueNum);
-                    }
-                    else if (type == ServerType.ExmoSpot)
-                    {
-                        newServer = new ExmoSpotServer();
                     }
                     else if (type == ServerType.Transaq)
                     {
@@ -834,6 +839,10 @@ namespace OsEngine.Market
                     {
                         newServer = new FinamServer();
                     }
+                    else if (type == ServerType.FinamGrpc)
+                    {
+                        newServer = new FinamGrpcServer(uniqueNum);
+                    }
                     else if (type == ServerType.Deribit)
                     {
                         newServer = new DeribitServer();
@@ -858,14 +867,6 @@ namespace OsEngine.Market
                     {
                         newServer = new HTXSwapServer(uniqueNum);
                     }
-                    else if (type == ServerType.BitMartSpot)
-                    {
-                        newServer = new BitMartSpotServer();
-                    }
-                    else if (type == ServerType.BitMartFutures)
-                    {
-                        newServer = new BitMartFuturesServer();
-                    }
                     else if (type == ServerType.TraderNet)
                     {
                         newServer = new TraderNetServer();
@@ -886,21 +887,17 @@ namespace OsEngine.Market
                     {
                         newServer = new PolygonServer();
                     }
-                    else if (type == ServerType.CoinExSpot)
-                    {
-                        newServer = new CoinExServerSpot();
-                    }
-                    else if (type == ServerType.CoinExFutures)
-                    {
-                        newServer = new CoinExServerFutures();
-                    }
                     else if (type == ServerType.BloFinFutures)
                     {
                         newServer = new BloFinFuturesServer(uniqueNum);
                     }
-                    else if (type == ServerType.AscendexSpot)
+                    else if (type == ServerType.TwelveData)
                     {
-                        newServer = new AscendexSpotServer(uniqueNum);
+                        newServer = new TwelveDataServer();
+                    }
+                    else if (type == ServerType.BCS)
+                    {
+                        newServer = new BcsServer(uniqueNum);
                     }
 
                     if (newServer == null)
@@ -1290,6 +1287,12 @@ namespace OsEngine.Market
         private static List<ServerType> _tryActivateServerTypes;
 
         /// <summary>
+        /// the "auto deployment is not possible, encryptor locked" error has already been reported this session
+        /// ошибка «авто-развёртывание невозможно, шифрователь заблокирован» уже выдавалась в этой сессии
+        /// </summary>
+        private static bool _encryptLockedErrorReported;
+
+        /// <summary>
         /// work place of the thread that connects our servers in auto mode
         /// </summary>
         private static async void ThreadStarterWorkArea()
@@ -1342,6 +1345,28 @@ namespace OsEngine.Market
         {
             try
             {
+                // гейт шифрователя: не разворачиваем серверы с пустыми ключами
+                if (ServerEncryptionMaster.GetStatus() == ServerEncryptionStatus.Encrypted
+                    && ServerEncryptionMaster.IsUnlocked == false)
+                {
+                    if (ServerEncryptionMaster.UnlockDeclinedThisSession == false)
+                    {
+                        ServerEncryptionMaster.RequestUnlock();
+                    }
+
+                    if (ServerEncryptionMaster.IsUnlocked == false)
+                    {
+                        if (_encryptLockedErrorReported == false)
+                        {
+                            _encryptLockedErrorReported = true;
+                            SendNewLogMessage("Auto deployment is not possible: encryption is enabled. Unlock the encryptor first (Encryption button in any connector window or via MCP) / " +
+                                "Авто-развёртывание невозможно: включено шифрование. Сначала разблокируйте шифрователь (кнопка «Шифрование» в любом коннекторе или через MCP)", LogMessageType.Error);
+                        }
+
+                        return;
+                    }
+                }
+
                 for (int i = 0; i < _tryActivateServerTypes.Count; i++)
                 {
                     if (_tryActivateServerTypes[i] == type)
@@ -1522,14 +1547,6 @@ namespace OsEngine.Market
                 {
                     serverPermission = new AlorServerPermission();
                 }
-                else if (type == ServerType.BitGetSpot)
-                {
-                    serverPermission = new BitGetSpotServerPermission();
-                }
-                else if (type == ServerType.BitGetFutures)
-                {
-                    serverPermission = new BitGetFuturesServerPermission();
-                }
                 else if (type == ServerType.OKX)
                 {
                     serverPermission = new OkxServerPermission();
@@ -1562,9 +1579,17 @@ namespace OsEngine.Market
                 {
                     serverPermission = new FinamServerPermission();
                 }
+                else if (type == ServerType.FinamGrpc)
+                {
+                    serverPermission = new FinamGrpcServerPermission();
+                }
                 else if (type == ServerType.TInvest)
                 {
                     serverPermission = new TInvestServerPermission();
+                }
+                else if (type == ServerType.TInvestAutoFollow)
+                {
+                    serverPermission = new TInvestAutoFollowServerPermission();
                 }
                 else if (type == ServerType.GateIoFutures)
                 {
@@ -1610,14 +1635,6 @@ namespace OsEngine.Market
                 {
                     serverPermission = new PlazaServerPermission();
                 }
-                else if (type == ServerType.BitMartSpot)
-                {
-                    serverPermission = new BitMartSpotServerPermission();
-                }
-                else if (type == ServerType.BitMartFutures)
-                {
-                    serverPermission = new BitMartFuturesServerPermission();
-                }
                 else if (type == ServerType.MoexFixFastCurrency)
                 {
                     serverPermission = new MoexFixFastCurrencyServerPermission();
@@ -1646,14 +1663,6 @@ namespace OsEngine.Market
                 {
                     serverPermission = new PolygonServerPermission();
                 }
-                else if (type == ServerType.CoinExSpot)
-                {
-                    serverPermission = new CoinExServerSpotPermission();
-                }
-                else if (type == ServerType.CoinExFutures)
-                {
-                    serverPermission = new CoinExServerFuturesPermission();
-                }
                 else if (type == ServerType.RSSNews)
                 {
                     serverPermission = new RSSNewsServerPermission();
@@ -1678,17 +1687,9 @@ namespace OsEngine.Market
                 {
                     serverPermission = new BinanceDataServerPermission();
                 }
-                else if (type == ServerType.AscendexSpot)
-                {
-                    serverPermission = new AscendexSpotServerPermission();
-                }
                 else if (type == ServerType.OKXData)
                 {
                     serverPermission = new OKXDataServerPermission();
-                }
-                else if (type == ServerType.ExmoSpot)
-                {
-                    serverPermission = new ExmoSpotServerPermission();
                 }
                 else if (type == ServerType.BybitData)
                 {
@@ -1698,10 +1699,6 @@ namespace OsEngine.Market
                 {
                     serverPermission = new GateIoDataServerPermission();
                 }
-                else if (type == ServerType.BitGetData)
-                {
-                    serverPermission = new BitGetDataServerPermission();
-                }
                 else if (type == ServerType.QscalpMarketDepth)
                 {
                     serverPermission = new QscalpMarketDepthServerPermission();
@@ -1709,6 +1706,14 @@ namespace OsEngine.Market
                 else if (type == ServerType.TDataHistory)
                 {
                     serverPermission = new TDataServerPermission();
+                }
+                else if (type == ServerType.TwelveData)
+                {
+                    serverPermission = new TwelveDataPermission();
+                }
+                else if (type == ServerType.BCS)
+                {
+                    serverPermission = new BcsServerPermission();
                 }
 
                 if (serverPermission != null)
@@ -1903,6 +1908,37 @@ namespace OsEngine.Market
             {
                 SendNewLogMessage(ex.ToString(), LogMessageType.Error);
                 return null;
+            }
+        }
+
+        public static bool UpdateProxy(
+            int number, bool isOn, string ip, int port,
+            string login, string password, string pingWebAddress)
+        {
+            try
+            {
+                ProxyOsa proxy = GetOneProxyAt(number);
+
+                if (proxy == null)
+                {
+                    return false;
+                }
+
+                proxy.IsOn = isOn;
+                proxy.Ip = ip;
+                proxy.Port = port;
+                proxy.Login = login;
+                proxy.UserPassword = password;
+                proxy.PingWebAddress = pingWebAddress;
+
+                _proxyMaster.SaveProxy();
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+                return false;
             }
         }
 
@@ -2141,10 +2177,17 @@ namespace OsEngine.Market
             {
                 LogMessageEvent(message, type);
             }
-            else if (type == LogMessageType.Error)
-            { // if nobody is subscribed to us and there is a log error
-              // если на нас никто не подписан и в логе ошибка
-                MessageBox.Show(message);
+            else
+            { // if nobody is subscribed to us - write to the static log
+              // если на нас никто не подписан - пишем в статический лог
+                if (Log != null)
+                {
+                    Log.ProcessMessage(message, type);
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine("ServerMaster log error: " + type + " " + message);
+                }
             }
         }
 
@@ -2181,6 +2224,12 @@ namespace OsEngine.Market
         /// подключение к Т-Инвестициям (версия 3 коннектора)
         /// </summary>
         TInvest,
+
+        /// <summary>
+        /// connection to T-Invest autofollow service (strategies and signals)
+        /// подключение к сервису автоследования Т-Инвестиций (стратегии и сигналы)
+        /// </summary>
+        TInvestAutoFollow,
 
         /// <summary>
         /// Connecting to different forex brokers via the MT5 terminal
@@ -2229,12 +2278,6 @@ namespace OsEngine.Market
         /// биржа криптовалют Binance, секция фьючеры
         /// </summary>
         BinanceFutures,
-
-        /// <summary>
-        /// cryptocurrency exchange Exmo
-        /// биржа криптовалют Exmo
-        /// </summary>
-        ExmoSpot,
 
         /// <summary>
         /// terminal Ninja Trader
@@ -2316,16 +2359,6 @@ namespace OsEngine.Market
         OKX,
 
         /// <summary>
-        /// BitGetSpot exchange
-        /// </summary>
-        BitGetSpot,
-
-        /// <summary>
-        /// BitGetFutures exchange
-        /// </summary>
-        BitGetFutures,
-
-        /// <summary>
         /// Alor OpenAPI & Websocket
         /// </summary>
         Alor,
@@ -2400,14 +2433,6 @@ namespace OsEngine.Market
         /// </summary>
         MoexFixFastSpot,
 
-        /// BitMartSpot Spot exchange
-        /// </summary>
-        BitMartSpot,
-
-        /// BitMartSpot Futures exchange
-        /// </summary>
-        BitMartFutures,
-
         /// <summary>
         /// FIX/FAST for MOEX Currency
         /// </summary>
@@ -2449,18 +2474,6 @@ namespace OsEngine.Market
         Polygon,
 
         /// <summary>
-        /// Spot for cryptocurrency exchange CoinEx.com
-        /// Спот биржи криптовалют CoinEx.com
-        /// </summary>
-        CoinExSpot,
-
-        /// <summary>
-        /// Futures for cryptocurrency exchange CoinEx.com
-        /// Фьюючерсы биржи криптовалют CoinEx.com
-        /// </summary>
-        CoinExFutures,
-
-        /// <summary>
         /// Reading news from RSS feeds
         /// Чтение новостей с RSS лент
         /// </summary>
@@ -2496,11 +2509,6 @@ namespace OsEngine.Market
         BinanceData,
 
         /// <summary>
-        ///  AscendexSpot exchange
-        /// </summary>
-        AscendexSpot,
-
-        /// <summary>
         /// downloading historical data from exchange OKX
         /// скачивание исторических данных с биржи OKX
         /// </summary>
@@ -2519,12 +2527,6 @@ namespace OsEngine.Market
         GateIoData,
 
         /// <summary>
-        /// downloading historical data from exchange BitGet
-        /// скачивание исторических данных с биржи BitGet
-        /// </summary>
-        BitGetData,
-
-        /// <summary>
         /// downloading historical depths
         /// скачивание историческихстаканов в формате qsh
         /// </summary>
@@ -2534,6 +2536,18 @@ namespace OsEngine.Market
         /// downloading historical data from T-Invest archives
         /// скачивание исторических данных из архивов T-Invest
         /// </summary>
-        TDataHistory
+        TDataHistory,
+
+        /// <summary>
+        /// downloading historical data from T-Invest archives
+        /// скачивание исторических данных и трансляция данных в режиме реального времени с TwelveData
+        /// </summary>
+        TwelveData,
+
+        /// <summary>
+        /// Bcs OpenAPI & Websocket
+        /// подключение к АПИ брокера БКС
+        /// </summary>
+        BCS
     }
 }

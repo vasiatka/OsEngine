@@ -1,0 +1,2345 @@
+﻿/*
+ * Your rights to use code governed by this license https://github.com/AlexWan/OsEngine/blob/master/LICENSE
+ * Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
+*/
+
+using OsEngine.Entity;
+using OsEngine.Logging;
+using OsEngine.Market.ServerEncryption;
+using OsEngine.MCP.Json;
+using OsEngine.MCP.Modules;
+using OsEngine.OsCapitalAllocation;
+using OsEngine.OsData;
+using OsEngine.OsOptimizer;
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.IO;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Text.Encodings.Web;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Text.Unicode;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace OsEngine.MCP
+{
+    /// <summary>
+    /// Master host for MCP API.
+    /// Accepts JSON-RPC requests and publishes events via Server-Sent Events.
+    /// </summary>
+    public class McpMaster
+    {
+        #region Fields
+
+        private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions
+        {
+            Encoder = JavaScriptEncoder.Create(UnicodeRanges.All)
+        };
+
+        // JSON-RPC 2.0, section 5: result and error members are mutually exclusive.
+        // Strict clients (MCP SDK, .strict() union) reject "error": null with invalid_union
+        private static readonly JsonSerializerOptions JsonOptionsRpc = new JsonSerializerOptions
+        {
+            Encoder = JavaScriptEncoder.Create(UnicodeRanges.All),
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+        };
+
+        // BUG-0138: единый вывод FullLog (K4) — кириллица дословно, без \uXXXX-дрифта
+        private static readonly JavaScriptEncoder FullLogEncoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping;
+
+        private static readonly JsonSerializerOptions FullLogJsonOptions = new JsonSerializerOptions
+        {
+            Encoder = FullLogEncoder
+        };
+
+        private static readonly JsonWriterOptions FullLogWriterOptions = new JsonWriterOptions
+        {
+            Encoder = FullLogEncoder
+        };
+
+        private HttpListener _listener;
+        private CancellationTokenSource _cts;
+        private Task _listenerTask;
+        private readonly string _apiKey;
+        private readonly int _port;
+        private readonly List<SseClient> _sseClients = new List<SseClient>();
+        private readonly object _sseClientsLocker = new object();
+
+        // тестовый хук, вызывается между регистрацией v1-SSE клиента и welcome-кадром; null = production
+        internal static Action V1WelcomeHookForTests;
+
+        // сессии Streamable HTTP (v2): id -> состояние сессии
+        private readonly ConcurrentDictionary<string, StreamableSession> _sessions = new ConcurrentDictionary<string, StreamableSession>();
+
+        // открытые GET-стримы v2: sessionId -> потоковый канал (server -> client события)
+        private readonly ConcurrentDictionary<string, StreamableStream> _streamableStreams = new ConcurrentDictionary<string, StreamableStream>();
+
+        // прогресс-токен сессии: sessionId -> progressToken (из _meta запроса)
+        private readonly ConcurrentDictionary<string, string> _sessionProgressTokens = new ConcurrentDictionary<string, string>();
+
+        private readonly TerminalApi _terminalApi;
+        private readonly LogsApi _logsApi;
+        private readonly SettingsApi _settingsApi;
+        private readonly McpConfigApi _configApi;
+        private readonly ServerManagementApi _serverManagementApi;
+        private readonly ServerInstanceApi _serverInstanceApi;
+        private readonly WikiRobotsApi _wikiRobotsApi;
+        private readonly WikiIndicatorsApi _wikiIndicatorsApi;
+        private readonly WikiSecuritiesApi _wikiSecuritiesApi;
+        private readonly WikiDividendsApi _wikiDividendsApi;
+        private readonly OsDataApi _osDataApi;
+        private readonly TesterApi _testerApi;
+        private readonly RobotsApi _robotsApi;
+        private readonly SystemLoadApi _systemLoadApi;
+        private readonly ComparePositionsApi _comparePositionsApi;
+        private readonly ProxyApi _proxyApi;
+        private readonly OptimizerApi _optimizerApi;
+        private readonly EncryptionApi _encryptionApi;
+        private readonly UpdateApi _updateApi;
+        private readonly CapitalAllocationApi _capitalAllocationApi;
+        private readonly McpProtocolApi _protocolApi;
+
+        private readonly Func<McpTerminalStatus> _getTerminalStatus;
+        private readonly Action<string> _launchTerminal;
+        private readonly Action _stopTerminal;
+        private readonly Action _killTerminal;
+        private readonly Action<string> _openMode;
+
+        private OsDataMaster _osDataMaster;
+
+        /// <summary>
+        /// Standard OsEngine log for MCP events and requests.
+        /// </summary>
+        public Log Log { get; private set; }
+
+        #endregion
+
+        #region Constructors
+
+        public McpMaster(
+            int port,
+            string apiKey,
+            Action restartHost = null,
+            Func<McpTerminalStatus> getTerminalStatus = null,
+            Action<string> launchTerminal = null,
+            Action stopTerminal = null,
+            Action killTerminal = null,
+            Action<string> openMode = null)
+        {
+            _port = port;
+            _apiKey = apiKey;
+            _getTerminalStatus = getTerminalStatus;
+            _launchTerminal = launchTerminal;
+            _stopTerminal = stopTerminal;
+            _killTerminal = killTerminal;
+            _openMode = openMode;
+
+            Log = new Log("MCP", StartProgram.IsMainWindow);
+
+            Action<string, object> publishEvent = (eventName, payload) => SendEvent(eventName, payload);
+
+            _terminalApi = new TerminalApi(
+                publishEvent,
+                () => GetTerminalStatusSafe(),
+                _launchTerminal,
+                _stopTerminal,
+                _killTerminal,
+                _openMode);
+            _terminalApi.NewLogMessageEvent += TerminalApi_NewLogMessageEvent;
+
+            _logsApi = new LogsApi(Log);
+            _logsApi.NewLogMessageEvent += LogsApi_NewLogMessageEvent;
+
+            _settingsApi = new SettingsApi(publishEvent);
+            _settingsApi.NewLogMessageEvent += SettingsApi_NewLogMessageEvent;
+
+            _configApi = new McpConfigApi(restartHost);
+            _configApi.NewLogMessageEvent += ConfigApi_NewLogMessageEvent;
+
+            _serverManagementApi = new ServerManagementApi(publishEvent);
+            _serverManagementApi.NewLogMessageEvent += ServerManagementApi_NewLogMessageEvent;
+
+            _serverInstanceApi = new ServerInstanceApi(publishEvent);
+            _serverInstanceApi.NewLogMessageEvent += ServerInstanceApi_NewLogMessageEvent;
+
+            _wikiRobotsApi = new WikiRobotsApi();
+            _wikiRobotsApi.NewLogMessageEvent += WikiRobotsApi_NewLogMessageEvent;
+
+            _wikiIndicatorsApi = new WikiIndicatorsApi();
+            _wikiIndicatorsApi.NewLogMessageEvent += WikiIndicatorsApi_NewLogMessageEvent;
+
+            _wikiSecuritiesApi = new WikiSecuritiesApi();
+            _wikiSecuritiesApi.NewLogMessageEvent += WikiSecuritiesApi_NewLogMessageEvent;
+
+            _wikiDividendsApi = new WikiDividendsApi();
+            _wikiDividendsApi.NewLogMessageEvent += WikiDividendsApi_NewLogMessageEvent;
+
+            _osDataApi = new OsDataApi(publishEvent, () => _osDataMaster);
+            _osDataApi.NewLogMessageEvent += OsDataApi_NewLogMessageEvent;
+
+            _testerApi = new TesterApi(publishEvent);
+            _testerApi.NewLogMessageEvent += TesterApi_NewLogMessageEvent;
+
+            _robotsApi = new RobotsApi(publishEvent);
+            _robotsApi.NewLogMessageEvent += RobotsApi_NewLogMessageEvent;
+
+            _systemLoadApi = new SystemLoadApi();
+            _systemLoadApi.NewLogMessageEvent += SystemLoadApi_NewLogMessageEvent;
+
+            _comparePositionsApi = new ComparePositionsApi();
+            _comparePositionsApi.NewLogMessageEvent += ComparePositionsApi_NewLogMessageEvent;
+
+            _proxyApi = new ProxyApi();
+            _proxyApi.NewLogMessageEvent += ProxyApi_NewLogMessageEvent;
+
+            _optimizerApi = new OptimizerApi(publishEvent);
+            _optimizerApi.NewLogMessageEvent += OptimizerApi_NewLogMessageEvent;
+
+            _encryptionApi = new EncryptionApi();
+            _encryptionApi.NewLogMessageEvent += EncryptionApi_NewLogMessageEvent;
+
+            _updateApi = new UpdateApi(publishEvent, _stopTerminal);
+            _updateApi.NewLogMessageEvent += UpdateApi_NewLogMessageEvent;
+            _capitalAllocationApi = new CapitalAllocationApi();
+
+            _protocolApi = new McpProtocolApi(request => ExecuteTool(request));
+            _protocolApi.NewLogMessageEvent += ProtocolApi_NewLogMessageEvent;
+
+            _protocolApi.RegisterToolProvider(_terminalApi);
+            _protocolApi.RegisterToolProvider(_logsApi);
+            _protocolApi.RegisterToolProvider(_settingsApi);
+            _protocolApi.RegisterToolProvider(_configApi);
+            _protocolApi.RegisterToolProvider(_serverManagementApi);
+            _protocolApi.RegisterToolProvider(_serverInstanceApi);
+            _protocolApi.RegisterToolProvider(_wikiRobotsApi);
+            _protocolApi.RegisterToolProvider(_wikiIndicatorsApi);
+            _protocolApi.RegisterToolProvider(_wikiSecuritiesApi);
+            _protocolApi.RegisterToolProvider(_wikiDividendsApi);
+            _protocolApi.RegisterToolProvider(_osDataApi);
+            _protocolApi.RegisterToolProvider(_testerApi);
+            _protocolApi.RegisterToolProvider(_robotsApi);
+            _protocolApi.RegisterToolProvider(_systemLoadApi);
+            _protocolApi.RegisterToolProvider(_comparePositionsApi);
+            _protocolApi.RegisterToolProvider(_proxyApi);
+            _protocolApi.RegisterToolProvider(_optimizerApi);
+            _protocolApi.RegisterToolProvider(_encryptionApi);
+            _protocolApi.RegisterToolProvider(_updateApi);
+            _protocolApi.RegisterToolProvider(_capitalAllocationApi);
+        }
+
+        #endregion
+
+        #region Public methods
+
+        public void Start()
+        {
+            if (_listener != null)
+            {
+                return;
+            }
+
+            _cts = new CancellationTokenSource();
+
+            try
+            {
+                _listener = new HttpListener();
+                _listener.Prefixes.Add($"http://*:{_port}/");
+                _listener.Start();
+            }
+            catch
+            {
+                // fallback to localhost if wildcard prefix requires elevated permissions
+                // or if the previous listener became disposed after a failed Start()
+                try
+                {
+                    _listener?.Close();
+                }
+                catch
+                {
+                    // ignore
+                }
+
+                _listener = new HttpListener();
+                _listener.Prefixes.Add($"http://localhost:{_port}/");
+                _listener.Start();
+            }
+
+            _listenerTask = Task.Run(() => ListenLoop(_cts.Token));
+            Task.Run(() => HeartbeatLoop(_cts.Token));
+
+            Log.ProcessMessage($"MCP API started on port {_port}", LogMessageType.System);
+
+            SendEvent("terminal.launched", GetTerminalStatusSafe());
+        }
+
+        public void Stop()
+        {
+            try
+            {
+                _cts?.Cancel();
+                _listener?.Stop();
+                _listener?.Close();
+                _listener = null;
+
+                lock (_sseClientsLocker)
+                {
+                    foreach (SseClient client in _sseClients)
+                    {
+                        try
+                        {
+                            // Abort перед Close: Close имеет flush-семантику и на клиенте, зависшем
+                            // в Write, повис бы сам (факт BUG-0327). Клиент, зависший между фан-аутами,
+                            // ещё в списке (heartbeat снимет его только на следующем тике) (BUG-0330)
+                            client.Response.Abort();
+                            client.Response.Close();
+                        }
+                        catch
+                        {
+                            // ignore
+                        }
+                    }
+                    _sseClients.Clear();
+                }
+
+                // v2-стримы дорываются тем же путём: GET-поток, зависший в Write, пережил бы Stop
+                // и освободился только вместе с процессом (BUG-0327)
+                foreach (string streamSession in _streamableStreams.Keys)
+                {
+                    CloseStreamableStream(streamSession);
+                }
+
+                Log.ProcessMessage("MCP API stopped", LogMessageType.System);
+            }
+            catch (Exception error)
+            {
+                Log.ProcessMessage(error.ToString(), LogMessageType.Error);
+            }
+        }
+
+        private void SendEventToClient(SseClient client, string eventName, object payload)
+        {
+            McpEvent message = new McpEvent
+            {
+                Event = eventName,
+                Timestamp = DateTime.Now,
+                Payload = payload
+            };
+
+            string json = JsonSerializer.Serialize(message, JsonOptions);
+            string sseData = $"event: {eventName}\ndata: {json}\n\n";
+            byte[] bytes = Encoding.UTF8.GetBytes(sseData);
+
+            try
+            {
+                // Гард зовём на хосте-владельце клиента: единственный лог разрыва принадлежит его
+                // логу; в production на этом пути owner всегда == this (BUG-0330)
+                McpMaster host = client.Owner ?? this;
+                if (!host.TryWriteSse(client.Response, bytes))
+                {
+                    // Сталл welcome-кадра: pool-воркер отпущен гардом, коннект рвём Abort-ом —
+                    // Close на висяке завис бы сам; флаг будит keep-alive цикл ProcessSse (BUG-0294)
+                    client.IsClosed = true;
+                    try
+                    {
+                        client.Response.Abort();
+                    }
+                    catch
+                    {
+                        // ignore
+                    }
+                    return;
+                }
+            }
+            catch
+            {
+                // First event at connect hit a dead client: mark it so the keep-alive loop exits
+                client.IsClosed = true;
+                try
+                {
+                    client.Response.Close();
+                }
+                catch
+                {
+                    // ignore
+                }
+            }
+        }
+
+        private void TerminalApi_NewLogMessageEvent(string message, LogMessageType type)
+        {
+            Log.ProcessMessage(message, type);
+        }
+
+        private void LogsApi_NewLogMessageEvent(string message, LogMessageType type)
+        {
+            Log.ProcessMessage(message, type);
+        }
+
+        private void SettingsApi_NewLogMessageEvent(string message, LogMessageType type)
+        {
+            Log.ProcessMessage(message, type);
+        }
+
+        private void ConfigApi_NewLogMessageEvent(string message, LogMessageType type)
+        {
+            Log.ProcessMessage(message, type);
+        }
+
+        private void ServerManagementApi_NewLogMessageEvent(string message, LogMessageType type)
+        {
+            Log.ProcessMessage(message, type);
+        }
+
+        private void ServerInstanceApi_NewLogMessageEvent(string message, LogMessageType type)
+        {
+            Log.ProcessMessage(message, type);
+        }
+
+        private void WikiRobotsApi_NewLogMessageEvent(string message, LogMessageType type)
+        {
+            Log.ProcessMessage(message, type);
+        }
+
+        private void WikiIndicatorsApi_NewLogMessageEvent(string message, LogMessageType type)
+        {
+            Log.ProcessMessage(message, type);
+        }
+
+        private void WikiSecuritiesApi_NewLogMessageEvent(string message, LogMessageType type)
+        {
+            Log.ProcessMessage(message, type);
+        }
+
+        private void WikiDividendsApi_NewLogMessageEvent(string message, LogMessageType type)
+        {
+            Log.ProcessMessage(message, type);
+        }
+
+        private void OsDataApi_NewLogMessageEvent(string message, LogMessageType type)
+        {
+            Log.ProcessMessage(message, type);
+        }
+
+        private void TesterApi_NewLogMessageEvent(string message, LogMessageType type)
+        {
+            Log.ProcessMessage(message, type);
+        }
+
+        private void RobotsApi_NewLogMessageEvent(string message, LogMessageType type)
+        {
+            Log.ProcessMessage(message, type);
+        }
+
+        private void SystemLoadApi_NewLogMessageEvent(string message, LogMessageType type)
+        {
+            Log.ProcessMessage(message, type);
+        }
+
+        private void ComparePositionsApi_NewLogMessageEvent(string message, LogMessageType type)
+        {
+            Log.ProcessMessage(message, type);
+        }
+
+        private void ProxyApi_NewLogMessageEvent(string message, LogMessageType type)
+        {
+            Log.ProcessMessage(message, type);
+        }
+
+        private void OptimizerApi_NewLogMessageEvent(string message, LogMessageType type)
+        {
+            Log.ProcessMessage(message, type);
+        }
+
+        private void EncryptionApi_NewLogMessageEvent(string message, LogMessageType type)
+        {
+            Log.ProcessMessage(message, type);
+        }
+
+        private void UpdateApi_NewLogMessageEvent(string message, LogMessageType type)
+        {
+            Log.ProcessMessage(message, type);
+        }
+
+        private void ProtocolApi_NewLogMessageEvent(string message, LogMessageType type)
+        {
+            Log.ProcessMessage(message, type);
+        }
+
+        public void SendEvent(string eventName, object payload)
+        {
+            McpEvent message = new McpEvent
+            {
+                Event = eventName,
+                Timestamp = DateTime.Now,
+                Payload = payload
+            };
+
+            string json = JsonSerializer.Serialize(message, JsonOptions);
+            string sseData = $"event: {eventName}\ndata: {json}\n\n";
+            byte[] bytes = Encoding.UTF8.GetBytes(sseData);
+
+            lock (_sseClientsLocker)
+            {
+                for (int i = _sseClients.Count - 1; i >= 0; i--)
+                {
+                    SseClient client = _sseClients[i];
+                    try
+                    {
+                        if (!TryWriteSse(client.Response, bytes))
+                        {
+                            // Сталл: writer покинут гардом, разрыв только Abort-ом (Close flush-ется
+                            // и сам виснет на висяке, BUG-0327); флаг будит keep-alive цикл (BUG-0294)
+                            client.IsClosed = true;
+                            try
+                            {
+                                client.Response.Abort();
+                            }
+                            catch
+                            {
+                                // ignore
+                            }
+                            _sseClients.RemoveAt(i);
+                        }
+                    }
+                    catch
+                    {
+                        // Abort detected on heartbeat write: must release the client's ProcessSse keep-alive thread
+                        client.IsClosed = true;
+                        try
+                        {
+                            client.Response.Close();
+                        }
+                        catch
+                        {
+                            // ignore
+                        }
+                        _sseClients.RemoveAt(i);
+                    }
+                }
+            }
+
+            SendV2Event(eventName, payload);
+        }
+
+        // события OsEngine -> стандартные JSON-RPC уведомления на v2-стримы (event: message)
+        private void SendV2Event(string eventName, object payload)
+        {
+            if (_streamableStreams.Count == 0)
+            {
+                return;
+            }
+
+            // прогресс оптимизатора дополнительно уходит как notifications/progress (при наличии progressToken)
+            if (eventName == "optimizer.test.progress")
+            {
+                SendV2Progress(payload);
+            }
+
+            string frame = BuildMessageFrame(eventName, payload);
+
+            foreach (KeyValuePair<string, StreamableStream> pair in _streamableStreams)
+            {
+                string sessionId = pair.Key;
+
+                if (!_sessions.TryGetValue(sessionId, out StreamableSession sessionState))
+                {
+                    continue;
+                }
+
+                if (!sessionState.Initialized || !sessionState.LoggingEnabled)
+                {
+                    continue;
+                }
+
+                EnqueueToStream(pair.Value, frame);
+            }
+        }
+
+        private string BuildMessageFrame(string eventName, object payload)
+        {
+            string level = MapEventLevel(eventName);
+
+            var notification = new
+            {
+                jsonrpc = "2.0",
+                method = "notifications/message",
+                @params = new
+                {
+                    level = level,
+                    logger = "osengine",
+                    data = new { @event = eventName, payload = payload }
+                }
+            };
+
+            string dataJson = JsonSerializer.Serialize(notification, JsonOptions);
+            return $"event: message\ndata: {dataJson}\n\n";
+        }
+
+        // прогресс оптимизатора -> notifications/progress (с progressToken сессии)
+        private void SendV2Progress(object payload)
+        {
+            int currentValue = 0;
+            int maxValue = 0;
+
+            try
+            {
+                using (JsonDocument document = JsonDocument.Parse(JsonSerializer.Serialize(payload, JsonOptions)))
+                {
+                    JsonElement root = document.RootElement;
+
+                    if (root.TryGetProperty("current_value", out JsonElement cur) && cur.ValueKind == JsonValueKind.Number)
+                    {
+                        currentValue = cur.GetInt32();
+                    }
+
+                    if (root.TryGetProperty("max_value", out JsonElement max) && max.ValueKind == JsonValueKind.Number)
+                    {
+                        maxValue = max.GetInt32();
+                    }
+                }
+            }
+            catch
+            {
+                // не удалось разобрать payload прогресса — пропускаем
+                return;
+            }
+
+            foreach (KeyValuePair<string, StreamableStream> pair in _streamableStreams)
+            {
+                string sessionId = pair.Key;
+
+                if (!_sessions.TryGetValue(sessionId, out StreamableSession sessionState))
+                {
+                    continue;
+                }
+
+                if (!sessionState.Initialized)
+                {
+                    continue;
+                }
+
+                if (!_sessionProgressTokens.TryGetValue(sessionId, out string token))
+                {
+                    continue;
+                }
+
+                var notification = new
+                {
+                    jsonrpc = "2.0",
+                    method = "notifications/progress",
+                    @params = new
+                    {
+                        progressToken = token,
+                        progress = currentValue,
+                        total = maxValue
+                    }
+                };
+
+                string dataJson = JsonSerializer.Serialize(notification, JsonOptions);
+                string frame = $"event: message\ndata: {dataJson}\n\n";
+
+                EnqueueToStream(pair.Value, frame);
+            }
+        }
+
+        // BUG-0320: кап очереди v2-SSE. Продюсеры обязаны оставаться fire-and-forget
+        // (блокирующая очередь вернула бы недуг 0305: зависший клиент вешает издателя/UI),
+        // поэтому при переполнении вытесняем старейшие кадры. Кадры — JSON-RPC notifications
+        // без нумерации, прогресс latest-wins: потеря старых протокол не ломает, клиент добирает pull-запросом.
+        private const long MaxOutgoingFrames = 8192;
+
+        // хуки тестопригодности стенда bug-0320: null = реальные часы
+        internal static Func<long> DropLogClock;
+        internal static int DropLogThrottleMs = 30000;
+
+        // хук тестопригодности стенда bug-0331: вызывается сразу после регистрации v2-SSE стрима, null = production
+        internal static Action WelcomeFrameHookForTests;
+
+        private void EnqueueToStream(StreamableStream stream, string frame)
+        {
+            try
+            {
+                ConcurrentQueue<string> queue = stream.Outgoing;
+                long dropped = 0;
+
+                while ((long)queue.Count >= MaxOutgoingFrames && queue.TryDequeue(out _))
+                {
+                    dropped++;
+                }
+
+                queue.Enqueue(frame);
+
+                // транзитное превышение от параллельных продюсеров срезается после Enqueue — финал не выше капа
+                while ((long)queue.Count > MaxOutgoingFrames && queue.TryDequeue(out _))
+                {
+                    dropped++;
+                }
+
+                if (dropped > 0)
+                {
+                    Interlocked.Add(ref stream.Dropped, dropped);
+                    LogDropsThrottled(stream);
+                }
+            }
+            finally
+            {
+                // исключение из дроп-пути/лога не должно глотать пробуждение потребителя
+                stream.Signal.Set();
+            }
+        }
+
+        // лог дропов на стрим: первый сразу, далее не чаще раза в DropLogThrottleMs (0 = ещё не логировали)
+        private void LogDropsThrottled(StreamableStream stream)
+        {
+            Func<long> clock = DropLogClock;
+            long now = clock != null ? clock() : Environment.TickCount64;
+            long last = Interlocked.Read(ref stream.LastDropLogTicks);
+
+            if (last != 0 && now - last < DropLogThrottleMs)
+            {
+                return;
+            }
+
+            if (Interlocked.CompareExchange(ref stream.LastDropLogTicks, now, last) != last)
+            {
+                return;
+            }
+
+            Log.ProcessMessage($"[StreamableHttp] session={stream.SessionId} outgoing queue full (cap {MaxOutgoingFrames}), dropped {Interlocked.Read(ref stream.Dropped)} oldest frames", LogMessageType.Connect);
+        }
+
+        private static string MapEventLevel(string eventName)
+        {
+            switch (eventName)
+            {
+                case "terminal.launched":
+                case "terminal.stopped":
+                case "terminal.mode_changed":
+                case "server_instance.status_changed":
+                case "optimizer.test.finished":
+                    return "notice";
+
+                case "heartbeat":
+                    return "debug";
+
+                case "server_instance.log":
+                    return "info";
+
+                case "prime_settings.changed":
+                case "server_instance.security.updated":
+                case "server_instance.portfolio.updated":
+                case "data_set_load_completed_event":
+                case "data_set_security_load_completed_event":
+                    return "info";
+
+                default:
+                    return "info";
+            }
+        }
+
+        public void SendTerminalStopped(string reason)
+        {
+            _terminalApi?.SendTerminalStopped(reason);
+        }
+
+        public void SendTerminalModeChanged(StartProgram mode)
+        {
+            _terminalApi?.SendTerminalModeChanged(mode);
+        }
+
+        public void SetOsDataMaster(OsDataMaster master)
+        {
+            _osDataApi?.DetachFromMaster();
+            _osDataMaster = master;
+            _osDataApi?.AttachToMaster();
+        }
+
+        public void SetOptimizerMaster(OptimizerMaster master)
+        {
+            _optimizerMaster = master;
+            _optimizerApi?.AttachToMaster(master);
+        }
+
+        private OptimizerMaster _optimizerMaster;
+
+        public void SetCapitalAllocationMaster(CapitalAllocationMaster master)
+        {
+            _capitalAllocationApi?.AttachToMaster(master);
+        }
+
+        #endregion
+
+        #region Private methods
+
+        private async Task ListenLoop(CancellationToken token)
+        {
+            while (!token.IsCancellationRequested)
+            {
+                try
+                {
+                    HttpListenerContext context = await _listener.GetContextAsync();
+                    _ = Task.Run(() => ProcessRequest(context), token);
+                }
+                catch (Exception error)
+                {
+                    if (!token.IsCancellationRequested)
+                    {
+                        Log.ProcessMessage(error.ToString(), LogMessageType.Error);
+                    }
+                }
+            }
+        }
+
+        private async Task HeartbeatLoop(CancellationToken token)
+        {
+            while (!token.IsCancellationRequested)
+            {
+                try
+                {
+                    await Task.Delay(5000, token);
+                    SendEvent("heartbeat", new { time = DateTime.Now });
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception error)
+                {
+                    Log.ProcessMessage(error.ToString(), LogMessageType.Error);
+                }
+            }
+        }
+
+        private void ProcessRequest(HttpListenerContext context)
+        {
+            HttpListenerRequest request = null;
+            HttpListenerResponse response = null;
+            string path = string.Empty;
+
+            try
+            {
+                request = context.Request;
+                response = context.Response;
+                path = request.Url.AbsolutePath;
+
+                if (McpSettings.IsFullLogEnabled)
+                {
+                    string ip = request.RemoteEndPoint?.Address?.ToString();
+                    Log.ProcessMessage($"[FullLog] Request {request.HttpMethod} {path} from {ip}", LogMessageType.System);
+                }
+
+                if (!IsIpAllowed(request))
+                {
+                    SendError(response, 403, "Forbidden: IP not allowed");
+                    LogRequest(request, response, path);
+                    return;
+                }
+
+                if (McpSettings.KeyIsLocked
+                    && ServerEncryptionMaster.IsUnlocked)
+                {
+                    // шифрователь разблокировали через bootstrap или UI - дочитываем ключ
+                    McpSettings.ReloadKeyAfterUnlock();
+                }
+
+                if (IsLockedMode)
+                {
+                    // ключ API зашифрован и не расшифрован: без авторизации пропускаем только encryption_unlock
+                    if (request.HttpMethod == "POST" && path == "/api/v1/mcp")
+                    {
+                        ProcessJsonRpc(request, response, true);
+                    }
+                    else if (request.HttpMethod == "POST" && path == "/api/v2/mcp")
+                    {
+                        ProcessStreamableHttp(request, response, true);
+                    }
+                    else
+                    {
+                        SendError(response, 401, "Encryptor is locked. Call encryption_unlock first (no API key required)");
+                    }
+
+                    LogRequest(request, response, path);
+                    return;
+                }
+
+                if (!IsAuthorized(request))
+                {
+                    SendError(response, 401, "Unauthorized");
+                    LogRequest(request, response, path);
+                    return;
+                }
+
+                if (request.HttpMethod == "POST" && path == "/api/v1/mcp")
+                {
+                    ProcessJsonRpc(request, response);
+                }
+                else if (request.HttpMethod == "GET" && path == "/api/v1/events")
+                {
+                    if (McpSettings.IsFullLogEnabled)
+                    {
+                        string ip = request.RemoteEndPoint?.Address?.ToString();
+                        Log.ProcessMessage($"[FullLog] SSE client connected from {ip}", LogMessageType.System);
+                    }
+                    ProcessSse(response);
+                }
+                else if (path == "/api/v2/mcp")
+                {
+                    ProcessStreamableHttp(request, response);
+                }
+                else
+                {
+                    SendError(response, 404, "Not found");
+                }
+
+                LogRequest(request, response, path);
+            }
+            catch (Exception error)
+            {
+                if (IsClientAbort(error))
+                {
+                    // штатный обрыв клиента: 500 в мёртвый сокет не отправляем, уровень Connect (BUG-0292)
+                    Log.ProcessMessage($"[MCP] client aborted request {request?.HttpMethod} {path}: {error.Message}", LogMessageType.Connect);
+                }
+                else
+                {
+                    Log.ProcessMessage(error.ToString(), LogMessageType.Error);
+                    try
+                    {
+                        if (response != null)
+                        {
+                            SendError(response, 500, "Internal server error");
+                            LogRequest(request, response, path);
+                        }
+                    }
+                    catch
+                    {
+                        // ignore
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Штатный обрыв соединения клиентом (transport abort), а не ошибка серверной логики. BUG-0292.
+        /// </summary>
+        private static bool IsClientAbort(Exception error)
+        {
+            // Ограничение глубины защиты от испорченной цепи InnerException (цикл) — false без зависания
+            int maxChainDepth = 32;
+            bool underIOException = false;
+
+            for (Exception e = error; e != null; e = e.InnerException)
+            {
+                if (maxChainDepth-- <= 0)
+                {
+                    return false;
+                }
+
+                if (e is HttpListenerException listenerError)
+                {
+                    // ERROR_OPERATION_ABORTED, ERROR_CONNECTION_REFUSED, ERROR_NETNAME_DELETED,
+                    // ERROR_PIPE_NOT_AVAILABLE, WSAECONNABORTED, WSAECONNRESET
+                    // 1229 ERROR_NETWORK_UNREACHABLE: http.sys/.NET 10 даёт его на write в мёртвое соединение — факт repro Artifacts/Tests/bug-0292-stand/repro-fact.txt
+                    int code = listenerError.ErrorCode;
+                    if (code == 995 || code == 1225 || code == 64 || code == 232 || code == 10053 || code == 10054 || code == 1229)
+                    {
+                        return true;
+                    }
+                }
+                else if (underIOException && e is SocketException socketError)
+                {
+                    // по ТЗ SocketException считается обрывом только в цепи IOException
+                    switch (socketError.SocketErrorCode)
+                    {
+                        case SocketError.Interrupted:
+                        case SocketError.ConnectionAborted:
+                        case SocketError.ConnectionReset:
+                        case SocketError.NotConnected:
+                        case SocketError.NetworkDown:
+                        case SocketError.HostDown:
+                            return true;
+                    }
+                }
+
+                if (e is IOException)
+                {
+                    underIOException = true;
+                }
+            }
+
+            return false;
+        }
+
+        private void LogRequest(HttpListenerRequest request, HttpListenerResponse response, string path)
+        {
+            if (request == null || response == null)
+            {
+                return;
+            }
+
+            try
+            {
+                string ip = request.RemoteEndPoint?.Address?.ToString();
+                string message = $"{request.HttpMethod} {path} from {ip} -> {response.StatusCode}";
+                Log.ProcessMessage(message, LogMessageType.System);
+            }
+            catch
+            {
+                // logging must not break request handling
+            }
+        }
+
+        private bool IsLockedMode
+        {
+            get
+            {
+                // если ключ задан извне (командная строка) - locked-режим не нужен
+                return string.IsNullOrEmpty(_apiKey)
+                    && McpSettings.KeyIsLocked;
+            }
+        }
+
+        private bool IsAuthorized(HttpListenerRequest request)
+        {
+            string effectiveKey = _apiKey;
+
+            if (string.IsNullOrEmpty(effectiveKey))
+            {
+                effectiveKey = McpSettings.ApiKey;
+            }
+
+            if (string.IsNullOrEmpty(effectiveKey))
+            {
+                return false;
+            }
+
+            string apiKey = request.Headers["X-Api-Key"];
+            return apiKey == effectiveKey;
+        }
+
+        private bool IsIpAllowed(HttpListenerRequest request)
+        {
+            List<McpAllowedIp> allowedIps = McpSettings.AllowedIps;
+            if (allowedIps == null || allowedIps.Count == 0)
+            {
+                return false;
+            }
+
+            IPAddress remoteAddress = request.RemoteEndPoint?.Address;
+            if (remoteAddress == null)
+            {
+                return false;
+            }
+
+            int remotePort = request.RemoteEndPoint.Port;
+
+            foreach (McpAllowedIp allowed in allowedIps)
+            {
+                if (string.IsNullOrWhiteSpace(allowed.Ip))
+                {
+                    continue;
+                }
+
+                if (!IPAddress.TryParse(allowed.Ip, out IPAddress allowedAddress))
+                {
+                    continue;
+                }
+
+                bool addressMatch = remoteAddress.Equals(allowedAddress)
+                    || remoteAddress.MapToIPv6().Equals(allowedAddress.MapToIPv6());
+
+                if (!addressMatch)
+                {
+                    continue;
+                }
+
+                if (string.IsNullOrWhiteSpace(allowed.Port)
+                    || string.Equals(allowed.Port, "any", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                if (int.TryParse(allowed.Port, out int allowedPort)
+                    && allowedPort == remotePort)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private void ProcessJsonRpc(HttpListenerRequest request, HttpListenerResponse response, bool lockedMode = false)
+        {
+            string body;
+            using (StreamReader reader = new StreamReader(request.InputStream, Encoding.UTF8))
+            {
+                body = reader.ReadToEnd();
+            }
+
+            if (McpSettings.IsFullLogEnabled)
+            {
+                Log.ProcessMessage($"[FullLog] RPC request body: {SanitizeSecretsForLog(body)}", LogMessageType.System);
+            }
+
+            McpJsonRpcResponse rpcResponse = null;
+
+            try
+            {
+                McpJsonRpcRequest rpcRequest = JsonSerializer.Deserialize<McpJsonRpcRequest>(body);
+
+                if (rpcRequest == null)
+                {
+                    rpcResponse = new McpJsonRpcResponse
+                    {
+                        JsonRpc = "2.0",
+                        Error = new McpJsonRpcError { Code = -32700, Message = "Parse error" }
+                    };
+                }
+                else if (rpcRequest.Id == null)
+                {
+                    // JSON-RPC notification: no response required
+                    _protocolApi.HandleNotification(rpcRequest);
+                }
+                else if (lockedMode && IsUnlockCallAllowed(rpcRequest) == false)
+                {
+                    rpcResponse = new McpJsonRpcResponse
+                    {
+                        JsonRpc = "2.0",
+                        Id = rpcRequest.Id,
+                        Error = new McpJsonRpcError
+                        {
+                            Code = -32601,
+                            Message = "Encryptor is locked. Only encryption_unlock is available (no API key required)"
+                        }
+                    };
+                }
+                else
+                {
+                    rpcResponse = HandleMethod(rpcRequest, true);
+                }
+            }
+            catch (JsonException error)
+            {
+                rpcResponse = new McpJsonRpcResponse
+                {
+                    JsonRpc = "2.0",
+                    Error = new McpJsonRpcError { Code = -32700, Message = error.Message }
+                };
+            }
+            catch (Exception error)
+            {
+                rpcResponse = new McpJsonRpcResponse
+                {
+                    JsonRpc = "2.0",
+                    Error = new McpJsonRpcError { Code = -32603, Message = error.Message }
+                };
+            }
+
+            if (rpcResponse == null)
+            {
+                // notification: no response body
+                response.StatusCode = 202;
+                response.Close();
+                return;
+            }
+
+            if (McpSettings.IsFullLogEnabled)
+            {
+                string responseJson = JsonSerializer.Serialize(rpcResponse, FullLogJsonOptions);
+                Log.ProcessMessage($"[FullLog] RPC response: {SanitizeSecretsForLog(responseJson)}", LogMessageType.System);
+            }
+
+            SendJson(response, 200, rpcResponse, true);
+        }
+
+        private const string SupportedProtocolVersion = "2024-11-05";
+
+        #region FullLog sanitization
+
+        // BUG-0138: FullLog пишет тела запросов/ответов — секреты маскируются на стороне записи в лог.
+        // Fail-closed: не-JSON/битое/слишком глубокое тело → плейсхолдер с длиной, никогда не raw.
+        // Возвращает тело БЕЗ префикса «[FullLog]» — префикс остаётся в строке лога у колл-сайта.
+        internal static string SanitizeSecretsForLog(string json)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(json))
+                {
+                    return "<empty body>";
+                }
+
+                using JsonDocument document = JsonDocument.Parse(json);
+                using MemoryStream stream = new MemoryStream();
+                using (Utf8JsonWriter writer = new Utf8JsonWriter(stream, FullLogWriterOptions))
+                {
+                    WriteSanitized(writer, document.RootElement);
+                }
+
+                return Encoding.UTF8.GetString(stream.ToArray());
+            }
+            catch (Exception error)
+            {
+                return $"<non-json body: {error.GetType().Name}, {Encoding.UTF8.GetByteCount(json ?? string.Empty)} bytes>";
+            }
+        }
+
+        // JsonDocument+Utf8JsonWriter: дубликаты ключей и порядок сохранены, числа raw-токеном без дрейфа
+        private static void WriteSanitized(Utf8JsonWriter writer, JsonElement element)
+        {
+            switch (element.ValueKind)
+            {
+                case JsonValueKind.Object:
+                    writer.WriteStartObject();
+                    foreach (JsonProperty property in element.EnumerateObject())
+                    {
+                        writer.WritePropertyName(property.Name);
+                        if (IsSecretKey(property.Name)
+                            || (property.NameEquals("value") && IsSecretParameterObject(element)))
+                        {
+                            WriteMasked(writer, property.Value);
+                        }
+                        else if (property.Value.ValueKind == JsonValueKind.String && property.Name.Equals("Text", StringComparison.OrdinalIgnoreCase))
+                        {
+                            writer.WriteStringValue(SanitizeEmbeddedJsonString(property.Value.GetString()));
+                        }
+                        else
+                        {
+                            WriteSanitized(writer, property.Value);
+                        }
+                    }
+                    writer.WriteEndObject();
+                    break;
+
+                case JsonValueKind.Array:
+                    writer.WriteStartArray();
+                    foreach (JsonElement item in element.EnumerateArray())
+                    {
+                        WriteSanitized(writer, item);
+                    }
+                    writer.WriteEndArray();
+                    break;
+
+                case JsonValueKind.String:
+                    writer.WriteStringValue(element.GetString());
+                    break;
+
+                case JsonValueKind.Number:
+                    writer.WriteRawValue(element.GetRawText());
+                    break;
+
+                case JsonValueKind.True:
+                case JsonValueKind.False:
+                    writer.WriteBooleanValue(element.GetBoolean());
+                    break;
+
+                default:
+                    writer.WriteNullValue();
+                    break;
+            }
+        }
+
+        // эхо инструментов лежит JSON-строкой в Text: ключи секретов внутри него иначе уходят в дамп открытыми; shortcut: JSON под другими ключами не вскрывается
+        private static string SanitizeEmbeddedJsonString(string text)
+        {
+            string trimmed = text.TrimStart();
+            if (trimmed.Length == 0 || (trimmed[0] != '{' && trimmed[0] != '['))
+            {
+                return text;
+            }
+
+            try
+            {
+                using JsonDocument document = JsonDocument.Parse(text);
+                using MemoryStream stream = new MemoryStream();
+                using (Utf8JsonWriter writer = new Utf8JsonWriter(stream, FullLogWriterOptions))
+                {
+                    WriteSanitized(writer, document.RootElement);
+                }
+
+                return Encoding.UTF8.GetString(stream.ToArray());
+            }
+            catch (Exception)
+            {
+                return $"<embedded payload: unparsable, {Encoding.UTF8.GetByteCount(text)} bytes>";
+            }
+        }
+
+        // строка — канон MaskSecret (2+2), не-строка под секретным полем — целиком в «****»
+        private static void WriteMasked(Utf8JsonWriter writer, JsonElement element)
+        {
+            if (element.ValueKind == JsonValueKind.String)
+            {
+                writer.WriteStringValue(ServerInstanceApi.MaskSecret(element.GetString()));
+            }
+            else
+            {
+                writer.WriteStringValue("****");
+            }
+        }
+
+        private static bool IsSecretKey(string name)
+        {
+            return name.Equals("password", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("apikey", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("api_key", StringComparison.OrdinalIgnoreCase)
+                // BUG-0421: public key — partial credential identifier, masked in FullLog dumps too
+                || name.Equals("public_key", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("publickey", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("token", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("secret", StringComparison.OrdinalIgnoreCase)
+                // login прокси-конфига и username-формы уходят в FullLog-дампы открытым текстом (proxy_create/proxy_set_settings)
+                || name.Equals("login", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("username", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("user_name", StringComparison.OrdinalIgnoreCase);
+        }
+
+        // set_params request: секрет по имени параметра (тип в запросе не приходит); shortcut: неговорящее имя (NinjaTrader «Port») не ловится.
+        // BUG-0421: имя Public key (и ключевые формы api/public key) — тоже секрет, частичный идентификатор.
+        // BUG-0424: «Api key» Polygon (с пробелом) — ниже через contains "api key"; «Client Secret»/«Request Token» уже ловятся clause secret/token.
+        // На проводе tool-эхо — строка content[].text: JSON-кандидат под ключом Text вскрывается рекурсивно; на source эхо уже маскировано; type=="Password" — defense-in-depth на прямом result.
+        private static bool IsSecretParameterObject(JsonElement element)
+        {
+            if (element.TryGetProperty("type", out JsonElement type)
+                && type.ValueKind == JsonValueKind.String
+                && type.GetString() == "Password")
+            {
+                return true;
+            }
+
+            if (element.TryGetProperty("name", out JsonElement name)
+                && name.ValueKind == JsonValueKind.String)
+            {
+                string paramName = name.GetString() ?? string.Empty;
+                return paramName.Contains("password", StringComparison.OrdinalIgnoreCase)
+                    || paramName.Contains("token", StringComparison.OrdinalIgnoreCase)
+                    || paramName.Contains("secret", StringComparison.OrdinalIgnoreCase)
+                    || paramName.Contains("hash", StringComparison.OrdinalIgnoreCase)
+                    || paramName.Contains("passphrase", StringComparison.OrdinalIgnoreCase)
+                    || paramName.Contains("public key", StringComparison.OrdinalIgnoreCase)
+                    || paramName.Contains("public_key", StringComparison.OrdinalIgnoreCase)
+                    || paramName.Contains("publickey", StringComparison.OrdinalIgnoreCase)
+                    || paramName.Contains("apikey", StringComparison.OrdinalIgnoreCase)
+                    || paramName.Contains("api_key", StringComparison.OrdinalIgnoreCase)
+                    || paramName.Contains("api key", StringComparison.OrdinalIgnoreCase);
+            }
+
+            return false;
+        }
+
+        #endregion
+
+        private void ProcessStreamableHttp(HttpListenerRequest request, HttpListenerResponse response, bool lockedMode = false)
+        {
+            try
+            {
+                if (lockedMode)
+                {
+                    ProcessStreamableLocked(request, response);
+                    return;
+                }
+
+                if (request.HttpMethod == "DELETE")
+                {
+                    ProcessSessionDelete(request, response);
+                    return;
+                }
+
+                if (request.HttpMethod == "GET")
+                {
+                    ProcessStreamableSse(request, response);
+                    return;
+                }
+
+                if (request.HttpMethod != "POST")
+                {
+                    SendError(response, 405, "Method Not Allowed");
+                    return;
+                }
+
+                string body;
+                using (StreamReader reader = new StreamReader(request.InputStream, Encoding.UTF8))
+                {
+                    body = reader.ReadToEnd();
+                }
+
+                McpJsonRpcRequest rpcRequest;
+                try
+                {
+                    rpcRequest = JsonSerializer.Deserialize<McpJsonRpcRequest>(body);
+                }
+                catch (JsonException)
+                {
+                    SendError(response, 400, "Invalid JSON-RPC message");
+                    return;
+                }
+
+                if (rpcRequest == null)
+                {
+                    SendError(response, 400, "Invalid JSON-RPC message");
+                    return;
+                }
+
+                // notification / response -> 202 Accepted без тела
+                // shortcut: заголовочный Close без тела не гардим; парный v1-аналог — ProcessJsonRpc
+                // (стр.1107-1108 в базе 6428eb062); риск нулевого окна на пакет заголовков минимален,
+                // апгрейд — в TryWriteResponse, если по логам висяк на 202-пути появится
+                if (rpcRequest.Id == null)
+                {
+                    if (rpcRequest.Method != null)
+                    {
+                        _protocolApi.HandleNotification(rpcRequest);
+
+                        if (rpcRequest.Method == "notifications/initialized")
+                        {
+                            MarkSessionInitialized(request);
+                        }
+                    }
+
+                    response.StatusCode = 202;
+                    response.Close();
+                    return;
+                }
+
+                // заголовок версии протокола: обязателен на последующих запросах, неверный -> 400
+                if (rpcRequest.Method != "initialize")
+                {
+                    string versionHeader = request.Headers["MCP-Protocol-Version"];
+                    if (!string.IsNullOrEmpty(versionHeader) && versionHeader != SupportedProtocolVersion)
+                    {
+                        SendError(response, 400, $"Invalid MCP-Protocol-Version: {versionHeader}");
+                        return;
+                    }
+                }
+
+                if (rpcRequest.Method == "initialize")
+                {
+                    McpJsonRpcResponse rpcResponse = HandleMethod(rpcRequest, false);
+                    string sessionId = Guid.NewGuid().ToString("N");
+                    StreamableSession sessionState = new StreamableSession
+                    {
+                        Created = DateTime.UtcNow,
+                        Initialized = false,
+                        LoggingEnabled = ClientSupportsLogging(rpcRequest)
+                    };
+                    _sessions[sessionId] = sessionState;
+                    response.Headers.Add("Mcp-Session-Id", sessionId);
+                    SendJson(response, 200, rpcResponse, false);
+                    return;
+                }
+
+                // прочие запросы требуют сессии
+                string session = request.Headers["Mcp-Session-Id"];
+                if (string.IsNullOrEmpty(session))
+                {
+                    SendError(response, 400, "Mcp-Session-Id header is required");
+                    return;
+                }
+
+                if (!_sessions.ContainsKey(session))
+                {
+                    SendError(response, 404, "Session not found");
+                    return;
+                }
+
+                CaptureProgressToken(rpcRequest, session);
+
+                McpJsonRpcResponse result = HandleMethod(rpcRequest, false);
+                SendJson(response, 200, result, false);
+            }
+            catch (Exception error)
+            {
+                if (IsClientAbort(error))
+                {
+                    // штатный обрыв клиента: 500 в мёртвый сокет не отправляем, уровень Connect (BUG-0292)
+                    Log.ProcessMessage($"[StreamableHttp] client aborted request {request?.HttpMethod} /api/v2/mcp: {error.Message}", LogMessageType.Connect);
+                }
+                else
+                {
+                    Log.ProcessMessage(error.ToString(), LogMessageType.Error);
+                    try
+                    {
+                        SendError(response, 500, "Internal server error");
+                    }
+                    catch
+                    {
+                        // ignore
+                    }
+                }
+            }
+        }
+
+        // locked-режим на v2: initialize создаёт сессию, из инструментов разрешён только encryption_unlock
+        private void ProcessStreamableLocked(HttpListenerRequest request, HttpListenerResponse response)
+        {
+            if (request.HttpMethod != "POST")
+            {
+                SendError(response, 401, "Encryptor is locked. Call encryption_unlock first (no API key required)");
+                return;
+            }
+
+            string body;
+            using (StreamReader reader = new StreamReader(request.InputStream, Encoding.UTF8))
+            {
+                body = reader.ReadToEnd();
+            }
+
+            McpJsonRpcRequest rpcRequest;
+            try
+            {
+                rpcRequest = JsonSerializer.Deserialize<McpJsonRpcRequest>(body);
+            }
+            catch (JsonException)
+            {
+                SendError(response, 400, "Invalid JSON-RPC message");
+                return;
+            }
+
+            if (rpcRequest == null || rpcRequest.Id == null)
+            {
+                SendError(response, 401, "Encryptor is locked. Call encryption_unlock first (no API key required)");
+                return;
+            }
+
+            if (rpcRequest.Method == "initialize")
+            {
+                McpJsonRpcResponse rpcResponse = HandleMethod(rpcRequest, false);
+                string sessionId = Guid.NewGuid().ToString("N");
+                _sessions[sessionId] = new StreamableSession
+                {
+                    Created = DateTime.UtcNow,
+                    Initialized = false,
+                    LoggingEnabled = ClientSupportsLogging(rpcRequest)
+                };
+                response.Headers.Add("Mcp-Session-Id", sessionId);
+                SendJson(response, 200, rpcResponse, false);
+                return;
+            }
+
+            if (rpcRequest.Method == "tools/call" && IsUnlockCallAllowed(rpcRequest))
+            {
+                McpJsonRpcResponse rpcResponse = HandleMethod(rpcRequest, false);
+                SendJson(response, 200, rpcResponse, false);
+                return;
+            }
+
+            SendError(response, 401, "Encryptor is locked. Call encryption_unlock first (no API key required)");
+        }
+
+        private void ProcessSessionDelete(HttpListenerRequest request, HttpListenerResponse response)
+        {
+            string session = request.Headers["Mcp-Session-Id"];
+
+            if (string.IsNullOrEmpty(session))
+            {
+                SendError(response, 400, "Mcp-Session-Id header is required");
+                return;
+            }
+
+            if (_sessions.TryRemove(session, out _))
+            {
+                CloseStreamableStream(session);
+                response.StatusCode = 200;
+                response.Close();
+            }
+            else
+            {
+                SendError(response, 404, "Session not found");
+            }
+        }
+
+        // GET-стрим v2: сервер -> клиент события (JSON-RPC notifications по event: message)
+        private void ProcessStreamableSse(HttpListenerRequest request, HttpListenerResponse response)
+        {
+            string session = request.Headers["Mcp-Session-Id"];
+
+            if (string.IsNullOrEmpty(session))
+            {
+                SendError(response, 400, "Mcp-Session-Id header is required");
+                return;
+            }
+
+            if (!_sessions.ContainsKey(session))
+            {
+                SendError(response, 404, "Session not found");
+                return;
+            }
+
+            response.ContentType = "text/event-stream";
+            response.Headers.Add("Cache-Control", "no-cache");
+            response.StatusCode = 200;
+
+            StreamableStream stream = new StreamableStream { Response = response, SessionId = session };
+
+            // Регистрация внутри try: иначе бросок между регистрацией и try оставляет осиротевшую запись —
+            // фантом в рассылке до DELETE/re-GET/Stop (BUG-0331); finally снимает своей compare-and-remove
+            try
+            {
+                _streamableStreams[session] = stream;
+
+                // BUG-0374: DELETE мог пройти между проверкой выше и регистрацией — он снял сессию и не
+                // нашёл ещё не зарегистрированный стрим. Пост-регистрационный re-check: сессия уже мертва —
+                // отвечаем 404 и снимаем свою регистрацию. Заголовки ещё не флашены (первый флаш — hello
+                // ниже), SendError до снятия: после Abort (в Close) ответ уже не уходит.
+                // Успевший пройти позже DELETE регистрацию найдёт в ProcessSessionDelete и закроет стрим сам.
+                // С 0331 re-check внутри try, а не до него: регистрация переехала в try (0331). Бросок от re-check не
+                // оставляет регистрации: finally делает тот же compare-and-remove, бросок разбирает catch ProcessRequest — сироты нет
+                if (!_sessions.ContainsKey(session))
+                {
+                    SendError(response, 404, "Session not found");
+                    CloseStreamableStream(session, stream);
+                    return;
+                }
+
+                WelcomeFrameHookForTests?.Invoke();
+
+                // как и в v1 (ProcessSse), шлём terminal.launched сразу при подключении
+                EnqueueToStream(stream, BuildMessageFrame("terminal.launched", GetTerminalStatusSafe()));
+
+                // SSE-комментарий сразу флашит заголовки, иначе клиент не получит их до первого события
+                byte[] hello = Encoding.UTF8.GetBytes(": connected\n\n");
+                if (!TryWriteStreamable(response, hello, session))
+                {
+                    return;
+                }
+
+                // единственный поток, который пишет в этот response: разгребает очередь событий
+                while (!_cts.IsCancellationRequested)
+                {
+                    string frame;
+                    bool wroteData = false;
+
+                    while (stream.Outgoing.TryDequeue(out frame))
+                    {
+                        try
+                        {
+                            byte[] frameBytes = Encoding.UTF8.GetBytes(frame);
+                            if (!TryWriteStreamable(response, frameBytes, session))
+                            {
+                                return;
+                            }
+                            wroteData = true;
+                        }
+                        catch (Exception writeError)
+                        {
+                            if (IsClientAbort(writeError))
+                            {
+                                // штатный разрыв потока клиентом — Connect, а не Error-шум (BUG-0292); Message и ErrorCode сохраняем
+                                int abortCode = writeError is HttpListenerException abortListenerError ? abortListenerError.ErrorCode
+                                    : writeError.InnerException is HttpListenerException innerListenerError ? innerListenerError.ErrorCode : 0;
+                                Log.ProcessMessage($"[StreamableHttp] client stream closed (session={session}): {writeError.Message} (ErrorCode={abortCode})", LogMessageType.Connect);
+                            }
+                            else
+                            {
+                                Log.ProcessMessage($"[StreamableHttp] write failed (session={session}): {writeError.Message}", LogMessageType.Error);
+                            }
+                            wroteData = false;
+                            break;
+                        }
+                    }
+
+                    if (!wroteData)
+                    {
+                        // периодический комментарий обнаруживает разрыв соединения
+                        try
+                        {
+                            byte[] keepAlive = Encoding.UTF8.GetBytes(": keep-alive\n\n");
+                            if (!TryWriteStreamable(response, keepAlive, session))
+                            {
+                                return;
+                            }
+                        }
+                        catch
+                        {
+                            break;
+                        }
+                    }
+
+                    stream.Signal.WaitOne(15000);
+                }
+            }
+            finally
+            {
+                CloseStreamableStream(session, stream);
+            }
+        }
+
+        // Таймаут per-frame записи v2-SSE: 10 с НИЖЕ keep-alive цикла 15 с (WaitOne в ProcessStreamableSse),
+        // поэтому зависание видно за один виток; локальная запись — миллисекунды.
+        // Общий потолок и для одиночных POST-ответов: TryWriteResponse (BUG-0329).
+        // shortcut: порог константой, апгрейд — в конфигурацию, если живые клиенты начнут падать
+        private const int StreamableSendTimeoutMs = 10000;
+
+        // true = записано; false = клиент признан зависшим: лог уже написан, коннект разорвёт
+        // CloseStreamableStream в finally. Возврат вместо исключения — чтобы штатный разрыв висяка
+        // не дошёл ни до одного Error-логера (catch writeError и общий catch ProcessStreamableHttp),
+        // а Error уходит в SetNewErrorMessage -> окно ошибки + Beep.
+        private bool TryWriteStreamable(HttpListenerResponse response, byte[] bytes, string session)
+        {
+            // LongRunning здесь обязателен (BUG-0459): Task.Run на насыщении ThreadPool не стартует
+            // в StreamableSendTimeoutMs, и гард принимает это за зависшего клиента — убит оказывается
+            // здоровый подписчик. Dedicated-поток стартует запись немедленно; писатель здесь
+            // последовательный по одному, зависший гасится тем же потолком
+            Task write = Task.Factory.StartNew(() =>
+            {
+                response.OutputStream.Write(bytes, 0, bytes.Length);
+                response.OutputStream.Flush();
+            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+            Exception reason;
+            try
+            {
+                // наблюдатель вешается ДО Wait/разрыва: покинутый воркер не должен остаться
+                // с UnobservedTaskException (урок BUG-0305); своего лога нет — один лог на разрыв ниже
+                write.ContinueWith(t => ObserveAbandonedWriter(t), TaskContinuationOptions.OnlyOnFaulted);
+
+                if (write.Wait(StreamableSendTimeoutMs))
+                {
+                    return true;
+                }
+                reason = new TimeoutException($"send blocked over {StreamableSendTimeoutMs} ms");
+            }
+            catch (AggregateException error)
+            {
+                // Wait на завершившемся сбоем Task даёт AggregateException: берём истинный тип,
+                // иначе имя исключения в логе теряется и его нечем сверять
+                reason = error.GetBaseException();
+            }
+
+            // единственный лог разрыва, уровень Connect (обывный обрыв клиента, см. BUG-0292/BUG-0305)
+            Log.ProcessMessage($"[StreamableHttp] client stream killed (session={session}, {reason.GetType().Name}: {reason.Message})", LogMessageType.Connect);
+            return false;
+        }
+
+        // Обращение к Task.Exception помечает исключение наблюдаемым. Отдельного лога здесь нет:
+        // маркер разрыва пишется один раз в TryWriteStreamable
+        private static void ObserveAbandonedWriter(Task abandoned)
+        {
+            abandoned.Exception?.GetType();
+        }
+
+        // Ограниченная по времени запись в v1-SSE (BUG-0330). Фан-аут SendEvent пишется под общим
+        // _sseClientsLocker: без гарда один zero-window клиент вешал под локом всех продюсеров
+        // (publishEvent, UI-путь) и морил v2-очереди — резидуал v1, куда гарды 0327/0329 не дошли.
+        // true = записано; false = клиент признан зависшим по таймауту: лог разрыва сделан, коллер
+        // рвёт коннект Abort-ом и снимает клиента. Сбой записи — rethrow истинного исключения:
+        // штатные catch путей сохраняют молчаливую семантику обрыва (урок BUG-0292: обрыв != Error).
+        private bool TryWriteSse(HttpListenerResponse response, byte[] bytes)
+        {
+            // LongRunning здесь обязателен (BUG-0459) — та же причина, что в TryWriteStreamable: на насыщении
+            // ThreadPool пул-запись не стартует в потолок, и fan-out SendEvent убивает здорового подписчика
+            // (эвиденс BUG-0459: kill@+12с при 512 блокерах). Гарантия 0330 сохранена: вызывающий ждёт тот же
+            // StreamableSendTimeoutMs и гасит зависшего kill-ом; фан-аут не блокируется на медленном дольше потолка
+            Task write = Task.Factory.StartNew(() =>
+            {
+                response.OutputStream.Write(bytes, 0, bytes.Length);
+                response.OutputStream.Flush();
+            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+            Exception reason;
+            try
+            {
+                // наблюдатель вешается безусловно ДО Wait, на всех путях: покинутый на таймауте
+                // воркер не должен остаться с UnobservedTaskException (урок BUG-0305, прецеденты
+                // TryWriteStreamable/TryWriteResponse)
+                write.ContinueWith(t => ObserveAbandonedWriter(t), TaskContinuationOptions.OnlyOnFaulted);
+
+                if (write.Wait(StreamableSendTimeoutMs))
+                {
+                    return true;
+                }
+                reason = new TimeoutException($"send blocked over {StreamableSendTimeoutMs} ms");
+            }
+            catch (AggregateException error)
+            {
+                // Wait на завершившемся сбоем Task бросает AggregateException — коллеру истинный тип
+                throw error.GetBaseException();
+            }
+
+            // Единственный лог разрыва, Connect: обычный обрыв клиента, не ошибка (урок BUG-0292).
+            // Пишется в Log этого экземпляра: метод вызывают на хосте-владельце клиента
+            Log.ProcessMessage($"[MCP] v1 SSE client killed ({reason.GetType().Name}: {reason.Message})", LogMessageType.Connect);
+            return false;
+        }
+
+        private void CloseStreamableStream(string session)
+        {
+            if (_streamableStreams.TryRemove(session, out StreamableStream stream))
+            {
+                try
+                {
+                    stream.Signal.Set();
+                    // Abort вместо Close: Close имеет flush-семантику и сам блокируется на коннекте,
+                    // зависшем в Write (BUG-0327). Abort рвёт коннект немедленно и разблокирует писатель
+                    stream.Response.Abort();
+                }
+                catch
+                {
+                    // ignore
+                }
+            }
+        }
+
+        // Самоликвидация GET-цикла (BUG-0328): снимаем ТОЛЬКО свою регистрацию.
+        // Если сессия уже перерегистрирована новым стримом — запись не трогаем:
+        // разрыв dying-стрима иначе рвёт живой (снятие по ключу их не различает).
+        // Свой response закрываем всегда: его писатель — этот покидающий поток, гонки с новым писателем нет
+        private void CloseStreamableStream(string session, StreamableStream expected)
+        {
+            // compare-and-remove: равенство KeyValuePair сверяет ключ и эталонное равенство значения
+            ((ICollection<KeyValuePair<string, StreamableStream>>)_streamableStreams)
+                .Remove(new KeyValuePair<string, StreamableStream>(session, expected));
+
+            try
+            {
+                expected.Signal.Set();
+                expected.Response.Abort();
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
+        private void CaptureProgressToken(McpJsonRpcRequest request, string session)
+        {
+            if (request.Method != "tools/call")
+            {
+                return;
+            }
+
+            try
+            {
+                if (request.Params.ValueKind == JsonValueKind.Object
+                    && request.Params.TryGetProperty("_meta", out JsonElement meta)
+                    && meta.ValueKind == JsonValueKind.Object
+                    && meta.TryGetProperty("progressToken", out JsonElement token)
+                    && (token.ValueKind == JsonValueKind.String || token.ValueKind == JsonValueKind.Number))
+                {
+                    string tokenValue = token.ValueKind == JsonValueKind.Number ? token.GetRawText() : token.GetString();
+                    _sessionProgressTokens[session] = tokenValue;
+                }
+            }
+            catch
+            {
+                // невалидный _meta — прогресс не запрошен
+            }
+        }
+
+        private void MarkSessionInitialized(HttpListenerRequest request)
+        {
+            string session = request.Headers["Mcp-Session-Id"];
+
+            if (string.IsNullOrEmpty(session))
+            {
+                return;
+            }
+
+            if (_sessions.TryGetValue(session, out StreamableSession sessionState))
+            {
+                sessionState.Initialized = true;
+            }
+        }
+
+        private static bool ClientSupportsLogging(McpJsonRpcRequest request)
+        {
+            try
+            {
+                if (request.Params.ValueKind == JsonValueKind.Object
+                    && request.Params.TryGetProperty("capabilities", out JsonElement capabilities)
+                    && capabilities.ValueKind == JsonValueKind.Object
+                    && capabilities.TryGetProperty("logging", out _))
+                {
+                    return true;
+                }
+            }
+            catch
+            {
+                // невалидные параметры initialize — logging не заявлен
+            }
+
+            return false;
+        }
+
+        private bool IsUnlockCallAllowed(McpJsonRpcRequest request)
+        {
+            if (request.Method != "tools/call")
+            {
+                return false;
+            }
+
+            if (request.Params.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            if (request.Params.TryGetProperty("name", out JsonElement nameElement) == false)
+            {
+                return false;
+            }
+
+            return nameElement.GetString() == "encryption_unlock";
+        }
+
+        private McpJsonRpcResponse HandleMethod(McpJsonRpcRequest request, bool legacyFormat)
+        {
+            McpJsonRpcResponse response = new McpJsonRpcResponse
+            {
+                JsonRpc = "2.0",
+                Id = request.Id
+            };
+
+            try
+            {
+                switch (request.Method)
+                {
+                    case "initialize":
+                    case "tools/list":
+                    case "tools/call":
+                        response = _protocolApi.Handle(request, legacyFormat);
+                        break;
+
+                    default:
+                        response.Error = new McpJsonRpcError
+                        {
+                            Code = -32601,
+                            Message = $"Method '{request.Method}' not found. Use tools/call."
+                        };
+                        break;
+                }
+            }
+            catch (Exception error)
+            {
+                response.Error = new McpJsonRpcError
+                {
+                    Code = -32603,
+                    Message = error.Message
+                };
+            }
+
+            return response;
+        }
+
+        private McpJsonRpcResponse ExecuteTool(McpJsonRpcRequest request)
+        {
+            McpJsonRpcResponse response = new McpJsonRpcResponse
+            {
+                JsonRpc = "2.0",
+                Id = request.Id
+            };
+
+            try
+            {
+                switch (request.Method)
+                {
+                    case "ping":
+                        response.Result = "pong";
+                        break;
+
+                    case "terminal_get_status":
+                    case "terminal_launch":
+                    case "terminal_stop":
+                    case "terminal_kill":
+                    case "terminal_open_mode":
+                        response = _terminalApi.Handle(request);
+                        break;
+
+                    case "log_get_emergency_log":
+                    case "log_get_mcp_log":
+                        response = _logsApi.Handle(request);
+                        break;
+
+                    case "prime_settings_get":
+                    case "prime_settings_set":
+                        response = _settingsApi.Handle(request);
+                        break;
+
+                    case "mcp_settings_get":
+                    case "mcp_settings_set":
+                        response = _configApi.Handle(request);
+                        break;
+
+                    case "server_management_get_list":
+                    case "server_management_activate":
+                    case "server_management_get_trade_connectors":
+                    case "server_management_get_data_connectors":
+                    case "server_management_get_connector_permissions":
+                    case "server_management_get_data_timeframes":
+                        response = _serverManagementApi.Handle(request);
+                        break;
+
+                    case "server_instance_get_params":
+                    case "server_instance_set_params":
+                    case "server_instance_create":
+                    case "server_instance_delete":
+                    case "server_instance_connect":
+                    case "server_instance_disconnect":
+                    case "server_instance_get_securities":
+                    case "server_instance_get_portfolios":
+                    case "server_instance_get_status":
+                    case "server_instance_get_log":
+                        response = _serverInstanceApi.Handle(request);
+                        break;
+
+                    case "wiki_robots_list":
+                    case "wiki_robot_info":
+                        response = _wikiRobotsApi.Handle(request);
+                        break;
+
+                    case "wiki_indicators_list":
+                    case "wiki_indicator_info":
+                        response = _wikiIndicatorsApi.Handle(request);
+                        break;
+
+                    case "wiki_securities_moex_iss":
+                    case "wiki_securities_tinvest":
+                    case "wiki_securities_alor":
+                    case "wiki_securities_qscalp":
+                    case "wiki_securities_mapping_info":
+                        response = _wikiSecuritiesApi.Handle(request);
+                        break;
+
+                    case "wiki_dividends_get_history":
+                    case "wiki_dividends_get_future":
+                    case "wiki_dividends_get_past":
+                    case "wiki_dividends_search_by_date":
+                        response = _wikiDividendsApi.Handle(request);
+                        break;
+
+                    case "data_get_sets":
+                    case "data_create_set":
+                    case "data_delete_set":
+                    case "data_set_settings_get":
+                    case "data_set_settings_set":
+                    case "data_set_securities_get":
+                    case "data_set_securities_add":
+                    case "data_set_securities_remove":
+                    case "data_set_on":
+                    case "data_set_off":
+                    case "data_get_set_status":
+                    case "data_get_security_status":
+                        response = _osDataApi.Handle(request);
+                        break;
+
+                    case "bot_get_list":
+                    case "bot_create":
+                    case "bot_delete":
+                    case "bot_get_params":
+                    case "bot_set_params":
+                    case "bot_get_sources":
+                    case "bot_get_config_tab_simple":
+                    case "bot_set_config_tab_simple":
+                    case "bot_get_config_tab_screener":
+                    case "bot_set_config_tab_screener":
+                        response = _robotsApi.Handle(request);
+                        break;
+
+                    case "tester_data_get_config":
+                    case "tester_data_get_available_sets":
+                    case "tester_get_securities":
+                    case "tester_data_set_config":
+                    case "tester_execution_get_config":
+                    case "tester_execution_set_config":
+                    case "tester_portfolio_get_config":
+                    case "tester_portfolio_set_config":
+                    case "tester_charges_get_config":
+                    case "tester_charges_set_config":
+                    case "tester_start":
+                    case "tester_pause":
+                    case "tester_fast_forward":
+                    case "tester_step_forward":
+                    case "tester_stop":
+                    case "tester_get_status":
+                    case "tester_get_report":
+                        response = _testerApi.Handle(request);
+                        break;
+
+                    case "system_load_get_current":
+                    case "system_load_get_history":
+                    case "system_load_get_settings":
+                    case "system_load_set_settings":
+                        response = _systemLoadApi.Handle(request);
+                        break;
+
+                    case "compare_positions_get":
+                    case "compare_positions_get_settings":
+                    case "compare_positions_set_settings":
+                    case "compare_positions_set_ignored":
+                    case "compare_positions_sync_all":
+                    case "compare_positions_sync_this":
+                        response = _comparePositionsApi.Handle(request);
+                        break;
+
+                    case "proxy_get_list":
+                    case "proxy_create":
+                    case "proxy_delete":
+                    case "proxy_get_settings":
+                    case "proxy_set_settings":
+                    case "proxy_get_status":
+                    case "proxy_ping":
+                        response = _proxyApi.Handle(request);
+                        break;
+
+                    case "encryption_get_status":
+                    case "encryption_unlock":
+                    case "encryption_enable":
+                    case "encryption_disable":
+                        response = _encryptionApi.Handle(request);
+                        break;
+
+                    case "update_check":
+                    case "update_apply":
+                        response = _updateApi.Handle(request);
+                        break;
+
+                    case "optimizer_data_get_config":
+                    case "optimizer_data_set_config":
+                    case "optimizer_data_get_status":
+                    case "optimizer_dividends_get_config":
+                    case "optimizer_dividends_set_config":
+                    case "optimizer_bot_get":
+                    case "optimizer_bot_set":
+                    case "optimizer_bot_tab_get_config":
+                    case "optimizer_bot_tab_set_config":
+                    case "optimizer_trade_settings_get":
+                    case "optimizer_trade_settings_set":
+                    case "optimizer_cache_get":
+                    case "optimizer_cache_set":
+                    case "optimizer_position_support_get":
+                    case "optimizer_position_support_set":
+                    case "optimizer_phases_get":
+                    case "optimizer_phases_set":
+                    case "optimizer_filters_get":
+                    case "optimizer_filters_set":
+                    case "optimizer_params_get":
+                    case "optimizer_params_set":
+                    case "optimizer_params_reset":
+                    case "optimizer_get_pass_count":
+                    case "optimizer_get_threads":
+                    case "optimizer_set_threads":
+                    case "optimizer_start":
+                    case "optimizer_stop":
+                    case "optimizer_get_status":
+                    case "optimizer_get_report":
+                    case "optimizer_save_report":
+                    case "optimizer_load_report":
+                    case "optimizer_save_report_db":
+                    case "optimizer_list_report_db":
+                    case "optimizer_load_report_db":
+                    case "optimizer_delete_report_db":
+                    case "optimizer_query_report_db":
+                    case "optimizer_db_cleanup":
+                        response = _optimizerApi.Handle(request);
+                        break;
+
+                    default:
+                        if (request.Method != null && request.Method.StartsWith("bot_"))
+                        {
+                            response = _robotsApi.Handle(request);
+                        }
+                        else if (request.Method != null && request.Method.StartsWith("allocation_"))
+                        {
+                            response = _capitalAllocationApi.Handle(request);
+                        }
+                        else
+                        {
+                            response.Error = new McpJsonRpcError
+                            {
+                                Code = -32601,
+                                Message = $"Tool '{request.Method}' not found"
+                            };
+                        }
+                        break;
+                }
+            }
+            catch (Exception error)
+            {
+                response.Error = new McpJsonRpcError
+                {
+                    Code = -32603,
+                    Message = error.Message
+                };
+            }
+
+            return response;
+        }
+
+        private McpTerminalStatus GetTerminalStatusSafe()
+        {
+            try
+            {
+                if (_getTerminalStatus != null)
+                {
+                    return _getTerminalStatus();
+                }
+            }
+            catch (Exception error)
+            {
+                Log.ProcessMessage($"GetTerminalStatus failed: {error}", LogMessageType.Error);
+            }
+
+            return new McpTerminalStatus { Mode = "unknown" };
+        }
+
+        private void ProcessSse(HttpListenerResponse response)
+        {
+            response.ContentType = "text/event-stream";
+            response.Headers.Add("Cache-Control", "no-cache");
+            response.Headers.Add("Connection", "keep-alive");
+            response.StatusCode = 200;
+            response.OutputStream.Flush();
+
+            SseClient client = new SseClient { Response = response, Owner = this };
+
+            // Регистрация должна быть в зоне действия её снятия: исключение между регистрацией и телом
+            // оставляло запись клиента без хозяина и response без обработчика. Снятие по reference equality
+            // идемпотентно к RemoveAt фан-аута и Clear из Stop, поэтому — в finally на весь путь выхода.
+            try
+            {
+                lock (_sseClientsLocker)
+                {
+                    _sseClients.Add(client);
+                }
+
+                V1WelcomeHookForTests?.Invoke();
+
+                SendEventToClient(client, "terminal.launched", GetTerminalStatusSafe());
+
+                // keep connection alive until host is stopped
+                while (!_cts.IsCancellationRequested && !client.IsClosed)
+                {
+                    try
+                    {
+                        Thread.Sleep(1000);
+                    }
+                    catch
+                    {
+                        break;
+                    }
+                }
+            }
+            finally
+            {
+                lock (_sseClientsLocker)
+                {
+                    _sseClients.Remove(client);
+                }
+            }
+        }
+
+        private bool SendJson<T>(HttpListenerResponse response, int statusCode, T data, bool legacyFormat = false)
+        {
+            JsonSerializerOptions options = legacyFormat ? JsonOptions : JsonOptionsRpc;
+            string json = JsonSerializer.Serialize(data, options);
+            byte[] buffer = Encoding.UTF8.GetBytes(json);
+
+            response.StatusCode = statusCode;
+            response.ContentType = "application/json";
+            response.ContentLength64 = buffer.Length;
+            return TryWriteResponse(response, buffer, $"SendJson {statusCode}");
+        }
+
+        private bool SendError(HttpListenerResponse response, int statusCode, string message)
+        {
+            byte[] buffer = Encoding.UTF8.GetBytes(message);
+            response.StatusCode = statusCode;
+            response.ContentType = "text/plain";
+            response.ContentLength64 = buffer.Length;
+            return TryWriteResponse(response, buffer, $"SendError {statusCode}");
+        }
+
+        // Ограниченная по времени запись одиночного POST-ответа (BUG-0329): тот же гард, что
+        // TryWriteStreamable (BUG-0327) на v2-SSE, но POST-путь без finally с CloseStreamableStream,
+        // поэтому разрыв запрашивается отсюда. true = записано; false = запись признана зависшей:
+        // лог разрыва написан, Abort вызван. Факт http.sys (стенд BUG-0329): Abort() при
+        // незавершённом WriteFile — no-op, очередь ответа переживает kill: на зависшем клиенте
+        // отложенный досыл при открытии окна, воркер живёт до TCP/http.sys таймера.
+        private bool TryWriteResponse(HttpListenerResponse response, byte[] bytes, string context)
+        {
+            // LongRunning здесь обязателен (BUG-0459): на насыщении ThreadPool пул-запись не стартует
+            // в потолок, и живой клиент теряет ответ — тот же класс, что в TryWriteSse/TryWriteStreamable.
+            // Факты воркера (BUG-0329, стенд): Abort при незавершённом WriteFile — no-op, воркер освобождается
+            // при досылке/RST, в worst case — TCP/http.sys таймером
+            Task write = Task.Factory.StartNew(() =>
+            {
+                response.OutputStream.Write(bytes, 0, bytes.Length);
+                response.OutputStream.Close();
+            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+            Exception reason;
+            try
+            {
+                // наблюдатель вешается ДО Wait/разрыва: покинутый воркер не должен остаться
+                // с UnobservedTaskException (урок BUG-0305)
+                write.ContinueWith(t => ObserveAbandonedWriter(t), TaskContinuationOptions.OnlyOnFaulted);
+
+                if (write.Wait(StreamableSendTimeoutMs))
+                {
+                    return true;
+                }
+                reason = new TimeoutException($"send blocked over {StreamableSendTimeoutMs} ms");
+            }
+            catch (AggregateException error)
+            {
+                // Wait на завершившемся сбоем Task даёт AggregateException: берём истинный тип,
+                // иначе имя исключения в логе теряется и его нечем сверять
+                reason = error.GetBaseException();
+            }
+
+            // единственный лог разрыва, уровень Connect (обывный обрыв клиента, см. BUG-0292/BUG-0305)
+            Log.ProcessMessage($"[MCP] POST response write killed (context={context}, {reason.GetType().Name}: {reason.Message})", LogMessageType.Connect);
+
+            try
+            {
+                response.Abort();
+            }
+            catch
+            {
+                // гонка: воркер штатно закрыл ответ между таймаутом и Abort (или коннект уже мёртв) —
+                // разрыв залогирован выше
+            }
+            return false;
+        }
+
+        #endregion
+
+        #region Nested types
+
+        private class SseClient
+        {
+            public HttpListenerResponse Response;
+            public volatile bool IsClosed;
+            // Хост-владелец регистрации: лог разрыва по таймауту гарда идёт в его Log,
+            // даже если сайт вызван на чужом экземпляре (BUG-0330)
+            public McpMaster Owner;
+        }
+
+        private class StreamableSession
+        {
+            public DateTime Created;
+            public bool Initialized;
+            public bool LoggingEnabled;
+        }
+
+        private class StreamableStream
+        {
+            // НЕ вводить Equals/GetHashCode: самоликвидация BUG-0328 (overload CloseStreamableStream
+            // с expected) держится на эталонном равенстве; переопределение Equals вернёт баг —
+            // новый стрим станет «равен» dying и снова будет им сорван
+            public HttpListenerResponse Response;
+            public ConcurrentQueue<string> Outgoing = new ConcurrentQueue<string>();
+            public AutoResetEvent Signal = new AutoResetEvent(false);
+            public long Dropped;
+            // троттлинг лога дропов BUG-0320: 0 = ещё не логировали, иначе тики последней записи
+            public long LastDropLogTicks;
+            // ключ сессии для различения строк дропов в логе (BUG-0320, ОдБ неблокер 6)
+            public string SessionId;
+        }
+
+        #endregion
+    }
+}

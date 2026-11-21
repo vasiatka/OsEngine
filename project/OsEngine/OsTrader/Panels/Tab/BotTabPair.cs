@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Your rights to use code governed by this license https://github.com/AlexWan/OsEngine/blob/master/LICENSE
  * Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
 */
@@ -551,7 +551,7 @@ namespace OsEngine.OsTrader.Panels.Tab
                 tab.ManualPositionSupport.SecondToCloseIsOn = control.SecondToCloseIsOn;
                 tab.ManualPositionSupport.SecondToOpenIsOn = control.SecondToOpenIsOn;
                 tab.ManualPositionSupport.SetbackToCloseIsOn = control.SetbackToCloseIsOn;
-                tab.ManualPositionSupport.SetbackToClosePosition = control.SetbackToOpenPosition;
+                tab.ManualPositionSupport.SetbackToClosePosition = control.SetbackToClosePosition;
                 tab.ManualPositionSupport.SetbackToOpenIsOn = control.SetbackToOpenIsOn;
                 tab.ManualPositionSupport.SetbackToOpenPosition = control.SetbackToOpenPosition;
                 tab.ManualPositionSupport.StopDistance = control.StopDistance;
@@ -560,6 +560,7 @@ namespace OsEngine.OsTrader.Panels.Tab
                 tab.ManualPositionSupport.TypeDoubleExitOrder = control.TypeDoubleExitOrder;
                 tab.ManualPositionSupport.ValuesType = control.ValuesType;
                 tab.ManualPositionSupport.OrderTypeTime = control.OrderTypeTime;
+                tab.ManualPositionSupport.LimitsMakerOnly = control.LimitsMakerOnly;
             }
             catch (Exception error)
             {
@@ -1515,9 +1516,16 @@ namespace OsEngine.OsTrader.Panels.Tab
         {
             try
             {
-                if (_grid.InvokeRequired)
+                // BUG-0282: Control.InvokeRequired лжёт на grid с несозданным handle (скрытая вкладка) —
+                // маршалинг через Dispatcher WPF-хоста
+                WindowsFormsHost host = _host;
+                if (host == null)
                 {
-                    _grid.Invoke(new Action(RePaintGrid));
+                    return;
+                }
+                if (!host.Dispatcher.CheckAccess())
+                {
+                    host.Dispatcher.Invoke(new Action(RePaintGrid));
                     return;
                 }
 
@@ -1554,6 +1562,19 @@ namespace OsEngine.OsTrader.Panels.Tab
         /// </summary>
         private void TryRePaintGrid()
         {
+            // BUG-0282: вызывается PainterThread с пула — гард на входе, ДО GetRowsToGrid
+            // и сверки rows.Count с _grid.Rows (иначе само чтение структуры идёт с чужого потока)
+            WindowsFormsHost host = _host;
+            if (host == null)
+            {
+                return;
+            }
+            if (!host.Dispatcher.CheckAccess())
+            {
+                host.Dispatcher.Invoke(new Action(TryRePaintGrid));
+                return;
+            }
+
             List<DataGridViewRow> rows = GetRowsToGrid();
 
             if (rows == null)
@@ -1645,9 +1666,12 @@ namespace OsEngine.OsTrader.Panels.Tab
         /// </summary>
         private void TryRePaintRow(DataGridViewRow rowInGrid, DataGridViewRow rowInArray)
         {
-            if (_grid.InvokeRequired)
+            // BUG-0282: маршалинг через Dispatcher хоста (InvokeRequired лжёт при несозданном handle)
+            WindowsFormsHost host = _host;
+            if (host != null
+                && !host.Dispatcher.CheckAccess())
             {
-                _grid.Invoke(new Action<DataGridViewRow, DataGridViewRow>(TryRePaintRow), rowInGrid, rowInArray);
+                host.Dispatcher.Invoke(new Action<DataGridViewRow, DataGridViewRow>(TryRePaintRow), rowInGrid, rowInArray);
                 return;
             }
 
@@ -1930,17 +1954,7 @@ namespace OsEngine.OsTrader.Panels.Tab
                 row.Cells.Add(imageCell);
                 imageCell.Style.Alignment = DataGridViewContentAlignment.MiddleCenter;
 
-                string altPath = Path.Combine(Application.StartupPath, @"Images\InstructionPosts\GreenPostCollection.png");
-
-                if (File.Exists(altPath))
-                {
-                    using (FileStream fs = new FileStream(altPath, FileMode.Open, FileAccess.Read))
-                    {
-                        Image originalImage = Image.FromStream(fs);
-                        Image resizedImage = new Bitmap(originalImage, new Size(25, 20));
-                        row.Cells[4].Value = resizedImage;
-                    }
-                }
+                row.Cells[4].Value = DataGridFactory.GetInstructionPostImage(); // общий кэш; null -> пустая ячейка, как при отсутствии файла
             }
             catch (Exception error)
             {
@@ -2076,8 +2090,9 @@ namespace OsEngine.OsTrader.Panels.Tab
                 }
                 else if (column == 3 && row == 0)
                 { // кнопка открытия окна авто генерации пар
+                    // IsLoaded, not IsActive: a deactivated but alive window must not be re-created (crash BUG-0170)
                     if (_autoSelectPairsUi != null
-                        && _autoSelectPairsUi.IsActive == true)
+                        && _autoSelectPairsUi.IsLoaded == true)
                     {
                         _autoSelectPairsUi.Activate();
                         return;
@@ -2194,16 +2209,24 @@ namespace OsEngine.OsTrader.Panels.Tab
         /// </summary>
         private void _commonSettingsUi_Closed(object sender, EventArgs e)
         {
-            _commonSettingsUi.Closed -= _commonSettingsUi_Closed;
-            _commonSettingsUi = null;
+            BotTabPairCommonSettingsUi ui = (BotTabPairCommonSettingsUi)sender;
+            ui.Closed -= _commonSettingsUi_Closed;
+            if (ReferenceEquals(_commonSettingsUi, ui))
+            {
+                _commonSettingsUi = null;
+            }
         }
 
         BotTabPairAutoSelectPairsUi _autoSelectPairsUi;
 
         private void _autoSelectPairsUi_Closed(object sender, EventArgs e)
         {
-            _autoSelectPairsUi.Closed -= _autoSelectPairsUi_Closed;
-            _autoSelectPairsUi = null;
+            BotTabPairAutoSelectPairsUi ui = (BotTabPairAutoSelectPairsUi)sender;
+            ui.Closed -= _autoSelectPairsUi_Closed;
+            if (ReferenceEquals(_autoSelectPairsUi, ui))
+            {
+                _autoSelectPairsUi = null;
+            }
         }
 
         #endregion
@@ -2272,7 +2295,7 @@ namespace OsEngine.OsTrader.Panels.Tab
             }
             else if (type == LogMessageType.Error)
             {
-                System.Windows.MessageBox.Show(message);
+                ServerMaster.SendNewLogMessage(message, LogMessageType.Error);
             }
         }
 
@@ -3419,7 +3442,7 @@ namespace OsEngine.OsTrader.Panels.Tab
             }
             else if (type == LogMessageType.Error)
             {
-                System.Windows.MessageBox.Show(message);
+                ServerMaster.SendNewLogMessage(message, LogMessageType.Error);
             }
         }
 

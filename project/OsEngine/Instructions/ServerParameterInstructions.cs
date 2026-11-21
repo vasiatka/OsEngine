@@ -99,10 +99,6 @@ namespace OsEngine.Instructions
             {
                 result.Add(LinkGateIoData);
             }
-            else if (serverType == ServerType.BitGetData)
-            {
-                result.Add(LinkBitGetData);
-            }
             else if (serverType == ServerType.QscalpMarketDepth)
             {
                 result.Add(LinkQscalpMarketDepth);
@@ -149,11 +145,6 @@ namespace OsEngine.Instructions
                 result.Add(LinkBinance);
                 result.Add(LinkBinance2);
             }
-            else if (serverType == ServerType.BitGetSpot
-                || serverType == ServerType.BitGetFutures)
-            {
-                result.Add(LinkBitGet);
-            }
             else if (serverType == ServerType.KuCoinSpot
                 || serverType == ServerType.KuCoinFutures)
             {
@@ -182,11 +173,6 @@ namespace OsEngine.Instructions
                 || serverType == ServerType.HTXSwap)
             {
                 result.Add(LinkHtx);
-            }
-            else if (serverType == ServerType.BitMartSpot
-                || serverType == ServerType.BitMartFutures)
-            {
-                result.Add(LinkBitMart);
             }
             else if (serverType == ServerType.BloFinFutures)
             {
@@ -506,17 +492,6 @@ namespace OsEngine.Instructions
             },
         };
 
-        public Instruction LinkBitGetData = new Instruction()
-        {
-            Type = InstructionType.Post,
-
-            Ru = new InstructionLocalized()
-            {
-                Description = "Подключение к BitGetData Server",
-                PostLink = "https://o-s-a.net/os-engine-faq?cats%5B%5D=tab10&subcats%5B%5D=sub67&items%5B%5D=item818"
-            },
-        };
-
         public Instruction LinkQscalpMarketDepth = new Instruction()
         {
             Type = InstructionType.Post,
@@ -704,17 +679,6 @@ namespace OsEngine.Instructions
             },
         };
 
-        public Instruction LinkBitGet = new Instruction()
-        {
-            Type = InstructionType.Video,
-
-            Ru = new InstructionLocalized()
-            {
-                Description = "Подключение к BitGet",
-                PostLink = "https://o-s-a.net/os-engine-faq?cats%5B%5D=tab10&subcats%5B%5D=sub17&items%5B%5D=item132"
-            },
-        };
-
         public Instruction LinkKuCoin = new Instruction()
         {
             Type = InstructionType.Video,
@@ -778,17 +742,6 @@ namespace OsEngine.Instructions
             {
                 Description = "Подключение к HTX",
                 PostLink = "https://o-s-a.net/os-engine-faq?cats%5B%5D=tab10&subcats%5B%5D=sub17&items%5B%5D=item75"
-            },
-        };
-
-        public Instruction LinkBitMart = new Instruction()
-        {
-            Type = InstructionType.Video,
-
-            Ru = new InstructionLocalized()
-            {
-                Description = "Подключение к BitMart",
-                PostLink = "https://o-s-a.net/os-engine-faq?cats%5B%5D=tab10&subcats%5B%5D=sub17&items%5B%5D=item393"
             },
         };
 

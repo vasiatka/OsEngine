@@ -1,15 +1,22 @@
-﻿/*
+/*
  *Your rights to use the code are governed by this license https://github.com/AlexWan/OsEngine/blob/master/LICENSE
  *Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
 */
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
 using System.Threading;
 using OsEngine.Entity;
 using OsEngine.Language;
 using OsEngine.Logging;
+using OsEngine.Journal;
 using OsEngine.Market.Servers.Tester;
+using OsEngine.OsTrader.Panels;
+using OsEngine.OsTrader.Panels.Tab;
+using OsEngine.OsTrader.Panels.Tab.Internal;
+using OsEngine.Wiki;
 using System.Threading.Tasks;
 using System.Linq;
 
@@ -17,6 +24,8 @@ namespace OsEngine.Market.Servers.Optimizer
 {
     public class OptimizerServer : IServer
     {
+        private static readonly CultureInfo CultureInfo = CultureInfo.InvariantCulture;
+
         #region Service and base settings
 
         public OptimizerServer(OptimizerDataStorage dataStorage, int num, decimal portfolioStratValue)
@@ -28,8 +37,19 @@ namespace OsEngine.Market.Servers.Optimizer
             ServerStatus = ServerConnectStatus.Disconnect;
             _testerRegime = TesterRegime.Pause;
             TypeTesterData = dataStorage.TypeTesterData;
+            _dividendsIsOn = dataStorage.DividendsIsOn;
+            _marginRegime = dataStorage.MarginRegime;
+            _taxesIsOn = dataStorage.TaxesIsOn;
+
+            DividendPayments = new List<DividendInfo>();
+            _processedDividendKeys = new HashSet<string>();
+            _pendingDividendPayments = new List<PendingDividendPayment>();
+
             CreatePortfolio(portfolioStratValue);
             NumberServer = num;
+
+            // BUG-0478: the list must exist before the worker thread can reach CheckOrders
+            OrdersActive = new List<Order>();
 
             Task.Run(WorkThreadArea);
 
@@ -39,9 +59,9 @@ namespace OsEngine.Market.Servers.Optimizer
             _candleManager.TypeTesterData = dataStorage.TypeTesterData;
 
             _candleSeriesTesterActivate = new List<SecurityOptimizer>();
-
-            OrdersActive = new List<Order>();
         }
+
+        private bool _dividendsIsOn;
 
         public int NumberServer;
 
@@ -87,6 +107,33 @@ namespace OsEngine.Market.Servers.Optimizer
         {
             // обозначаем рабочему потоку что надо за собой почистить
             _cleared = true;
+
+            // FEATURE-0089: разбудить припаркованный на паузе поток, чтобы он увидел
+            // _cleared и завершился штатно, а не простоял в WaitOne до конца процесса.
+            // После штатного cleanup поля уже null — будить некого, это не ошибка.
+            try
+            {
+                _manualReset?.Set();
+            }
+            catch (ObjectDisposedException)
+            {
+                // поток уже вышел — будить некого
+            }
+
+            // Watchdog снятого сервера больше не нужен; Dispose не ждёт колбэки и не бросает
+            try
+            {
+                Timer timer = Interlocked.Exchange(ref _watchdogTimer, null);
+
+                if (timer != null)
+                {
+                    timer.Dispose();
+                }
+            }
+            catch (Exception error)
+            {
+                SendLogMessage("TestingWatchdog: " + error, LogMessageType.Error);
+            }
         }
         private bool _cleared;
 
@@ -155,11 +202,39 @@ namespace OsEngine.Market.Servers.Optimizer
 
         public void TestingStart()
         {
+            // per-run state must not leak into a restarted run; strictly under the lock added by 0478,
+            // otherwise the Add-vs-iterate race returns. Silent: no NewOrderIncomeEvent for dropped orders.
+            lock (_ordersActiveLocker)
+            {
+                OrdersActive.Clear();
+            }
+
             _serverTime = DateTime.MinValue;
 
             _lastCheckSessionOrdersTime = DateTime.MinValue;
 
             _lastCheckDayOrdersTime = DateTime.MinValue;
+
+            _lastCheckDividendDay = DateTime.MinValue;
+
+            _lastCheckMarginDay = DateTime.MinValue;
+
+            _lastTaxYear = 0;
+
+            if (DividendPayments != null)
+            {
+                DividendPayments.Clear();
+            }
+
+            if (_processedDividendKeys != null)
+            {
+                _processedDividendKeys.Clear();
+            }
+
+            if (_pendingDividendPayments != null)
+            {
+                _pendingDividendPayments.Clear();
+            }
 
             TimeNow = _storages[0].TimeStart;
 
@@ -202,7 +277,15 @@ namespace OsEngine.Market.Servers.Optimizer
 
             _dataIsActive = false;
 
+            // mirror of TesterServer: reset the minute-boundary gate so a repeat run on this reused server is not suppressed
+            _timeLastEventNextMinute = DateTime.MinValue;
+
             _lastTimeStartTest = DateTime.Now;
+
+            // FEATURE-0089: новый прогон — сброс guard'ов, heartbeat и watchdog-таймер
+            ResetTestingEndGuard();
+            TouchTestProgress();
+            StartWatchdogTimer();
 
             _testerRegime = TesterRegime.Play;
             _manualReset.Set();
@@ -213,6 +296,263 @@ namespace OsEngine.Market.Servers.Optimizer
         public event Action TestingStartEvent;
 
         public event Action<int, TimeSpan> TestingEndEvent;
+
+        #region Hanged test watchdog (FEATURE-0089)
+
+        /// <summary>
+        /// Таймаут зависшего прогона, секунд (30/60/120 из настроек оптимизатора).
+        /// &lt;=0 — watchdog служебно выключен; OptimizerMaster пробрасывает настройку
+        /// в каждый сервер, поэтому не в конструкторе: N принадлежит оптимизатору.
+        /// </summary>
+        public int WatchdogTimeoutSeconds = 60;
+
+        private Timer _watchdogTimer;
+
+        private long _lastTestProgressUtcTicks;
+
+        private int _playIterations;
+
+        private int _testingEndRaised;
+
+        private int _hangedPhaseDone;
+
+        private int _hangedPhaseFailedAttempts;
+
+        private long _testEpoch;
+
+        /// <summary>
+        /// Точка прогресса прогона для watchdog. Virtual — чтобы тест-стенд считал
+        /// фактические точки; public — чтобы тест читал heartbeat без ожидания N секунд.
+        /// </summary>
+        public virtual void TouchTestProgress()
+        {
+            Interlocked.Exchange(ref _lastTestProgressUtcTicks, TestingWatchdog.UtcNowProvider().Ticks);
+        }
+
+        public DateTime LastTestProgressUtc
+        {
+            get { return new DateTime(Interlocked.Read(ref _lastTestProgressUtcTicks), DateTimeKind.Utc); }
+        }
+
+        public TesterRegime CurrentTesterRegime
+        {
+            get { return _testerRegime; }
+        }
+
+        /// <summary>
+        /// Завершение прогона ровно один раз за TestingStart: один Interlocked-guard на
+        /// подъём TestingEndEvent. Поздний естественный подъём после watchdog подавляется (AC5).
+        /// Public как тестовый seam; штатные пути вызывают только через этот метод.
+        /// </summary>
+        public void RaiseTestingEnd()
+        {
+            if (Interlocked.CompareExchange(ref _testingEndRaised, 1, 0) != 0)
+            {
+                return;
+            }
+
+            if (TestingEndEvent != null)
+            {
+                TestingEndEvent(NumberServer, DateTime.Now - _lastTimeStartTest);
+            }
+        }
+
+        /// <summary>
+        /// Сброс guard'ов однократности перед новым прогоном; вызывается из TestingStart.
+        /// </summary>
+        public void ResetTestingEndGuard()
+        {
+            Interlocked.Increment(ref _testEpoch);
+            Volatile.Write(ref _testingEndRaised, 0);
+            Volatile.Write(ref _hangedPhaseDone, 0);
+            Volatile.Write(ref _playIterations, 0);
+            Volatile.Write(ref _hangedPhaseFailedAttempts, 0);
+        }
+
+        /// <summary>
+        /// Принудительное завершение зависшего прогона: «Error-лог -&gt; Pause -&gt;
+        /// TestingEndEvent -&gt; минидамп» под одним Interlocked-guard (R2, R5).
+        /// Дамп — detached-задача после снятия: MiniDumpWriteDump суспендирует все
+        /// потоки и при зависшем локе сам может не завершиться (R5). true — фазу
+        /// выполнил этот вызов. Дальнейшее освобождение делает обработчик
+        /// TestingEndEvent (bot.Delete, ServerMaster.RemoveOptimizerServer -&gt; ClearDelete).
+        /// </summary>
+        public bool TryCompleteHangedTest()
+        {
+            return TryCompleteHangedTest(Volatile.Read(ref _testEpoch));
+        }
+
+        /// <summary>
+        /// То же для колбэка таймера: epoch — эпоха прогона на входе в колбэк.
+        /// Epoch разошёлся (в фазе стартовал новый прогон), event уже поднят или сервер
+        /// снят — фаза откатывается и старый колбэк не снимает чужой прогон (R4).
+        /// Сбой диагностики откатывает гейт для retry на следующем тике; после двух
+        /// сбоев фазы завершение идёт без диагностического лога (R3).
+        /// </summary>
+        public bool TryCompleteHangedTest(long epoch)
+        {
+            if (Interlocked.CompareExchange(ref _hangedPhaseDone, 1, 0) != 0)
+            {
+                return false;
+            }
+
+            if (Volatile.Read(ref _testEpoch) != epoch
+                || Volatile.Read(ref _testingEndRaised) != 0
+                || _cleared)
+            {
+                Volatile.Write(ref _hangedPhaseDone, 0);
+                return false;
+            }
+
+            if (Volatile.Read(ref _hangedPhaseFailedAttempts) < 2)
+            {
+                try
+                {
+                    int fired = TestingWatchdog.RegisterFire();
+
+                    DateTime timeEnd = DateTime.MinValue;
+
+                    if (_storages != null && _storages.Count > 0)
+                    {
+                        timeEnd = _storages[0].TimeEndAddDay;
+                    }
+
+                    using (Process process = Process.GetCurrentProcess())
+                    {
+                        SendLogMessage(TestingWatchdogDump.BuildDiagnostic(
+                                NumberServer,
+                                _testerRegime,
+                                TimeNow,
+                                timeEnd,
+                                (TestingWatchdog.UtcNowProvider() - LastTestProgressUtc).TotalSeconds,
+                                DateTime.Now - _lastTimeStartTest,
+                                process.Threads.Count,
+                                ThreadPool.ThreadCount,
+                                fired),
+                            LogMessageType.Error);
+                    }
+                }
+                catch (Exception error)
+                {
+                    // R3: фаза не «сгорает»: гейт откатан, следующий тик повторит;
+                    // после двух сбоев диагностика пропускается и завершение идёт безусловно
+                    Interlocked.Increment(ref _hangedPhaseFailedAttempts);
+                    Volatile.Write(ref _hangedPhaseDone, 0);
+                    // канал лога мог сломаться сам — повторная запись только in-proc, без броска
+                    try
+                    {
+                        SendLogMessage("TestingWatchdog: diagnostics failed, retry next tick: " + error,
+                            LogMessageType.Error);
+                    }
+                    catch (Exception)
+                    {
+                        // лог-подписчик бросает и здесь — watchdog живёт дальше, повторная запись бессмысленна
+                    }
+
+                    return false;
+                }
+            }
+
+            // Страховка (ОдФ): epoch мог разойтись во время диагностики — старый колбэк
+            // не имеет права снимать уже новый прогон
+            if (Volatile.Read(ref _testEpoch) != epoch)
+            {
+                Volatile.Write(ref _hangedPhaseDone, 0);
+                return false;
+            }
+
+            // Pause, а не NotActive: цикл WorkThreadArea при NotActive крутит busy-spin (AC9)
+            _testerRegime = TesterRegime.Pause;
+
+            RaiseTestingEnd();
+
+            // R5: дамп после снятия и вне фазы — сбой или подвисание дампа не задерживает
+            // снятие и освобождение робота; лог записи дампа тоже под guard'ом: бросок
+            // лог-подписчика не должен вывалиться неукроченным исключением на ThreadPool
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    string path = TestingWatchdogDump.TryWriteDump(NumberServer);
+
+                    try
+                    {
+                        if (path != null)
+                        {
+                            SendLogMessage("TestingWatchdog: dump written " + path, LogMessageType.System);
+                        }
+                        else
+                        {
+                            SendLogMessage("TestingWatchdog: dump failed, win32="
+                                + TestingWatchdogDump.LastWin32Error, LogMessageType.Error);
+                        }
+                    }
+                    catch (Exception)
+                    {
+                        // результат дампа уже на диске; канал лога сломан — за борт колбэка не бросаем
+                    }
+                }
+                catch (Exception error)
+                {
+                    try
+                    {
+                        SendLogMessage("TestingWatchdog: " + error, LogMessageType.Error);
+                    }
+                    catch (Exception)
+                    {
+                        // лог-канал сломан и здесь — колбэк пула не обязан ронять процесс
+                    }
+                }
+            });
+
+            return true;
+        }
+
+        private void StartWatchdogTimer()
+        {
+            Timer old = Interlocked.Exchange(ref _watchdogTimer, null);
+
+            if (old != null)
+            {
+                old.Dispose();
+            }
+
+            _watchdogTimer = new Timer(WatchdogTimerCallback, null,
+                TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+        }
+
+        private void WatchdogTimerCallback(object state)
+        {
+            try
+            {
+                // epoch читаем до предиката: фаза сверит её с текущей (R4)
+                long epoch = Volatile.Read(ref _testEpoch);
+
+                if (TestingWatchdog.ShouldFire(_testerRegime,
+                        LastTestProgressUtc,
+                        TestingWatchdog.UtcNowProvider(),
+                        WatchdogTimeoutSeconds,
+                        Volatile.Read(ref _testingEndRaised) != 0,
+                        _cleared))
+                {
+                    TryCompleteHangedTest(epoch);
+                }
+            }
+            catch (Exception error)
+            {
+                // Фоновый entry point: ошибка watchdog идёт в лог, не глотаем
+                try
+                {
+                    SendLogMessage("TestingWatchdog: " + error, LogMessageType.Error);
+                }
+                catch (Exception)
+                {
+                    // лог-канал сломан — таймер не должен ронять процесс повторным броском
+                }
+            }
+        }
+
+        #endregion
 
         public event Action<int, int, int> TestingProgressChangeEvent;
 
@@ -312,6 +652,26 @@ namespace OsEngine.Market.Servers.Optimizer
                             Portfolios = null;
                         }
 
+                        MyRobot = null;
+
+                        if (DividendPayments != null)
+                        {
+                            DividendPayments.Clear();
+                            DividendPayments = null;
+                        }
+
+                        if (_processedDividendKeys != null)
+                        {
+                            _processedDividendKeys.Clear();
+                            _processedDividendKeys = null;
+                        }
+
+                        if (_pendingDividendPayments != null)
+                        {
+                            _pendingDividendPayments.Clear();
+                            _pendingDividendPayments = null;
+                        }
+
                         return;
                     }
 
@@ -326,6 +686,13 @@ namespace OsEngine.Market.Servers.Optimizer
                     if (_testerRegime == TesterRegime.Pause)
                     {
                         _manualReset.WaitOne();
+                        // R4: после реальной паузы heartbeat не должен выглядеть зависанием.
+                        // Только если прогон уже шёл: на старте поток проходит WaitOne
+                        // по сигналу конструктора и не должен затирать heartbeat тестовых часов
+                        if (Volatile.Read(ref _playIterations) > 0)
+                        {
+                            TouchTestProgress();
+                        }
                         continue;
                     }
 
@@ -334,11 +701,30 @@ namespace OsEngine.Market.Servers.Optimizer
                     {
                         LoadNextData();
                         CheckOrders();
+                        CheckDividends(_serverTime);
+                        CheckMarginAndTaxes(_serverTime);
+                        // Полная точка прогресса итерации для watchdog (P4)
+                        Interlocked.Increment(ref _playIterations);
+                        TouchTestProgress();
                     }
                 }
                 catch (Exception error)
                 {
                     SendLogMessage(error.ToString(), LogMessageType.Error);
+                    // Crash in test thread: report end once, otherwise OptimizerExecutor keeps the bot forever. Never while _cleared: the server is being torn down (phantom end).
+                    try
+                    {
+                        if (_testerRegime == TesterRegime.Play && !_cleared)
+                        {
+                            _testerRegime = TesterRegime.Pause;
+                            SendLogMessage(OsLocalization.ConvertToLocString("Eng:Test stopped. Critical error in test thread_Ru:Тест остановлен. Критическая ошибка в потоке теста_"), LogMessageType.Error);
+                            RaiseTestingEnd();
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        SendLogMessage(ex.ToString(), LogMessageType.Error);
+                    }
                     Thread.Sleep(1000);
                 }
             }
@@ -370,10 +756,30 @@ namespace OsEngine.Market.Servers.Optimizer
             {
                 return;
             }
+
+            // FEATURE-0107: windowed tick storage is created fresh on every call (it holds its own file cursor),
+            // so repeated requests for the same key (security + timeframe + period) are dropped by key
+            // before the file is opened and counted
+
+            if (_storagePrime.RemoveTradesFromMemory == true)
+            {
+                DataStorage already = _storages.Find(s => s.TradeAccess != null &&
+                                                          s.Security.Name == security.Name &&
+                                                          s.TimeFrame == timeFrame &&
+                                                          s.TimeStart == timeStart &&
+                                                          s.TimeEnd == timeEnd);
+
+                if (already != null)
+                {
+                    return;
+                }
+            }
             
+            DataStorage newStorage = null;
+
             try
             {
-                DataStorage newStorage = _storagePrime.GetStorageToSecurity(security, timeFrame, timeStart, timeEnd);
+                newStorage = _storagePrime.GetStorageToSecurity(security, timeFrame, timeStart, timeEnd);
 
                 if (newStorage == null)
                 {
@@ -386,7 +792,12 @@ namespace OsEngine.Market.Servers.Optimizer
                     }
                 }
 
-                if (_storages.Find(s => s.Security.Name == newStorage.Security.Name &&
+                // FEATURE-0107: windowed storages carry no lists, so the reference match below would falsely
+                // unite them across different periods and leak the just-created file cursor on return.
+                // Windowed duplicates are caught by the key guard above, so they never reach this legacy match
+
+                if (newStorage.TradeAccess == null &&
+                    _storages.Find(s => s.Security.Name == newStorage.Security.Name &&
                                         s.Candles == newStorage.Candles &&
                                         s.TimeFrame == newStorage.TimeFrame &&
                                         s.Trades == newStorage.Trades &&
@@ -424,11 +835,13 @@ namespace OsEngine.Market.Servers.Optimizer
                 {
                     securityOpt.DataType = SecurityTesterDataType.Tick;
                     securityOpt.Trades = _storages[_storages.Count - 1].Trades;
+                    securityOpt.TradeAccess = _storages[_storages.Count - 1].TradeAccess;
                 }
                 else if (_storages[_storages.Count - 1].StorageType == TesterDataType.TickAllCandleState)
                 {
                     securityOpt.DataType = SecurityTesterDataType.Tick;
                     securityOpt.Trades = _storages[_storages.Count - 1].Trades;
+                    securityOpt.TradeAccess = _storages[_storages.Count - 1].TradeAccess;
                 }
                 else if (_storages[_storages.Count - 1].StorageType == TesterDataType.MarketDepthOnlyReadyCandle)
                 {
@@ -448,12 +861,30 @@ namespace OsEngine.Market.Servers.Optimizer
             catch(Exception error)
             {
                 SendLogMessage(error.ToString(),LogMessageType.Error);
+
+                // FEATURE-0107: never leave a half-initialized storage with a disposed access in the list,
+                // the key guard would hand it out as healthy; then release the file if no SecurityOptimizer took it over
+
+                if (newStorage != null)
+                {
+                    _storages.Remove(newStorage);
+
+                    if (newStorage.TradeAccess != null &&
+                        _candleSeriesTesterActivate.Find(s => s.TradeAccess == newStorage.TradeAccess) == null)
+                    {
+                        newStorage.TradeAccess.Dispose();
+                    }
+                }
             }
         }
 
         public DateTime TimeNow;
 
-        private void LoadNextData()
+        /// <summary>
+        /// Загрузка следующего шага данных. Public как тестовый seam (юниты H03/P7);
+        /// штатно вызывается только из WorkThreadArea.
+        /// </summary>
+        public void LoadNextData()
         {
             for (int i = 0; i < _storages.Count; i++)
             {
@@ -462,12 +893,7 @@ namespace OsEngine.Market.Servers.Optimizer
                     _testerRegime = TesterRegime.Pause;
 
                     SendLogMessage(OsLocalization.Market.Message37, LogMessageType.System);
-                    if (TestingEndEvent != null)
-                    {
-                        TimeSpan testLiveTime = DateTime.Now - _lastTimeStartTest;
-
-                        TestingEndEvent(NumberServer, testLiveTime);
-                    }
+                    RaiseTestingEnd();
                     return;
                 }
             }
@@ -479,12 +905,7 @@ namespace OsEngine.Market.Servers.Optimizer
 
                 SendLogMessage(OsLocalization.Market.Message38,
                     LogMessageType.System);
-                if (TestingEndEvent != null)
-                {
-                    TimeSpan testLiveTime = DateTime.Now - _lastTimeStartTest;
-
-                    TestingEndEvent(NumberServer, testLiveTime);
-                }
+                RaiseTestingEnd();
                 return;
             }
 
@@ -505,29 +926,62 @@ namespace OsEngine.Market.Servers.Optimizer
                 TimeNow = TimeNow.AddSeconds(1);
             }
 
-            bool haveLoadingSec = false;
-
             for (int i = 0; _candleSeriesTesterActivate != null && i < _candleSeriesTesterActivate.Count; i++)
             {
                 if (TimeNow > _candleSeriesTesterActivate[i].RealEndTime)
                 {
                     continue;
                 }
-                haveLoadingSec = true;
                 _candleSeriesTesterActivate[i].Load(TimeNow);
+                // Heartbeat на каждом инструменте: легитимно долгая итерация
+                // из нескольких инструментов не накапливает бездействие (P7)
+                TouchTestProgress();
             }
 
-            if (haveLoadingSec == false)
+            if (EndNextMinuteWithCandlesEvent != null
+                 && (_timeAddType == TimeAddInTestType.Minute || _timeAddType == TimeAddInTestType.FiveMinute)
+                && _timeLastCandle == TimeNow)
             {
+                EndNextMinuteWithCandlesEvent();
+            }
 
+            // Sub-minute regimes (ticks, market depth, sub-minute candles): the old candle gate never fires there — no candle pipeline (ticks, depth) or candles built sub-minute so _timeLastCandle never matches the minute boundary. Raise the event once at each minute boundary; readiness criterion is delivered data. FiveMinute is excluded — it goes through the candle gate above.
+            if (EndNextMinuteWithCandlesEvent != null
+                && _timeAddType != TimeAddInTestType.Minute
+                && _timeAddType != TimeAddInTestType.FiveMinute
+                && _dataIsActive)
+            {
+                DateTime minuteNow = new DateTime(TimeNow.Year, TimeNow.Month, TimeNow.Day, TimeNow.Hour, TimeNow.Minute, 0);
+                if (minuteNow > _timeLastEventNextMinute)
+                {
+                    _timeLastEventNextMinute = minuteNow;
+                    EndNextMinuteWithCandlesEvent();
+                }
             }
         }
+
+        public event Action EndNextMinuteWithCandlesEvent;
+
+        private DateTime _timeLastCandle;
+
+        private DateTime _timeLastEventNextMinute;
 
         #endregion
 
         #region Orders 1. Check order execution
 
         private void CheckOrders()
+        {
+            // BUG-0478: worker-thread side of the OrdersActive contract. Re-entrancy is required:
+            // on day rollover CheckRejectOrdersOnClearing calls CancelOnBoardOrder, which takes
+            // the same locker.
+            lock (_ordersActiveLocker)
+            {
+                CheckOrdersLocked();
+            }
+        }
+
+        private void CheckOrdersLocked()
         {
             if (OrdersActive.Count == 0)
             {
@@ -565,7 +1019,8 @@ namespace OsEngine.Market.Servers.Optimizer
                 { // running on candles / прогон на свечках
                     Candle lastCandle = security.LastCandle;
 
-                    if (order.Price == 0)
+                    // no candle of this series arrived yet: leave price unfilled, execution takes it from the first candle
+                    if (order.Price == 0 && lastCandle != null)
                     {
                         order.Price = lastCandle.Open;
                     }
@@ -588,6 +1043,8 @@ namespace OsEngine.Market.Servers.Optimizer
             }
         }
 
+        // BUG-0478: mutates OrdersActive. Every call path (CheckOrders, worker loop and the
+        // submission stop-fire) holds _ordersActiveLocker. New callers must lock around this call.
         private bool CheckOrdersInCandleTest(Order order, Candle lastCandle)
         {
             decimal minPrice = decimal.MaxValue;
@@ -612,6 +1069,12 @@ namespace OsEngine.Market.Servers.Optimizer
 
             if (order.IsStopOrProfit)
             {
+                if (lastCandle == null)
+                {
+                    // stop cannot trigger on a series without a single candle: silently wait for the first one
+                    return false;
+                }
+
                 int slippage = 0;
 
                 if (_slippageToStopOrder > 0)
@@ -821,6 +1284,8 @@ namespace OsEngine.Market.Servers.Optimizer
             return false;
         }
 
+        // BUG-0478: mutates OrdersActive. Every call path (CheckOrders, worker loop and the
+        // submission stop-fire) holds _ordersActiveLocker. New callers must lock around this call.
         private bool CheckOrdersInTickTest(Order order, Trade lastTrade, bool firstTime, bool isNewDay)
         {
             SecurityOptimizer security = _candleSeriesTesterActivate.Find(s => s.Security.Name == order.SecurityNameCode);
@@ -1016,10 +1481,18 @@ namespace OsEngine.Market.Servers.Optimizer
             return false;
         }
 
+        // BUG-0478: mutates OrdersActive. Every call path (CheckOrders, worker loop and the
+        // submission stop-fire) holds _ordersActiveLocker. New callers must lock around this call.
         private bool CheckOrdersInMarketDepthTest(Order order, MarketDepth lastMarketDepth)
         {
             if (lastMarketDepth == null)
             {
+                return false;
+            }
+            if ((lastMarketDepth.Asks == null || (lastMarketDepth.Asks != null && lastMarketDepth.Asks.Count == 0)) ||
+                 (lastMarketDepth.Bids == null || (lastMarketDepth.Bids != null && lastMarketDepth.Bids.Count == 0)))
+            {
+                // BUG-0479: empty book side (limit up/down, auction) — silent wait, port of TesterServer.cs:1946 gate
                 return false;
             }
             decimal sellBestPrice = lastMarketDepth.Asks[0].Price.ToDecimal();
@@ -1259,6 +1732,11 @@ namespace OsEngine.Market.Servers.Optimizer
 
         private List<Order> OrdersActive;
 
+        // BUG-0478: OrdersActive is shared between the test worker thread (CheckOrders, day-rollover
+        // cancel storm) and foreign caller threads (ExecuteOrder / CancelOrder from non-gated user
+        // strategy threads). Every access must hold this locker; Monitor is re-entrant by design.
+        private object _ordersActiveLocker = new object();
+
         private int _iteratorNumbersOrders;
 
         private int _iteratorNumbersMyTrades;
@@ -1275,66 +1753,73 @@ namespace OsEngine.Market.Servers.Optimizer
                 return;
             }
 
-            if (OrdersActive.Count != 0)
+            Order orderOnBoard;
+
+            // BUG-0478: single lock region from the duplicate check through OrdersActive.Add, so
+            // that the check -> Add window cannot be entered by a foreign thread with same NumberUser
+            lock (_ordersActiveLocker)
             {
-                for (int i = 0; i < OrdersActive.Count; i++)
+                if (OrdersActive.Count != 0)
                 {
-                    if (OrdersActive[i].NumberUser == order.NumberUser)
+                    for (int i = 0; i < OrdersActive.Count; i++)
                     {
-                        SendLogMessage(OsLocalization.Market.Message39, LogMessageType.Error);
-                        FailedOperationOrder(order);
-                        return;
+                        if (OrdersActive[i].NumberUser == order.NumberUser)
+                        {
+                            SendLogMessage(OsLocalization.Market.Message39, LogMessageType.Error);
+                            FailedOperationOrder(order);
+                            return;
+                        }
                     }
                 }
+
+                if (ServerStatus == ServerConnectStatus.Disconnect)
+                {
+                    SendLogMessage(OsLocalization.Market.Message40, LogMessageType.Error);
+                    FailedOperationOrder(order);
+                    return;
+                }
+
+                if (order.Volume <= 0)
+                {
+                    SendLogMessage(OsLocalization.Market.Message42 + order.Volume, LogMessageType.Error);
+                    FailedOperationOrder(order);
+                    return;
+                }
+
+                if (string.IsNullOrWhiteSpace(order.PortfolioNumber))
+                {
+                    SendLogMessage(OsLocalization.Market.Message43, LogMessageType.Error);
+                    FailedOperationOrder(order);
+                    return;
+                }
+
+                if (string.IsNullOrWhiteSpace(order.SecurityNameCode))
+                {
+                    SendLogMessage(OsLocalization.Market.Message44, LogMessageType.Error);
+                    FailedOperationOrder(order);
+                    return;
+                }
+
+                orderOnBoard = new Order();
+                orderOnBoard.NumberMarket = _iteratorNumbersOrders++.ToString();
+                orderOnBoard.NumberUser = order.NumberUser;
+                orderOnBoard.PortfolioNumber = order.PortfolioNumber;
+                orderOnBoard.Price = order.Price;
+                orderOnBoard.SecurityNameCode = order.SecurityNameCode;
+                orderOnBoard.Side = order.Side;
+                orderOnBoard.State = OrderStateType.Active;
+                orderOnBoard.TimeCallBack = ServerTime;
+                orderOnBoard.TimeCreate = ServerTime;
+                orderOnBoard.TypeOrder = order.TypeOrder;
+                orderOnBoard.Volume = order.Volume;
+                orderOnBoard.Comment = order.Comment;
+                orderOnBoard.LifeTime = order.LifeTime;
+                orderOnBoard.IsStopOrProfit = order.IsStopOrProfit;
+                orderOnBoard.TimeFrameInTester = order.TimeFrameInTester;
+                orderOnBoard.OrderTypeTime = order.OrderTypeTime;
+
+                OrdersActive.Add(orderOnBoard);
             }
-
-            if (ServerStatus == ServerConnectStatus.Disconnect)
-            {
-                SendLogMessage(OsLocalization.Market.Message40, LogMessageType.Error);
-                FailedOperationOrder(order);
-                return;
-            }
-
-            if (order.Volume <= 0)
-            {
-                SendLogMessage(OsLocalization.Market.Message42 + order.Volume, LogMessageType.Error);
-                FailedOperationOrder(order);
-                return;
-            }
-
-            if (string.IsNullOrWhiteSpace(order.PortfolioNumber))
-            {
-                SendLogMessage(OsLocalization.Market.Message43, LogMessageType.Error);
-                FailedOperationOrder(order);
-                return;
-            }
-
-            if (string.IsNullOrWhiteSpace(order.SecurityNameCode))
-            {
-                SendLogMessage(OsLocalization.Market.Message44, LogMessageType.Error);
-                FailedOperationOrder(order);
-                return;
-            }
-
-            Order orderOnBoard = new Order();
-            orderOnBoard.NumberMarket = _iteratorNumbersOrders++.ToString();
-            orderOnBoard.NumberUser = order.NumberUser;
-            orderOnBoard.PortfolioNumber = order.PortfolioNumber;
-            orderOnBoard.Price = order.Price;
-            orderOnBoard.SecurityNameCode = order.SecurityNameCode;
-            orderOnBoard.Side = order.Side;
-            orderOnBoard.State = OrderStateType.Active;
-            orderOnBoard.TimeCallBack = ServerTime;
-            orderOnBoard.TimeCreate = ServerTime;
-            orderOnBoard.TypeOrder = order.TypeOrder;
-            orderOnBoard.Volume = order.Volume;
-            orderOnBoard.Comment = order.Comment;
-            orderOnBoard.LifeTime = order.LifeTime;
-            orderOnBoard.IsStopOrProfit = order.IsStopOrProfit;
-            orderOnBoard.TimeFrameInTester = order.TimeFrameInTester;
-            orderOnBoard.OrderTypeTime = order.OrderTypeTime;
-
-            OrdersActive.Add(orderOnBoard);
 
             if (NewOrderIncomeEvent != null)
             {
@@ -1350,11 +1835,32 @@ namespace OsEngine.Market.Servers.Optimizer
 
                 SecurityOptimizer security = GetMySecurity(order);
 
-                if (security.DataType == SecurityTesterDataType.Candle)
-                { // testing with using candles / прогон на свечках
-                    if (CheckOrdersInCandleTest(orderOnBoard, security.LastCandle))
+                // BUG-0475: no data series for this stop. CheckOrders skips null security forever
+                // (:981), so the stop would stay a phantom Active on the board. Veto here: Fail is
+                // terminal for the bot, same rejection path as the ExecuteOrder preamble (:1705-:1752).
+                if (security == null)
+                {
+                    SendLogMessage("Stop order rejected. No test data series for security " + order.SecurityNameCode, LogMessageType.Error);
+                    lock (_ordersActiveLocker)
                     {
                         OrdersActive.Remove(orderOnBoard);
+                    }
+                    FailedOperationOrder(order);
+                    return;
+                }
+                if (security.DataType == SecurityTesterDataType.Candle)
+                { // testing with using candles / прогон на свечках
+                    // BUG-0478: the candle-test scans and mutates OrdersActive. Keep test + removal
+                    // atomic against foreign-thread Execute/Cancel
+                    bool executedOnSubmission;
+                    lock (_ordersActiveLocker)
+                    {
+                        executedOnSubmission = CheckOrdersInCandleTest(orderOnBoard, security.LastCandle);
+
+                        if (executedOnSubmission)
+                        {
+                            OrdersActive.Remove(orderOnBoard);
+                        }
                     }
                 }
             }
@@ -1437,30 +1943,36 @@ namespace OsEngine.Market.Servers.Optimizer
         {
             Order orderToClose = null;
 
-            if (OrdersActive.Count != 0)
+            // BUG-0478: lookup + removal atomic against the worker thread (see _ordersActiveLocker)
+            lock (_ordersActiveLocker)
             {
+                if (OrdersActive.Count != 0)
+                {
+                    for (int i = 0; i < OrdersActive.Count; i++)
+                    {
+                        if (OrdersActive[i].NumberUser == order.NumberUser)
+                        {
+                            orderToClose = OrdersActive[i];
+                            // BUG-0478: first match wins, same idiom as the remove loop below
+                            break;
+                        }
+                    }
+                }
+
+                if (orderToClose == null)
+                {
+                    SendLogMessage(OsLocalization.Market.Message46, LogMessageType.Error);
+                    FailedOperationOrder(order);
+                    return;
+                }
+
                 for (int i = 0; i < OrdersActive.Count; i++)
                 {
                     if (OrdersActive[i].NumberUser == order.NumberUser)
                     {
-                        orderToClose = OrdersActive[i];
+                        OrdersActive.RemoveAt(i);
+                        break;
                     }
-                }
-            }
-
-            if (orderToClose == null)
-            {
-                SendLogMessage(OsLocalization.Market.Message46, LogMessageType.Error);
-                FailedOperationOrder(order);
-                return;
-            }
-
-            for (int i = 0; i < OrdersActive.Count; i++)
-            {
-                if (OrdersActive[i].NumberUser == order.NumberUser)
-                {
-                    OrdersActive.RemoveAt(i);
-                    break;
                 }
             }
 
@@ -1819,6 +2331,15 @@ namespace OsEngine.Market.Servers.Optimizer
 
         private List<SecurityOptimizer> _candleSeriesTesterActivate;
 
+        /// <summary>
+        /// Активные серии прогона. Getter как тестовый seam (юнит H03 добавляет серии);
+        /// свойства не вводит — список мутируется штатными путями этого класса.
+        /// </summary>
+        public List<SecurityOptimizer> CandleSeriesTesterActivate
+        {
+            get { return _candleSeriesTesterActivate; }
+        }
+
         private CandleManager _candleManager;
 
         private object _starterLocker = new object();
@@ -2011,6 +2532,8 @@ namespace OsEngine.Market.Servers.Optimizer
         {
             ServerTime = candle.TimeStart;
 
+            _timeLastCandle = candle.TimeStart;
+
             if (_dataIsActive == false)
             {
                 _dataIsActive = true;
@@ -2138,6 +2661,873 @@ namespace OsEngine.Market.Servers.Optimizer
 
         #endregion
 
+        #region Dividends
+
+        public BotPanel MyRobot;
+
+        public List<DividendInfo> DividendPayments { get; private set; }
+
+        public event Action DividendPaymentsChangedEvent;
+
+        private HashSet<string> _processedDividendKeys;
+
+        private List<PendingDividendPayment> _pendingDividendPayments;
+
+        private const int DividendsPaymentDelayDays = 7;
+
+        private DateTime _lastCheckDividendDay;
+
+        private void CheckDividends(DateTime currentServerTime)
+        {
+            try
+            {
+                if (_dividendsIsOn == false)
+                {
+                    return;
+                }
+
+                if (MyRobot == null)
+                {
+                    return;
+                }
+
+                if (_lastCheckDividendDay.Date == currentServerTime.Date)
+                {
+                    return;
+                }
+
+                _lastCheckDividendDay = currentServerTime;
+
+                ProcessPendingDividendPayments(currentServerTime);
+
+                List<BotTabSimple> tabs = GetAllBotTabs(MyRobot);
+                Dictionary<string, WikiDividendRecord> tickerDividendRecordCache = new Dictionary<string, WikiDividendRecord>();
+
+                for (int i = 0; tabs != null && i < tabs.Count; i++)
+                {
+                    BotTabSimple tab = tabs[i];
+
+                    if (tab == null
+                        || tab.Security == null
+                        || tab.Portfolio == null
+                        || tab.GetJournal() == null)
+                    {
+                        continue;
+                    }
+
+                    List<Position> positions = tab.PositionsOpenAll;
+
+                    for (int i2 = 0; positions != null && i2 < positions.Count; i2++)
+                    {
+                        Position position = positions[i2];
+
+                        if (position == null
+                            || position.State != PositionStateType.Open
+                            || string.IsNullOrWhiteSpace(position.SecurityName))
+                        {
+                            continue;
+                        }
+
+                        string ticker = position.SecurityName;
+
+                        if (!tickerDividendRecordCache.TryGetValue(ticker, out WikiDividendRecord dividendRecord))
+                        {
+                            WikiDividendPast dividendPast = WikiMaster.GetDividendsPast(ticker, currentServerTime);
+                            dividendRecord = dividendPast?.past;
+                            tickerDividendRecordCache[ticker] = dividendRecord;
+                        }
+
+                        if (dividendRecord == null
+                            || string.IsNullOrWhiteSpace(dividendRecord.registry_close_date))
+                        {
+                            continue;
+                        }
+
+                        if (!DateTime.TryParseExact(dividendRecord.registry_close_date, "dd.MM.yyyy",
+                            CultureInfo, DateTimeStyles.None, out DateTime registryDate))
+                        {
+                            continue;
+                        }
+
+                        DateTime exDivDate = registryDate;
+
+                        if (currentServerTime.Date <= exDivDate)
+                        {
+                            continue;
+                        }
+
+                        if (position.TimeOpen.Date > exDivDate)
+                        {
+                            continue;
+                        }
+
+                        string key = $"{MyRobot.NameStrategyUniq}_{tab.TabName}_{position.Number}_{ticker}_{registryDate:dd.MM.yyyy}";
+
+                        if (_processedDividendKeys.Contains(key))
+                        {
+                            continue;
+                        }
+
+                        decimal dividendSum = ProcessDividendForPosition(MyRobot, tab, position, dividendRecord, currentServerTime);
+                        _processedDividendKeys.Add(key);
+
+                        if (dividendSum != 0)
+                        {
+                            _pendingDividendPayments.Add(new PendingDividendPayment
+                            {
+                                Ticker = ticker,
+                                BotName = MyRobot.NameStrategyUniq,
+                                RegistryCloseDate = exDivDate,
+                                PositionCreateDate = currentServerTime,
+                                ExpectedPaymentDate = exDivDate.AddDays(DividendsPaymentDelayDays),
+                                Volume = position.OpenVolume,
+                                Sum = dividendSum,
+                                DividendRecord = dividendRecord
+                            });
+                        }
+                    }
+                }
+            }
+            catch (Exception error)
+            {
+                SendLogMessage($"CheckDividends error: {error}", LogMessageType.Error);
+            }
+        }
+
+        private List<BotTabSimple> GetAllBotTabs(BotPanel bot)
+        {
+            List<BotTabSimple> result = new List<BotTabSimple>();
+
+            try
+            {
+                if (bot.TabsSimple != null)
+                {
+                    result.AddRange(bot.TabsSimple);
+                }
+
+                if (bot.TabsScreener != null)
+                {
+                    for (int i = 0; i < bot.TabsScreener.Count; i++)
+                    {
+                        BotTabScreener screener = bot.TabsScreener[i];
+
+                        if (screener != null && screener.Tabs != null)
+                        {
+                            result.AddRange(screener.Tabs);
+                        }
+                    }
+                }
+
+                if (bot.TabsPair != null)
+                {
+                    for (int i = 0; i < bot.TabsPair.Count; i++)
+                    {
+                        BotTabPair pairTab = bot.TabsPair[i];
+
+                        if (pairTab?.Pairs == null)
+                        {
+                            continue;
+                        }
+
+                        for (int i2 = 0; i2 < pairTab.Pairs.Count; i2++)
+                        {
+                            PairToTrade pair = pairTab.Pairs[i2];
+
+                            if (pair?.Tab1 != null)
+                            {
+                                result.Add(pair.Tab1);
+                            }
+
+                            if (pair?.Tab2 != null)
+                            {
+                                result.Add(pair.Tab2);
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception error)
+            {
+                SendLogMessage($"GetAllBotTabs error: {error}", LogMessageType.Error);
+            }
+
+            return result;
+        }
+
+        private decimal ProcessDividendForPosition(BotPanel bot, BotTabSimple tab, Position position,
+            WikiDividendRecord dividendRecord, DateTime currentServerTime)
+        {
+            try
+            {
+                string ticker = position.SecurityName;
+
+                if (string.IsNullOrWhiteSpace(ticker)
+                    || dividendRecord == null)
+                {
+                    return 0m;
+                }
+
+                decimal currentPrice = tab.PriceBestAsk;
+
+                if (currentPrice == 0)
+                {
+                    List<Candle> candles = tab.CandlesAll;
+
+                    if (candles != null && candles.Count > 0)
+                    {
+                        currentPrice = candles[candles.Count - 1].Close;
+                    }
+                }
+
+                if (currentPrice == 0)
+                {
+                    return 0m;
+                }
+
+                decimal baseVolume = position.OpenVolume;
+
+                if (baseVolume == 0)
+                {
+                    return 0m;
+                }
+
+                decimal yield = dividendRecord.dividend_yield;
+
+                if (yield == 0)
+                {
+                    return 0m;
+                }
+
+                decimal yieldAfterTax = Math.Round(yield * 0.87m, 6);
+
+                decimal syntheticVolume = baseVolume;
+
+                if (syntheticVolume == 0)
+                {
+                    return 0m;
+                }
+
+                CreateDividendPosition(bot, tab, position, currentPrice, syntheticVolume, yieldAfterTax, currentServerTime);
+
+                decimal dividendSum = Math.Round(baseVolume * currentPrice * yieldAfterTax / 100, 2);
+
+                if (position.Direction == Side.Sell)
+                {// short pays the dividend: the sum goes to the cash leg with a minus
+                    dividendSum = -dividendSum;
+                }
+
+                return dividendSum;
+            }
+            catch (Exception error)
+            {
+                SendLogMessage($"ProcessDividendForPosition error for {position.SecurityName}: {error}", LogMessageType.Error);
+                return 0m;
+            }
+        }
+
+        private void ProcessPendingDividendPayments(DateTime currentServerTime)
+        {
+            try
+            {
+                for (int i = _pendingDividendPayments.Count - 1; i >= 0; i--)
+                {
+                    PendingDividendPayment pending = _pendingDividendPayments[i];
+
+                    if (currentServerTime.Date >= pending.ExpectedPaymentDate)
+                    {
+                        AddDividendToPortfolio(pending, currentServerTime);
+                        _pendingDividendPayments.RemoveAt(i);
+                    }
+                }
+            }
+            catch (Exception error)
+            {
+                SendLogMessage($"ProcessPendingDividendPayments error: {error}", LogMessageType.Error);
+            }
+        }
+
+        private void AddDividendToPortfolio(PendingDividendPayment pending, DateTime currentServerTime)
+        {
+            try
+            {
+                this.AddProfit(pending.Sum);
+
+                lock (DividendPayments)
+                {
+                    DividendPayments.Add(new DividendInfo
+                    {
+                        PaymentDate = currentServerTime,
+                        PositionCreateDate = pending.PositionCreateDate,
+                        SecurityName = pending.Ticker,
+                        BotName = pending.BotName,
+                        Volume = pending.Volume,
+                        Sum = pending.Sum
+                    });
+                }
+
+                DividendPaymentsChangedEvent?.Invoke();
+            }
+            catch (Exception error)
+            {
+                SendLogMessage($"AddDividendToPortfolio error for {pending.Ticker}: {error}", LogMessageType.Error);
+            }
+        }
+
+        private void CreateDividendPosition(BotPanel bot, BotTabSimple tab, Position position,
+            decimal currentPrice, decimal syntheticVolume, decimal yield, DateTime currentServerTime)
+        {
+            try
+            {
+                string ticker = position.SecurityName;
+                string syntheticSecurityName = ticker + "_divs";
+
+                Security syntheticSecurity = new Security();
+                syntheticSecurity.Name = syntheticSecurityName;
+                syntheticSecurity.NameClass = tab.Security.NameClass;
+                syntheticSecurity.Lot = tab.Security.Lot;
+                syntheticSecurity.PriceStep = tab.Security.PriceStep;
+                syntheticSecurity.PriceStepCost = tab.Security.PriceStepCost;
+                syntheticSecurity.MarginBuy = tab.Security.MarginBuy;
+                syntheticSecurity.MarginSell = tab.Security.MarginSell;
+
+                Portfolio portfolio = tab.Portfolio;
+                BotManualControl manualPositionSupport = tab.ManualPositionSupport;
+                Journal.Journal journal = tab.GetJournal();
+
+                PositionCreator dealCreator = new PositionCreator();
+                OrderTypeTime orderTypeTime = manualPositionSupport.OrderTypeTime;
+                bool makerOnly = manualPositionSupport.LimitsMakerOnly;
+                TimeSpan timeLife = manualPositionSupport.SecondToOpen;
+
+                decimal openPrice = currentPrice;
+                decimal closePrice = Math.Round(currentPrice * (1 + yield / 100), 6);
+                Side side = position.Direction;
+
+                Position newDeal = dealCreator.CreatePosition(
+                    bot.NameStrategyUniq, side, openPrice, syntheticVolume,
+                    OrderPriceType.Limit, timeLife,
+                    syntheticSecurity, portfolio, StartProgram.IsOsOptimizer,
+                    orderTypeTime, makerOnly);
+
+                Order closeOrder;
+
+                newDeal.NameBotClass = bot.GetNameStrategyType();
+                newDeal.SecurityName = syntheticSecurityName;
+
+                journal.SetNewDeal(newDeal);
+
+                tab.OrderFakeExecute(newDeal.OpenOrders[0], currentServerTime);
+
+                Position dividendPosition = tab.PositionsLast;
+
+                if (dividendPosition == null)
+                {
+                    return;
+                }
+
+                closeOrder = dealCreator.CreateCloseOrderForDeal(
+                    syntheticSecurity, dividendPosition, closePrice,
+                    OrderPriceType.Limit, timeLife,
+                    StartProgram.IsOsOptimizer, orderTypeTime,
+                    portfolio.ServerUniqueName, makerOnly);
+
+                if (closeOrder == null)
+                {
+                    return;
+                }
+
+                closeOrder.PortfolioNumber = portfolio.Number;
+                dividendPosition.AddNewCloseOrder(closeOrder);
+
+                tab.OrderFakeExecute(closeOrder, currentServerTime);
+            }
+            catch (Exception error)
+            {
+                SendLogMessage($"CreateDividendPosition error for {position.SecurityName}: {error}", LogMessageType.Error);
+            }
+        }
+
+        #endregion
+
+        #region Margin and taxes
+
+        private string _marginRegime;
+
+        private bool _taxesIsOn;
+
+        private DateTime _lastCheckMarginDay;
+
+        private int _lastTaxYear;
+
+        private const string _commodityFuturesPrefixes = "GD,SV,BR,NG,PT,PD";
+
+        private void CheckMarginAndTaxes(DateTime currentServerTime)
+        {
+            try
+            {
+                if (_lastCheckMarginDay.Date != currentServerTime.Date)
+                {
+                    DateTime dayToProcess = _lastCheckMarginDay;
+                    _lastCheckMarginDay = currentServerTime;
+
+                    if (dayToProcess != DateTime.MinValue)
+                    {
+                        CheckMargin(dayToProcess);
+                    }
+                }
+
+                if (_lastTaxYear == 0)
+                {
+                    _lastTaxYear = currentServerTime.Year;
+                }
+                else if (currentServerTime.Year > _lastTaxYear)
+                {
+                    int yearToProcess = _lastTaxYear;
+                    _lastTaxYear = currentServerTime.Year;
+
+                    CheckTaxes(yearToProcess);
+                }
+            }
+            catch (Exception error)
+            {
+                SendLogMessage($"CheckMarginAndTaxes error: {error}", LogMessageType.Error);
+            }
+        }
+
+        private void CheckMargin(DateTime dayToProcess)
+        {
+            try
+            {
+                if (_marginRegime == "Off")
+                {
+                    return;
+                }
+
+                if (MyRobot == null
+                    || MyRobot.OnOffEventsInTabs == false)
+                {
+                    return;
+                }
+
+                List<Journal.Journal> journals = MyRobot.GetJournals();
+
+                if (journals == null)
+                {
+                    return;
+                }
+
+                decimal volumeLong = 0;
+                decimal volumeShort = 0;
+                decimal deposit = 0;
+                DateTime timeDeposit = DateTime.MinValue;
+
+                for (int j = 0; j < journals.Count; j++)
+                {
+                    List<Position> openPositions = journals[j].OpenPositions;
+
+                    for (int p = 0; p < openPositions.Count; p++)
+                    {
+                        Position position = openPositions[p];
+
+                        Security security = null;
+
+                        if (Securities != null)
+                        {
+                            security = Securities.Find(s => s.Name == position.SecurityName);
+                        }
+
+                        bool isFutures = security != null && security.SecurityType == SecurityType.Futures;
+                        decimal marginRate = isFutures ? 0.2m : 1m;
+
+                        if (position.Direction == Side.Buy)
+                        {
+                            if (position.Lots != 0)
+                            {
+                                volumeLong += position.EntryPrice * position.OpenVolume * position.Lots * marginRate;
+                            }
+                            else
+                            {
+                                volumeLong += position.EntryPrice * position.OpenVolume * marginRate;
+                            }
+                        }
+                        else if (position.Direction == Side.Sell)
+                        {
+                            if (position.Lots != 0)
+                            {
+                                volumeShort += position.EntryPrice * position.OpenVolume * position.Lots * marginRate;
+                            }
+                            else
+                            {
+                                volumeShort += position.EntryPrice * position.OpenVolume * marginRate;
+                            }
+                        }
+
+                        if (timeDeposit < position.TimeOpen)
+                        {
+                            deposit = position.PortfolioValueOnOpenPosition;
+                            timeDeposit = position.TimeOpen;
+                        }
+                    }
+                }
+
+                decimal margin = volumeShort;
+
+                if (volumeLong > deposit)
+                {
+                    margin += Math.Round(volumeLong - deposit, 2);
+                }
+
+                if (margin <= 0)
+                {
+                    return;
+                }
+
+                decimal commission = GetMarginCommission(margin, dayToProcess);
+
+                if (commission <= 0)
+                {
+                    return;
+                }
+
+                CreateChargePosition(MyRobot, "Margin", commission,
+                    new DateTime(dayToProcess.Year, dayToProcess.Month, dayToProcess.Day, 23, 59, 58));
+
+                AddProfit(-commission);
+            }
+            catch (Exception error)
+            {
+                SendLogMessage($"CheckMargin error: {error}", LogMessageType.Error);
+            }
+        }
+
+        private decimal GetMarginCommission(decimal margin, DateTime time)
+        {
+            try
+            {
+                if (_marginRegime == "Summ")
+                {
+                    List<ListTableSumm> list = null;
+
+                    if (_storagePrime.GetMarginTableSumm().TryGetValue(time.Year, out list) == false
+                        || list == null
+                        || list.Count == 0)
+                    {
+                        return 0;
+                    }
+
+                    decimal rate = 0;
+                    TypeValueTableSumm typeValue = TypeValueTableSumm.Absolute;
+
+                    for (int i = 0; i < list.Count; i++)
+                    {
+                        if (list[i].Summ > margin && i == 0)
+                        {
+                            rate = list[i].Rate;
+                            typeValue = list[i].TypeValue;
+                            break;
+                        }
+
+                        if (i > 0 && list[i - 1].Summ <= margin && list[i].Summ > margin)
+                        {
+                            rate = list[i].Rate;
+                            typeValue = list[i].TypeValue;
+                            break;
+                        }
+
+                        if (i == list.Count - 1)
+                        {
+                            rate = list[list.Count - 1].Rate;
+                            typeValue = list[list.Count - 1].TypeValue;
+                            break;
+                        }
+                    }
+
+                    if (rate <= 0)
+                    {
+                        return 0;
+                    }
+
+                    decimal commission = rate;
+
+                    if (typeValue == TypeValueTableSumm.Percent)
+                    {
+                        commission = Math.Round(margin * rate / 100, 2);
+                    }
+
+                    return commission;
+                }
+                else // Percent
+                {
+                    decimal rate = 0;
+
+                    List<ListTablePeriods> table = _storagePrime.GetMarginTablePercent();
+
+                    for (int i = 0; i < table.Count; i++)
+                    {
+                        if (table[i].Year == time.Year)
+                        {
+                            rate = table[i].Rate / 100;
+                        }
+                    }
+
+                    int daysInYear = 365;
+
+                    if (time.Year % 4 == 0)
+                    {
+                        daysInYear = 366;
+                    }
+
+                    return Math.Round(rate / daysInYear * margin, 2);
+                }
+            }
+            catch (Exception error)
+            {
+                SendLogMessage($"GetMarginCommission error: {error}", LogMessageType.Error);
+                return 0;
+            }
+        }
+
+        private void CheckTaxes(int year)
+        {
+            try
+            {
+                if (_taxesIsOn == false)
+                {
+                    return;
+                }
+
+                if (MyRobot == null
+                    || MyRobot.OnOffEventsInTabs == false)
+                {
+                    return;
+                }
+
+                decimal rate = 0;
+
+                List<ListTablePeriods> table = _storagePrime.GetTaxTable();
+
+                for (int i = 0; i < table.Count; i++)
+                {
+                    if (table[i].Year == year)
+                    {
+                        rate = table[i].Rate;
+                    }
+                }
+
+                if (rate <= 0)
+                {
+                    return;
+                }
+
+                List<Journal.Journal> journals = MyRobot.GetJournals();
+
+                if (journals == null)
+                {
+                    return;
+                }
+
+                bool botTraded = false;
+                decimal profit = 0;
+                decimal profitCommodity = 0;
+
+                for (int j = 0; j < journals.Count; j++)
+                {
+                    List<Position> closedPositions = journals[j].CloseAllPositions;
+
+                    for (int p = 0; p < closedPositions.Count; p++)
+                    {
+                        Position position = closedPositions[p];
+
+                        if (position.TimeClose.Year != year)
+                        {
+                            continue;
+                        }
+
+                        // дивиденды обложены при начислении, уплаченный налог базу не уменьшает
+                        if (IsExcludedFromTaxBase(position))
+                        {
+                            continue;
+                        }
+
+                        botTraded = true;
+
+                        if (IsCommodityFuture(position))
+                        {
+                            profitCommodity += position.ProfitPortfolioAbs;
+                        }
+                        else
+                        {
+                            profit += position.ProfitPortfolioAbs;
+                        }
+                    }
+                }
+
+                if (botTraded == false)
+                {
+                    return;
+                }
+
+                decimal tax = 0;
+
+                if (profit > 0)
+                {
+                    tax += Math.Round(profit * rate / 100, 2);
+                }
+
+                if (profitCommodity > 0)
+                {
+                    tax += Math.Round(profitCommodity * rate / 100, 2);
+                }
+
+                if (tax <= 0)
+                {
+                    return;
+                }
+
+                CreateChargePosition(MyRobot, "Taxes", tax, new DateTime(year, 12, 31, 23, 59, 58));
+
+                AddProfit(-tax);
+            }
+            catch (Exception error)
+            {
+                SendLogMessage($"CheckTaxes error: {error}", LogMessageType.Error);
+            }
+        }
+
+        private bool IsExcludedFromTaxBase(Position position)
+        {
+            if (position == null
+                || string.IsNullOrWhiteSpace(position.SecurityName))
+            {
+                return true;
+            }
+
+            if (position.SecurityName.EndsWith("_divs"))
+            {
+                return true;
+            }
+
+            if (position.SecurityName == "Taxes")
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private bool IsCommodityFuture(Position position)
+        {
+            if (position == null
+                || string.IsNullOrWhiteSpace(position.SecurityName))
+            {
+                return false;
+            }
+
+            Security security = null;
+
+            if (Securities != null)
+            {
+                security = Securities.Find(s => s.Name == position.SecurityName);
+            }
+
+            if (security != null
+                && security.SecurityType != SecurityType.Futures)
+            {
+                return false;
+            }
+
+            string[] prefixes = _commodityFuturesPrefixes.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+
+            for (int i = 0; i < prefixes.Length; i++)
+            {
+                string prefix = prefixes[i].Trim();
+
+                if (prefix.Length == 0)
+                {
+                    continue;
+                }
+
+                if (position.SecurityName.StartsWith(prefix, StringComparison.InvariantCultureIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private void CreateChargePosition(BotPanel bot, string securityName, decimal sum, DateTime chargeTime)
+        {
+            try
+            {
+                List<BotTabSimple> tabs = GetAllBotTabs(bot);
+
+                if (tabs == null
+                    || tabs.Count == 0)
+                {
+                    return;
+                }
+
+                BotTabSimple tab = tabs[0];
+
+                Security security = new Security();
+                security.Name = securityName;
+                security.NameClass = "TestClass";
+
+                Portfolio portfolio = tab.Portfolio;
+                BotManualControl manualPositionSupport = tab.ManualPositionSupport;
+                Journal.Journal journal = tab.GetJournal();
+
+                PositionCreator dealCreator = new PositionCreator();
+
+                // убыточная позиция: открытие дороже закрытия на величину списания
+                Position newDeal = dealCreator.CreatePosition(
+                    bot.NameStrategyUniq, Side.Buy, 2, sum,
+                    OrderPriceType.Limit, manualPositionSupport.SecondToOpen,
+                    security, portfolio, StartProgram.IsOsOptimizer,
+                    manualPositionSupport.OrderTypeTime,
+                    manualPositionSupport.LimitsMakerOnly);
+
+                newDeal.NameBotClass = bot.GetNameStrategyType();
+                newDeal.SecurityName = securityName;
+
+                journal.SetNewDeal(newDeal);
+
+                tab.OrderFakeExecute(newDeal.OpenOrders[0], chargeTime);
+
+                Position position = tab.PositionsLast;
+
+                if (position == null)
+                {
+                    return;
+                }
+
+                Order closeOrder = dealCreator.CreateCloseOrderForDeal(
+                    security, position, 1,
+                    OrderPriceType.Limit, new TimeSpan(1, 1, 1, 1),
+                    StartProgram.IsOsOptimizer, manualPositionSupport.OrderTypeTime,
+                    portfolio.ServerUniqueName, manualPositionSupport.LimitsMakerOnly);
+
+                if (closeOrder == null)
+                {
+                    return;
+                }
+
+                closeOrder.PortfolioNumber = portfolio.Number;
+                closeOrder.Volume = sum;
+
+                position.AddNewCloseOrder(closeOrder);
+
+                tab.OrderFakeExecute(closeOrder, chargeTime.AddSeconds(1));
+            }
+            catch (Exception error)
+            {
+                SendLogMessage($"CreateChargePosition error: {error}", LogMessageType.Error);
+            }
+        }
+
+        #endregion
+
         #region Log
 
         private void SendLogMessage(string message, LogMessageType type)
@@ -2223,6 +3613,13 @@ namespace OsEngine.Market.Servers.Optimizer
                 _lastCandleIndex = 0;
                 _lastMarketDepthIndex = 0;
                 Candles = null;
+
+                if (TradeAccess != null)
+                {
+                    TradeAccess.Dispose();
+                    TradeAccess = null;
+                }
+
                 Trades = null;
                 LastTradeSeries = null;
                 MarketDepths = null;
@@ -2456,6 +3853,35 @@ namespace OsEngine.Market.Servers.Optimizer
 
         public List<Trade> Trades;
 
+        /// <summary>FEATURE-0107. Windowed tick access when RemoveTradesFromMemory is on; Trades is used otherwise.</summary>
+        public ITradeAccess TradeAccess;
+
+        private int TickCount
+        {
+            get
+            {
+                if (TradeAccess != null)
+                {
+                    return TradeAccess.Count;
+                }
+                if (Trades != null)
+                {
+                    return Trades.Count;
+                }
+                return 0;
+            }
+        }
+
+        private Trade TickAt(int index)
+        {
+            if (TradeAccess != null)
+            {
+                TradeAccess.EnsureLoaded(index);
+                return TradeAccess.At(index);
+            }
+            return Trades[index];
+        }
+
         public Trade LastTrade;
 
         private int _lastTradeIndexInArray;
@@ -2476,13 +3902,15 @@ namespace OsEngine.Market.Servers.Optimizer
                 return;
             }
 
+            // срез миллисекунд и выдача <= now — формула тестера (SecurityTester.CheckTrades):
+            // тик с ms и out-of-order иначе молча теряется, now всегда целая секунда
             if (LastTrade != null &&
-                LastTrade.Time > now)
+                LastTrade.Time.AddMilliseconds(-LastTrade.Time.Millisecond) > now)
             {
                 return;
             }
 
-            if (_lastTradeIndexInArray >= Trades.Count)
+            if (_lastTradeIndexInArray >= TickCount)
             {
                 return;
             }
@@ -2491,11 +3919,11 @@ namespace OsEngine.Market.Servers.Optimizer
 
             if (LastTrade == null)
             {
-                LastTrade = Trades[_lastTradeIndexInArray];
+                LastTrade = TickAt(_lastTradeIndexInArray);
                 _lastTradeIndexInArray++;
             }
 
-            if (LastTrade.Time > now)
+            if (LastTrade.Time.AddMilliseconds(-LastTrade.Time.Millisecond) > now)
             {
                 return;
             }
@@ -2505,17 +3933,17 @@ namespace OsEngine.Market.Servers.Optimizer
             List<Trade> lastTradesSeries = new List<Trade>();
 
             if(LastTrade != null 
-                && LastTrade.Time == now)
+                && LastTrade.Time.AddMilliseconds(-LastTrade.Time.Millisecond) <= now)
             {
                 lastTradesSeries.Add(LastTrade);
             }
 
-            while (_lastTradeIndexInArray < Trades.Count)
+            while (_lastTradeIndexInArray < TickCount)
             {
-                Trade tradeN = Trades[_lastTradeIndexInArray];
+                Trade tradeN = TickAt(_lastTradeIndexInArray);
                 _lastTradeIndexInArray++;
 
-                if (tradeN.Time == now)
+                if (tradeN.Time.AddMilliseconds(-tradeN.Time.Millisecond) <= now)
                 {
                     lastTradesSeries.Add(tradeN);
                 }
@@ -2544,12 +3972,19 @@ namespace OsEngine.Market.Servers.Optimizer
                 List<Trade> trades = new List<Trade>() { lastTradesSeries[i] };
                 LastTradeSeries = trades;
                 NeedToCheckOrders();
-                NewTradesEvent(trades, _lastTradeIndexInArray, Trades.Count);
+                NewTradesEvent(trades, _lastTradeIndexInArray, TickCount);
             }
 
             if (lastTradesSeries.Count > 0)
             {
                 LastTradeTime = lastTradesSeries[^1].Time;
+            }
+
+            // FEATURE-0107: everything before the next unread tick is already dispatched, release it
+
+            if (TradeAccess != null)
+            {
+                TradeAccess.TrimBefore(_lastTradeIndexInArray);
             }
         }
 
@@ -2623,5 +4058,17 @@ namespace OsEngine.Market.Servers.Optimizer
 
         public event Action<string, LogMessageType> LogMessageEvent;
 
+    }
+
+    internal class PendingDividendPayment
+    {
+        public string Ticker;
+        public string BotName;
+        public DateTime RegistryCloseDate;
+        public DateTime PositionCreateDate;
+        public DateTime ExpectedPaymentDate;
+        public decimal Volume;
+        public decimal Sum;
+        public WikiDividendRecord DividendRecord;
     }
 }

@@ -226,6 +226,28 @@ namespace OsEngine.OsTrader.Grids
             ComboBoxStopGridByTimeOfDayReaction.SelectedItem = tradeGrid.StopBy.StopGridByTimeOfDayReaction.ToString();
             ComboBoxStopGridByTimeOfDayReaction.SelectionChanged += ComboBoxStopGridByTimeOfDayReaction_SelectionChanged;
 
+            TextBoxStopGridByPriceUpValue.Text = tradeGrid.StopBy.StopGridByPriceUpValue == 0
+                ? ""
+                : tradeGrid.StopBy.StopGridByPriceUpValue.ToString();
+            TextBoxStopGridByPriceUpValue.TextChanged += TextBoxStopGridByPriceUpValue_TextChanged;
+            ComboBoxStopGridByPriceUpReaction.Items.Add(TradeGridRegime.CloseForced.ToString());
+            ComboBoxStopGridByPriceUpReaction.Items.Add(TradeGridRegime.CloseOnly.ToString());
+            ComboBoxStopGridByPriceUpReaction.Items.Add(TradeGridRegime.OffAndCancelOrders.ToString());
+            ComboBoxStopGridByPriceUpReaction.Items.Add(TradeGridRegime.Off.ToString());
+            ComboBoxStopGridByPriceUpReaction.SelectedItem = tradeGrid.StopBy.StopGridByPriceUpReaction.ToString();
+            ComboBoxStopGridByPriceUpReaction.SelectionChanged += ComboBoxStopGridByPriceUpReaction_SelectionChanged;
+
+            TextBoxStopGridByPriceDownValue.Text = tradeGrid.StopBy.StopGridByPriceDownValue == 0
+                ? ""
+                : tradeGrid.StopBy.StopGridByPriceDownValue.ToString();
+            TextBoxStopGridByPriceDownValue.TextChanged += TextBoxStopGridByPriceDownValue_TextChanged;
+            ComboBoxStopGridByPriceDownReaction.Items.Add(TradeGridRegime.CloseForced.ToString());
+            ComboBoxStopGridByPriceDownReaction.Items.Add(TradeGridRegime.CloseOnly.ToString());
+            ComboBoxStopGridByPriceDownReaction.Items.Add(TradeGridRegime.OffAndCancelOrders.ToString());
+            ComboBoxStopGridByPriceDownReaction.Items.Add(TradeGridRegime.Off.ToString());
+            ComboBoxStopGridByPriceDownReaction.SelectedItem = tradeGrid.StopBy.StopGridByPriceDownReaction.ToString();
+            ComboBoxStopGridByPriceDownReaction.SelectionChanged += ComboBoxStopGridByPriceDownReaction_SelectionChanged;
+
             // grid lines creation
 
             ComboBoxGridSide.Items.Add(Side.Buy.ToString());
@@ -380,6 +402,10 @@ namespace OsEngine.OsTrader.Grids
             CheckBoxReduceOrdersCountInMarketOnNoFundsError.Checked += CheckBoxReduceOrdersCountInMarketOnNoFundsError_Checked;
             CheckBoxReduceOrdersCountInMarketOnNoFundsError.Unchecked += CheckBoxReduceOrdersCountInMarketOnNoFundsError_Checked;
 
+            CheckBoxRestoreCloseOrdersCountOnFundsRecovery.IsChecked = tradeGrid.ErrorsReaction.RestoreCloseOrdersCountInMarketOnFundsRecovery;
+            CheckBoxRestoreCloseOrdersCountOnFundsRecovery.Checked += CheckBoxRestoreCloseOrdersCountOnFundsRecovery_Checked;
+            CheckBoxRestoreCloseOrdersCountOnFundsRecovery.Unchecked += CheckBoxRestoreCloseOrdersCountOnFundsRecovery_Checked;
+
             // trailing up / down
 
             CheckBoxTrailingUpIsOn.IsChecked = tradeGrid.TrailingUp.TrailingUpIsOn;
@@ -425,95 +451,107 @@ namespace OsEngine.OsTrader.Grids
             worker.Start();
         }
 
+        private DispatcherTimer _blinkTimer;
+        private int _blinkCount;
+        private bool _isGreenVisible = true;
+
         private void StartButtonBlinkAnimation()
         {
             try
             {
-                DispatcherTimer timer = new DispatcherTimer();
-                int blinkCount = 0;
-                bool isGreenVisible = true;
-
-                timer.Interval = TimeSpan.FromMilliseconds(300);
-                timer.Tick += (s, e) =>
-                {
-                    try
-                    {
-                        if (blinkCount >= 20)
-                        {
-                            timer.Stop();
-                            GreenCollection.Opacity = 1;
-                            WhiteCollection.Opacity = 0;
-                            PostGreenTrailUpInstruction.Opacity = 1;
-                            PostWhiteTrailUpInstruction.Opacity = 0;
-                            PostGreenStopAndProfit.Opacity = 1;
-                            PostWhiteStopAndProfit.Opacity = 0;
-                            PostGreenError.Opacity = 1;
-                            PostWhiteError.Opacity = 0;
-                            PostGreenBase.Opacity = 1;
-                            PostWhiteBase.Opacity = 0;
-                            PostGreenCreation.Opacity = 1;
-                            PostWhiteCreation.Opacity = 0;
-                            PostGreenStopTrading.Opacity = 1;
-                            PostWhiteStopTrading.Opacity = 0;
-                            PostGreenAutoStart.Opacity = 1;
-                            PostWhiteAutoStart.Opacity = 0;
-                            return;
-                        }
-
-                        if (isGreenVisible)
-                        {
-                            GreenCollection.Opacity = 0;
-                            WhiteCollection.Opacity = 1;
-                            PostGreenTrailUpInstruction.Opacity = 0;
-                            PostWhiteTrailUpInstruction.Opacity = 1;
-                            PostGreenStopAndProfit.Opacity = 0;
-                            PostWhiteStopAndProfit.Opacity = 1;
-                            PostGreenError.Opacity = 0;
-                            PostWhiteError.Opacity = 1;
-                            PostGreenBase.Opacity = 0;
-                            PostWhiteBase.Opacity = 1;
-                            PostGreenCreation.Opacity = 0;
-                            PostWhiteCreation.Opacity = 1;
-                            PostGreenStopTrading.Opacity = 0;
-                            PostWhiteStopTrading.Opacity = 1;
-                            PostGreenAutoStart.Opacity = 0;
-                            PostWhiteAutoStart.Opacity = 1;
-                        }
-                        else
-                        {
-                            GreenCollection.Opacity = 1;
-                            WhiteCollection.Opacity = 0;
-                            PostGreenTrailUpInstruction.Opacity = 1;
-                            PostWhiteTrailUpInstruction.Opacity = 0;
-                            PostGreenStopAndProfit.Opacity = 1;
-                            PostWhiteStopAndProfit.Opacity = 0;
-                            PostGreenError.Opacity = 1;
-                            PostWhiteError.Opacity = 0;
-                            PostGreenBase.Opacity = 1;
-                            PostWhiteBase.Opacity = 0;
-                            PostGreenCreation.Opacity = 1;
-                            PostWhiteCreation.Opacity = 0;
-                            PostGreenStopTrading.Opacity = 1;
-                            PostWhiteStopTrading.Opacity = 0;
-                            PostGreenAutoStart.Opacity = 1;
-                            PostWhiteAutoStart.Opacity = 0;
-                        }
-
-                        isGreenVisible = !isGreenVisible;
-                        blinkCount++;
-                    }
-                    catch (Exception ex)
-                    {
-                        ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
-                        timer.Stop();
-                    }
-                };
-
-                timer.Start();
+                _blinkTimer = new DispatcherTimer();
+                _blinkTimer.Interval = TimeSpan.FromMilliseconds(300);
+                _blinkTimer.Tick += _blinkTimer_Tick;
+                _blinkTimer.Start();
             }
             catch (Exception ex)
             {
                 ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private void _blinkTimer_Tick(object sender, EventArgs e)
+        {
+            if (_blinkTimer == null)
+            {
+                return;
+            }
+
+            try
+            {
+                if (_blinkCount >= 20)
+                {
+                    _blinkTimer.Stop();
+                    _blinkTimer.Tick -= _blinkTimer_Tick;
+                    _blinkTimer = null;
+                    GreenCollection.Opacity = 1;
+                    WhiteCollection.Opacity = 0;
+                    PostGreenTrailUpInstruction.Opacity = 1;
+                    PostWhiteTrailUpInstruction.Opacity = 0;
+                    PostGreenStopAndProfit.Opacity = 1;
+                    PostWhiteStopAndProfit.Opacity = 0;
+                    PostGreenError.Opacity = 1;
+                    PostWhiteError.Opacity = 0;
+                    PostGreenBase.Opacity = 1;
+                    PostWhiteBase.Opacity = 0;
+                    PostGreenCreation.Opacity = 1;
+                    PostWhiteCreation.Opacity = 0;
+                    PostGreenStopTrading.Opacity = 1;
+                    PostWhiteStopTrading.Opacity = 0;
+                    PostGreenAutoStart.Opacity = 1;
+                    PostWhiteAutoStart.Opacity = 0;
+                    return;
+                }
+
+                if (_isGreenVisible)
+                {
+                    GreenCollection.Opacity = 0;
+                    WhiteCollection.Opacity = 1;
+                    PostGreenTrailUpInstruction.Opacity = 0;
+                    PostWhiteTrailUpInstruction.Opacity = 1;
+                    PostGreenStopAndProfit.Opacity = 0;
+                    PostWhiteStopAndProfit.Opacity = 1;
+                    PostGreenError.Opacity = 0;
+                    PostWhiteError.Opacity = 1;
+                    PostGreenBase.Opacity = 0;
+                    PostWhiteBase.Opacity = 1;
+                    PostGreenCreation.Opacity = 0;
+                    PostWhiteCreation.Opacity = 1;
+                    PostGreenStopTrading.Opacity = 0;
+                    PostWhiteStopTrading.Opacity = 1;
+                    PostGreenAutoStart.Opacity = 0;
+                    PostWhiteAutoStart.Opacity = 1;
+                }
+                else
+                {
+                    GreenCollection.Opacity = 1;
+                    WhiteCollection.Opacity = 0;
+                    PostGreenTrailUpInstruction.Opacity = 1;
+                    PostWhiteTrailUpInstruction.Opacity = 0;
+                    PostGreenStopAndProfit.Opacity = 1;
+                    PostWhiteStopAndProfit.Opacity = 0;
+                    PostGreenError.Opacity = 1;
+                    PostWhiteError.Opacity = 0;
+                    PostGreenBase.Opacity = 1;
+                    PostWhiteBase.Opacity = 0;
+                    PostGreenCreation.Opacity = 1;
+                    PostWhiteCreation.Opacity = 0;
+                    PostGreenStopTrading.Opacity = 1;
+                    PostWhiteStopTrading.Opacity = 0;
+                    PostGreenAutoStart.Opacity = 1;
+                    PostWhiteAutoStart.Opacity = 0;
+                }
+
+                _isGreenVisible = !_isGreenVisible;
+                _blinkCount++;
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+                if (_blinkTimer != null)
+                {
+                    _blinkTimer.Stop();
+                }
             }
         }
 
@@ -582,6 +620,10 @@ namespace OsEngine.OsTrader.Grids
             LabelStopGridByTimeOfDayHour.Content = OsLocalization.Trader.Label527 + ":";
             LabelStopGridByTimeOfDayMinute.Content = OsLocalization.Trader.Label528 + ":";
             LabelStopGridByTimeOfDaySecond.Content = OsLocalization.Trader.Label529 + ":";
+            LabelStopGridByPriceUpValue.Content = OsLocalization.Trader.Label782;
+            LabelStopGridByPriceUpReaction.Content = OsLocalization.Trader.Label484;
+            LabelStopGridByPriceDownValue.Content = OsLocalization.Trader.Label783;
+            LabelStopGridByPriceDownReaction.Content = OsLocalization.Trader.Label484;
 
             // grid lines creation
 
@@ -646,6 +688,7 @@ namespace OsEngine.OsTrader.Grids
             LabelWaitSecondsOnStartConnector.Content = OsLocalization.Trader.Label583;
 
             CheckBoxReduceOrdersCountInMarketOnNoFundsError.Content = OsLocalization.Trader.Label671;
+            CheckBoxRestoreCloseOrdersCountOnFundsRecovery.Content = OsLocalization.Trader.Label784;
 
             // trailing up
 
@@ -662,9 +705,8 @@ namespace OsEngine.OsTrader.Grids
 
         private void CheckEnabledItems()
         {
-            if (_gridDataGrid.InvokeRequired)
+            if (TryMarshalToUi(new Action(CheckEnabledItems)))
             {
-                _gridDataGrid.Invoke(new Action(CheckEnabledItems));
                 return;
             }
 
@@ -756,6 +798,13 @@ namespace OsEngine.OsTrader.Grids
 
             try
             {
+                if (_blinkTimer != null)
+                {
+                    _blinkTimer.Stop();
+                    _blinkTimer.Tick -= _blinkTimer_Tick;
+                    _blinkTimer = null;
+                }
+
                 ComboBoxGridType.SelectionChanged -= ComboBoxGridType_SelectionChanged;
                 ComboBoxRegime.SelectionChanged -= ComboBoxRegime_SelectionChanged;
                 ComboBoxRegimeLogicEntry.SelectionChanged -= ComboBoxRegimeLogicEntry_SelectionChanged;
@@ -763,26 +812,51 @@ namespace OsEngine.OsTrader.Grids
                 TextBoxMaxClosePositionsInJournal.TextChanged -= TextBoxMaxClosePositionsInJournal_TextChanged;
                 TextBoxMaxOpenOrdersInMarket.TextChanged -= TextBoxMaxOrdersInMarket_TextChanged;
                 TextBoxMaxCloseOrdersInMarket.TextChanged -= TextBoxMaxCloseOrdersInMarket_TextChanged;
+                TextBoxDelayInReal.TextChanged -= TextBoxDelayInReal_TextChanged;
+
+                ComboBoxCheckMicroVolumes.SelectionChanged -= ComboBoxCheckMicroVolumes_SelectionChanged;
+                TextBoxMaxDistanceToOrdersPercent.TextChanged -= TextBoxMaxDistanceToOrdersPercent_TextChanged;
+
+                ComboBoxNonTradePeriod1Regime.SelectionChanged -= ComboBoxNonTradePeriod1Regime_SelectionChanged;
+                ComboBoxNonTradePeriod2Regime.SelectionChanged -= ComboBoxNonTradePeriod2Regime_SelectionChanged;
+                ComboBoxOpenOrdersMakerOnly.SelectionChanged -= ComboBoxOpenOrdersMakerOnly_SelectionChanged;
+                ComboBoxCloseForcedRegimeOrderType.SelectionChanged -= ComboBoxCloseForcedRegimeOrderType_SelectionChanged;
 
                 CheckBoxStopGridByMoveUpIsOn.Checked -= CheckBoxStopGridByMoveUpIsOn_Checked;
+                CheckBoxStopGridByMoveUpIsOn.Unchecked -= CheckBoxStopGridByMoveUpIsOn_Checked;
                 TextBoxStopGridByMoveUpValuePercent.TextChanged -= TextBoxStopGridByMoveUpValuePercent_TextChanged;
+                ComboBoxStopGridByMoveUpReaction.SelectionChanged -= ComboBoxStopGridByMoveUpReaction_SelectionChanged;
+
                 CheckBoxStopGridByMoveDownIsOn.Checked -= CheckBoxStopGridByMoveDownIsOn_Checked;
+                CheckBoxStopGridByMoveDownIsOn.Unchecked -= CheckBoxStopGridByMoveDownIsOn_Checked;
                 TextBoxStopGridByMoveDownValuePercent.TextChanged -= TextBoxStopGridByMoveDownValuePercent_TextChanged;
+                ComboBoxStopGridByMoveDownReaction.SelectionChanged -= ComboBoxStopGridByMoveDownReaction_SelectionChanged;
+
                 CheckBoxStopGridByPositionsCountIsOn.Checked -= CheckBoxStopGridByPositionsCountIsOn_Checked;
+                CheckBoxStopGridByPositionsCountIsOn.Unchecked -= CheckBoxStopGridByPositionsCountIsOn_Checked;
                 TextBoxStopGridByPositionsCountValue.TextChanged -= TextBoxStopGridByPositionsCountValue_TextChanged;
-                ComboBoxGridSide.SelectionChanged -= ComboBoxGridSide_SelectionChanged;
-                TextBoxFirstPrice.TextChanged -= TextBoxFirstPrice_TextChanged;
-                TextBoxLineCountStart.TextChanged -= TextBoxLineCountStart_TextChanged;
+                ComboBoxStopGridByPositionsCountReaction.SelectionChanged -= ComboBoxStopGridByPositionsCountReaction_SelectionChanged;
 
                 CheckBoxStopGridByLifeTimeIsOn.Checked -= CheckBoxStopGridByLifeTimeIsOn_Checked;
+                CheckBoxStopGridByLifeTimeIsOn.Unchecked -= CheckBoxStopGridByLifeTimeIsOn_Checked;
                 TextBoxStopGridByLifeTimeSecondsToLife.TextChanged -= TextBoxStopGridByLifeTimeSecondsToLife_TextChanged;
                 ComboBoxStopGridByLifeTimeReaction.SelectionChanged -= ComboBoxStopGridByLifeTimeReaction_SelectionChanged;
 
                 CheckBoxStopGridByTimeOfDayIsOn.Checked -= CheckBoxStopGridByTimeOfDayIsOn_Checked;
+                CheckBoxStopGridByTimeOfDayIsOn.Unchecked -= CheckBoxStopGridByTimeOfDayIsOn_Checked;
                 TextBoxStopGridByTimeOfDayHour.TextChanged -= TextBoxStopGridByTimeOfDayHour_TextChanged;
                 TextBoxStopGridByTimeOfDayMinute.TextChanged -= TextBoxStopGridByTimeOfDayMinute_TextChanged;
                 TextBoxStopGridByTimeOfDaySecond.TextChanged -= TextBoxStopGridByTimeOfDaySecond_TextChanged;
                 ComboBoxStopGridByTimeOfDayReaction.SelectionChanged -= ComboBoxStopGridByTimeOfDayReaction_SelectionChanged;
+
+                TextBoxStopGridByPriceUpValue.TextChanged -= TextBoxStopGridByPriceUpValue_TextChanged;
+                ComboBoxStopGridByPriceUpReaction.SelectionChanged -= ComboBoxStopGridByPriceUpReaction_SelectionChanged;
+                TextBoxStopGridByPriceDownValue.TextChanged -= TextBoxStopGridByPriceDownValue_TextChanged;
+                ComboBoxStopGridByPriceDownReaction.SelectionChanged -= ComboBoxStopGridByPriceDownReaction_SelectionChanged;
+
+                ComboBoxGridSide.SelectionChanged -= ComboBoxGridSide_SelectionChanged;
+                TextBoxFirstPrice.TextChanged -= TextBoxFirstPrice_TextChanged;
+                TextBoxLineCountStart.TextChanged -= TextBoxLineCountStart_TextChanged;
 
                 ComboBoxTypeStep.SelectionChanged -= ComboBoxTypeStep_SelectionChanged;
                 TextBoxLineStep.TextChanged -= TextBoxLineStep_TextChanged;
@@ -790,12 +864,16 @@ namespace OsEngine.OsTrader.Grids
                 ComboBoxTypeProfit.SelectionChanged -= ComboBoxTypeProfit_SelectionChanged;
                 TextBoxProfitStep.TextChanged -= TextBoxProfitStep_TextChanged;
                 TextBoxProfitMultiplicator.TextChanged -= TextBoxProfitMultiplicator_TextChanged;
+                ComboBoxTypeVolume.SelectionChanged -= ComboBoxTypeVolume_SelectionChanged;
+                TextBoxStartVolume.TextChanged -= TextBoxStartVolume_TextChanged;
                 TextBoxMartingaleMultiplicator.TextChanged -= TextBoxMartingaleMultiplicator_TextChanged;
                 TextBoxTradeAssetInPortfolio.TextChanged -= TextBoxTradeAssetInPortfolio_TextChanged;
 
                 ComboBoxProfitRegime.SelectionChanged -= ComboBoxProfitRegime_SelectionChanged;
                 ComboBoxProfitValueType.SelectionChanged -= ComboBoxProfitValueType_SelectionChanged;
                 TextBoxProfitValue.TextChanged -= TextBoxProfitValue_TextChanged;
+                CheckBoxStopByProfit.Checked -= CheckBoxStopByProfit_Checked;
+                CheckBoxStopByProfit.Unchecked -= CheckBoxStopByProfit_Checked;
                 ComboBoxStopRegime.SelectionChanged -= ComboBoxStopRegime_SelectionChanged;
                 ComboBoxStopValueType.SelectionChanged -= ComboBoxStopValueType_SelectionChanged;
                 TextBoxStopValue.TextChanged -= TextBoxStopValue_TextChanged;
@@ -818,6 +896,8 @@ namespace OsEngine.OsTrader.Grids
                 CheckBoxTrailingDownIsOn.Unchecked -= CheckBoxTrailingDownIsOn_Checked;
                 TextBoxTrailingDownStep.TextChanged -= TextBoxTrailingDownStep_TextChanged;
                 TextBoxTrailingDownLimit.TextChanged -= TextBoxTrailingDownLimit_TextChanged;
+
+                ButtonPosts.Click -= ButtonPosts_Click;
             }
             catch
             {
@@ -835,6 +915,9 @@ namespace OsEngine.OsTrader.Grids
                     _gridDataGrid.CellValueChanged -= EventChangeValueInTable;
                     _gridDataGrid.CellClick -= _gridDataGrid_CellClick;
                     _gridDataGrid.Rows.Clear();
+                    _gridDataGrid.Columns.Clear();
+                    _gridDataGrid.DataSource = null;
+                    _gridDataGrid.Dispose();
                     _gridDataGrid = null;
                     HostGridTable = null;
                 }
@@ -843,15 +926,29 @@ namespace OsEngine.OsTrader.Grids
             {
                 // ignore
             }
+
+            try
+            {
+                if (_instructionsUi != null)
+                {
+                    _instructionsUi.Closed -= _instructionsUi_Closed;
+                    _instructionsUi = null;
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+
+            Closed -= TradeGridUi_Closed;
         }
 
         private void TradeGrid_RePaintSettingsEvent()
         {
             try
             {
-                if (_gridDataGrid.InvokeRequired)
+                if (TryMarshalToUi(new Action(TradeGrid_RePaintSettingsEvent)))
                 {
-                    _gridDataGrid.Invoke(new Action(TradeGrid_RePaintSettingsEvent));
                     return;
                 }
 
@@ -996,6 +1093,25 @@ namespace OsEngine.OsTrader.Grids
             catch
             {
                 // ignore
+            }
+        }
+
+        private void CheckBoxRestoreCloseOrdersCountOnFundsRecovery_Checked(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                TradeGrid.ErrorsReaction.RestoreCloseOrdersCountInMarketOnFundsRecovery = CheckBoxRestoreCloseOrdersCountOnFundsRecovery.IsChecked.Value;
+
+                if (CheckBoxRestoreCloseOrdersCountOnFundsRecovery.IsChecked == false)
+                {
+                    TradeGrid.ErrorsReaction.CancelCloseOrdersRecovery();
+                }
+
+                TradeGrid.Save();
+            }
+            catch (Exception error)
+            {
+                TradeGrid.ErrorsReaction.SendNewLogMessage(error.ToString(), OsEngine.Logging.LogMessageType.Error);
             }
         }
 
@@ -1782,18 +1898,49 @@ namespace OsEngine.OsTrader.Grids
             }
         }
 
+        // BUG-0282: маршалинг на UI окна через его Dispatcher: Control.InvokeRequired на grid
+        // с несозданным handle лжёт (false) — перерисовка уходила с рабочего потока (краш #353).
+        // На Shutdown диспетчера — тихий возврат: отрисовка уже не нужна, а исключение ушло бы
+        // штормом ошибок в catch потока-наблюдателя. true = вызывающему возвращаться.
+        private bool TryMarshalToUi(Action repaint)
+        {
+            Dispatcher dispatcher = Dispatcher;
+            if (dispatcher == null)
+            {
+                // shortcut: у реального окна Dispatcher всегда задан; null только у достроенного
+                // без конструктора экземпляра — тогда штатный путь (инлайн)
+                return false;
+            }
+            if (dispatcher.HasShutdownStarted
+                || dispatcher.HasShutdownFinished)
+            {
+                return true;
+            }
+            if (dispatcher.CheckAccess())
+            {
+                return false;
+            }
+            dispatcher.Invoke(repaint);
+            return true;
+        }
+
         private void RePaintGridTable()
         {
             try
             {
+                if (TryMarshalToUi(new Action(RePaintGridTable)))
+                {
+                    return;
+                }
+
                 if (_gridDataGrid == null)
                 {
                     return;
                 }
 
-                if (_gridDataGrid.InvokeRequired)
+                if (TradeGrid.GridCreator == null
+                    || TradeGrid.GridCreator.Lines == null)
                 {
-                    _gridDataGrid.Invoke(new Action(RePaintGridTable));
                     return;
                 }
 
@@ -1805,6 +1952,11 @@ namespace OsEngine.OsTrader.Grids
                 for (int i = 0; i < TradeGrid.GridCreator.Lines.Count; i++)
                 {
                     TradeGridLine curLine = TradeGrid.GridCreator.Lines[i];
+
+                    if (curLine == null)
+                    {
+                        continue;
+                    }
 
                     DataGridViewRow rowLine = new DataGridViewRow();
 
@@ -1899,16 +2051,22 @@ namespace OsEngine.OsTrader.Grids
                     return;
                 }
 
-                if (_gridDataGrid.InvokeRequired)
+                if (TryMarshalToUi(new Action(TryUpdateGridTable)))
                 {
-                    _gridDataGrid.Invoke(new Action(TryUpdateGridTable));
                     return;
                 }
 
                 TextBoxFailOpenOrdersCountFact.Text = TradeGrid.ErrorsReaction.FailOpenOrdersCountFact.ToString();
                 TextBoxFailCancelOrdersCountFact.Text = TradeGrid.ErrorsReaction.FailCancelOrdersCountFact.ToString();
 
-                TextBoxCurrentServerTime.Text = TradeGrid.Tab.TimeServerCurrent.ToShortTimeString();
+                if (TradeGrid.Tab.TimeServerCurrent == DateTime.MinValue)
+                {
+                    TextBoxCurrentServerTime.Text = OsLocalization.Trader.Label781;
+                }
+                else
+                {
+                    TextBoxCurrentServerTime.Text = TradeGrid.Tab.TimeServerCurrent.ToString();
+                }
 
                 if (TradeGrid.GridType == TradeGridPrimeType.OpenPosition)
                 {
@@ -2416,6 +2574,75 @@ namespace OsEngine.OsTrader.Grids
             try
             {
                 Enum.TryParse(ComboBoxStopGridByTimeOfDayReaction.SelectedItem.ToString(), out TradeGrid.StopBy.StopGridByTimeOfDayReaction);
+                TradeGrid.Save();
+            }
+            catch (Exception ex)
+            {
+                TradeGrid.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private void TextBoxStopGridByPriceUpValue_TextChanged(object sender, TextChangedEventArgs e)
+        {
+            try
+            {
+                // пустое поле = условие выключено, битый текст по ToDecimal-конвенции даёт 0
+                if (string.IsNullOrEmpty(TextBoxStopGridByPriceUpValue.Text))
+                {
+                    TradeGrid.StopBy.StopGridByPriceUpValue = 0;
+                }
+                else
+                {
+                    TradeGrid.StopBy.StopGridByPriceUpValue = TextBoxStopGridByPriceUpValue.Text.ToDecimal();
+                }
+
+                TradeGrid.Save();
+            }
+            catch (Exception ex)
+            {
+                TradeGrid.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private void ComboBoxStopGridByPriceUpReaction_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            try
+            {
+                Enum.TryParse(ComboBoxStopGridByPriceUpReaction.SelectedItem.ToString(), out TradeGrid.StopBy.StopGridByPriceUpReaction);
+                TradeGrid.Save();
+            }
+            catch (Exception ex)
+            {
+                TradeGrid.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private void TextBoxStopGridByPriceDownValue_TextChanged(object sender, TextChangedEventArgs e)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(TextBoxStopGridByPriceDownValue.Text))
+                {
+                    TradeGrid.StopBy.StopGridByPriceDownValue = 0;
+                }
+                else
+                {
+                    TradeGrid.StopBy.StopGridByPriceDownValue = TextBoxStopGridByPriceDownValue.Text.ToDecimal();
+                }
+
+                TradeGrid.Save();
+            }
+            catch (Exception ex)
+            {
+                TradeGrid.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private void ComboBoxStopGridByPriceDownReaction_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            try
+            {
+                Enum.TryParse(ComboBoxStopGridByPriceDownReaction.SelectedItem.ToString(), out TradeGrid.StopBy.StopGridByPriceDownReaction);
                 TradeGrid.Save();
             }
             catch (Exception ex)

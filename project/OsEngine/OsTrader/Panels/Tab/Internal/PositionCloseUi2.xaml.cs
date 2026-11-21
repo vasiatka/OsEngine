@@ -55,13 +55,17 @@ namespace OsEngine.OsTrader.Panels.Tab.Internal
             LabelLimitVolumeToClose.Content = OsLocalization.Trader.Label30;
             LabelMarketVolumeToClose.Content = OsLocalization.Trader.Label30;
             LabelFakeVolume.Content = OsLocalization.Trader.Label30;
+            LabelStopVolumeToClose.Content = OsLocalization.Trader.Label30;
+            LabelStopMarketVolumeToClose.Content = OsLocalization.Trader.Label30;
 
             LabelProfitActivationPrice.Content = OsLocalization.Trader.Label206;
             LabelStopActivationPrice.Content = OsLocalization.Trader.Label206;
+            LabelStopMarketActivationPrice.Content = OsLocalization.Trader.Label206;
 
             TabItemLimit.Header = OsLocalization.Trader.Label200;
             TabItemMarket.Header = OsLocalization.Trader.Label201;
             TabItemStop.Header = OsLocalization.Trader.Label202;
+            TabItemStopMarket.Header = OsLocalization.Trader.Label772;
             TabItemFake.Header = OsLocalization.Trader.Label203;
             TabItemProfit.Header = OsLocalization.Trader.Label222;
 
@@ -72,12 +76,28 @@ namespace OsEngine.OsTrader.Panels.Tab.Internal
             ButtonCloseAtLimit.Content = OsLocalization.Trader.Label217;
             ButtonCloseAtMarket.Content = OsLocalization.Trader.Label218;
             ButtonCloseAtStop.Content = OsLocalization.Trader.Label219;
+            ButtonCloseAtStopMarket.Content = OsLocalization.Trader.Label775;
             ButtonCloseAtProfit.Content = OsLocalization.Trader.Label220;
             ButtonCloseAtFake.Content = OsLocalization.Trader.Label221;
 
             ButtonRevokeLimit.Content = OsLocalization.Trader.Label419;
             ButtonRevokeProfit.Content = OsLocalization.Trader.Label419;
             ButtonRevokeStop.Content = OsLocalization.Trader.Label419;
+            ButtonRevokeStopMarket.Content = OsLocalization.Trader.Label419;
+
+            CheckBoxServerStopOrder.Content = OsLocalization.Trader.Label771;
+            CheckBoxServerStopMarket.Content = OsLocalization.Trader.Label771;
+
+            bool serverStopsSupported = Tab.ServerIsSupportStopOrders && Tab.StartProgram == StartProgram.IsOsTrader;
+
+            CheckBoxServerStopOrder.IsEnabled = serverStopsSupported;
+            CheckBoxServerStopMarket.IsEnabled = serverStopsSupported;
+
+            CheckBoxServerStopOrder.IsChecked = Tab.ServerStopOrdersIsOn;
+            CheckBoxServerStopMarket.IsChecked = Tab.ServerStopOrdersIsOn;
+
+            CheckBoxServerStopOrder.Click += CheckBoxServerStopOrder_Click;
+            CheckBoxServerStopMarket.Click += CheckBoxServerStopMarket_Click;
 
             GlobalGUILayout.Listen(this, "mD_ClosePos" + Tab.TabName + Position.Number);
 
@@ -98,19 +118,25 @@ namespace OsEngine.OsTrader.Panels.Tab.Internal
             {
                 TabControlTypePosition.SelectedIndex = 2;
             }
-            else if (closePositionType == ClosePositionType.Profit)
+            else if (closePositionType == ClosePositionType.StopMarket)
             {
                 TabControlTypePosition.SelectedIndex = 3;
             }
-            else if (closePositionType == ClosePositionType.Fake)
+            else if (closePositionType == ClosePositionType.Profit)
             {
                 TabControlTypePosition.SelectedIndex = 4;
+            }
+            else if (closePositionType == ClosePositionType.Fake)
+            {
+                TabControlTypePosition.SelectedIndex = 5;
             }
 
             LabelOpenVolumeValue.Content = Position.OpenVolume.ToStringWithNoEndZero();
             TextBoxLimitVolumeToClose.Text = Position.OpenVolume.ToStringWithNoEndZero();
             TextBoxMarketVolumeToClose.Text = Position.OpenVolume.ToStringWithNoEndZero();
             TextBoxFakeVolume.Text = Position.OpenVolume.ToStringWithNoEndZero();
+            TextBoxStopVolumeToClose.Text = Position.OpenVolume.ToStringWithNoEndZero();
+            TextBoxStopMarketVolumeToClose.Text = Position.OpenVolume.ToStringWithNoEndZero();
 
             LabelLimitAllOpenVolumeSend.Content = OsLocalization.Trader.Label387 + Position.OpenVolume.ToStringWithNoEndZero();
             LabelLimitAllOpenVolumeSend.MouseLeftButtonDown += LabelLimitAllOpenVolumeSend_MouseLeftButtonDown;
@@ -126,6 +152,12 @@ namespace OsEngine.OsTrader.Panels.Tab.Internal
             LabelFakeAllOpenVolume.MouseLeftButtonDown += LabelFakeAllOpenVolume_MouseLeftButtonDown;
             LabelFakeAllOpenVolume.MouseEnter += LabelFakeAllOpenVolume_MouseEnter;
             LabelFakeAllOpenVolume.MouseLeave += LabelFakeAllOpenVolume_MouseLeave;
+
+            LabelStopAllOpenVolumeSend.Content = OsLocalization.Trader.Label387 + Position.OpenVolume.ToStringWithNoEndZero();
+            LabelStopAllOpenVolumeSend.MouseLeftButtonDown += LabelStopAllOpenVolumeSend_MouseLeftButtonDown;
+
+            LabelStopMarketAllOpenVolumeSend.Content = OsLocalization.Trader.Label387 + Position.OpenVolume.ToStringWithNoEndZero();
+            LabelStopMarketAllOpenVolumeSend.MouseLeftButtonDown += LabelStopMarketAllOpenVolumeSend_MouseLeftButtonDown;
 
             LabelPosStateValue.Content = Position.State.ToString();
             LabelPosNumberValue.Content = Position.Number.ToString();
@@ -148,53 +180,140 @@ namespace OsEngine.OsTrader.Panels.Tab.Internal
             StartButtonBlinkAnimation();
         }
 
+        private void PositionOpenUi2_Closed(object sender, EventArgs e)
+        {
+            try
+            {
+                if (_blinkTimer != null)
+                {
+                    _blinkTimer.Stop();
+                    _blinkTimer.Tick -= _blinkTimer_Tick;
+                    _blinkTimer = null;
+                }
+
+                if (Tab != null)
+                {
+                    Tab.MarketDepthUpdateEvent -= Tab_MarketDepthUpdateEvent;
+                    Tab.BestBidAskChangeEvent -= Tab_BestBidAskChangeEvent;
+                    Tab.Connector.ConnectorStartedReconnectEvent -= Connector_ConnectorStartedReconnectEvent;
+                    Tab = null;
+                }
+
+                ButtonPostPositionClose.Click -= ButtonPostPositionClose_Click;
+                ButtonCloseAtLimit.Click -= ButtonCloseAtLimit_Click;
+                ButtonCloseAtMarket.Click -= ButtonCloseAtMarket_Click;
+                ButtonCloseAtStop.Click -= ButtonCloseAtStop_Click;
+                ButtonCloseAtStopMarket.Click -= ButtonCloseAtStopMarket_Click;
+                ButtonCloseAtProfit.Click -= ButtonCloseAtProfit_Click;
+                ButtonCloseAtFake.Click -= ButtonCloseAtFake_Click;
+                ButtonFakeTimeOpenNow.Click -= ButtonFakeTimeOpenNow_Click;
+                ButtonRevokeLimit.Click -= ButtonRevokeLimit_Click;
+                ButtonRevokeProfit.Click -= ButtonRevokeProfit_Click;
+                ButtonRevokeStop.Click -= ButtonRevokeStop_Click;
+                ButtonRevokeStopMarket.Click -= ButtonRevokeStopMarket_Click;
+                CheckBoxServerStopOrder.Click -= CheckBoxServerStopOrder_Click;
+                CheckBoxServerStopMarket.Click -= CheckBoxServerStopMarket_Click;
+
+                LabelLimitAllOpenVolumeSend.MouseLeftButtonDown -= LabelLimitAllOpenVolumeSend_MouseLeftButtonDown;
+                LabelLimitAllOpenVolumeSend.MouseEnter -= LabelLimitAllOpenVolumeSend_MouseEnter;
+                LabelLimitAllOpenVolumeSend.MouseLeave -= LabelLimitAllOpenVolumeSend_MouseLeave;
+                LabelMarketAllOpenVolumeSend.MouseLeftButtonDown -= LabelMarketAllOpenVolumeSend_MouseLeftButtonDown;
+                LabelMarketAllOpenVolumeSend.MouseEnter -= LabelMarketAllOpenVolumeSend_MouseEnter;
+                LabelMarketAllOpenVolumeSend.MouseLeave -= LabelMarketAllOpenVolumeSend_MouseLeave;
+                LabelFakeAllOpenVolume.MouseLeftButtonDown -= LabelFakeAllOpenVolume_MouseLeftButtonDown;
+                LabelFakeAllOpenVolume.MouseEnter -= LabelFakeAllOpenVolume_MouseEnter;
+                LabelFakeAllOpenVolume.MouseLeave -= LabelFakeAllOpenVolume_MouseLeave;
+                LabelStopAllOpenVolumeSend.MouseLeftButtonDown -= LabelStopAllOpenVolumeSend_MouseLeftButtonDown;
+                LabelStopMarketAllOpenVolumeSend.MouseLeftButtonDown -= LabelStopMarketAllOpenVolumeSend_MouseLeftButtonDown;
+
+                if (_marketDepthPainter != null)
+                {
+                    _marketDepthPainter.UserClickOnMDAndSelectPriceEvent -= _marketDepthPainter_UserClickOnMDAndSelectPriceEvent;
+                    _marketDepthPainter.StopPaint();
+                    _marketDepthPainter.Delete();
+                    _marketDepthPainter = null;
+                }
+
+                if (WinFormsHostMarketDepth != null)
+                {
+                    WinFormsHostMarketDepth.Child = null;
+                }
+
+                Position = null;
+
+                Closed -= PositionOpenUi2_Closed;
+            }
+            catch (Exception ex)
+            {
+                Tab?.SetNewLogMessage(ex.Message.ToString(), Logging.LogMessageType.Error);
+            }
+
+            _isDeleted = true;
+        }
+
+        private DispatcherTimer _blinkTimer;
+
+        private int _blinkCount;
+
+        private bool _isGreenVisible = true;
+
         private void StartButtonBlinkAnimation()
         {
             try
             {
-                DispatcherTimer timer = new DispatcherTimer();
-                int blinkCount = 0;
-                bool isGreenVisible = true;
-
-                timer.Interval = TimeSpan.FromMilliseconds(300);
-                timer.Tick += (s, e) =>
-                {
-                    try
-                    {
-                        if (blinkCount >= 20)
-                        {
-                            timer.Stop();
-                            PostGreenPositionClose.Opacity = 1;
-                            PostWhitePositionClose.Opacity = 0;
-                            return;
-                        }
-
-                        if (isGreenVisible)
-                        {
-                            PostGreenPositionClose.Opacity = 0;
-                            PostWhitePositionClose.Opacity = 1;
-                        }
-                        else
-                        {
-                            PostGreenPositionClose.Opacity = 1;
-                            PostWhitePositionClose.Opacity = 0;
-                        }
-
-                        isGreenVisible = !isGreenVisible;
-                        blinkCount++;
-                    }
-                    catch (Exception ex)
-                    {
-                        Tab.SetNewLogMessage(ex.Message.ToString(), Logging.LogMessageType.Error);
-                        timer.Stop();
-                    }
-                };
-
-                timer.Start();
+                _blinkTimer = new DispatcherTimer();
+                _blinkTimer.Interval = TimeSpan.FromMilliseconds(300);
+                _blinkTimer.Tick += _blinkTimer_Tick;
+                _blinkTimer.Start();
             }
             catch (Exception ex)
             {
                 Tab.SetNewLogMessage(ex.Message.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private void _blinkTimer_Tick(object sender, EventArgs e)
+        {
+            if (_blinkTimer == null)
+            {
+                return;
+            }
+
+            try
+            {
+                if (_blinkCount >= 20)
+                {
+                    _blinkTimer.Stop();
+                    _blinkTimer.Tick -= _blinkTimer_Tick;
+                    _blinkTimer = null;
+                    PostGreenPositionClose.Opacity = 1;
+                    PostWhitePositionClose.Opacity = 0;
+                    return;
+                }
+
+                if (_isGreenVisible)
+                {
+                    PostGreenPositionClose.Opacity = 0;
+                    PostWhitePositionClose.Opacity = 1;
+                }
+                else
+                {
+                    PostGreenPositionClose.Opacity = 1;
+                    PostWhitePositionClose.Opacity = 0;
+                }
+
+                _isGreenVisible = !_isGreenVisible;
+                _blinkCount++;
+            }
+            catch (Exception ex)
+            {
+                Tab.SetNewLogMessage(ex.Message.ToString(), Logging.LogMessageType.Error);
+                if (_blinkTimer != null)
+                {
+                    _blinkTimer.Stop();
+                    _blinkTimer.Tick -= _blinkTimer_Tick;
+                    _blinkTimer = null;
+                }
             }
         }
 
@@ -218,47 +337,20 @@ namespace OsEngine.OsTrader.Panels.Tab.Internal
             {
                 TabControlTypePosition.SelectedIndex = 2;
             }
-            else if (closePositionType == ClosePositionType.Profit)
+            else if (closePositionType == ClosePositionType.StopMarket)
             {
                 TabControlTypePosition.SelectedIndex = 3;
             }
-            else if (closePositionType == ClosePositionType.Fake)
+            else if (closePositionType == ClosePositionType.Profit)
             {
                 TabControlTypePosition.SelectedIndex = 4;
             }
+            else if (closePositionType == ClosePositionType.Fake)
+            {
+                TabControlTypePosition.SelectedIndex = 5;
+            }
         }
 
-        private void PositionOpenUi2_Closed(object sender, EventArgs e)
-        {
-            try
-            {
-                if (Tab != null)
-                {
-                    Tab.MarketDepthUpdateEvent -= Tab_MarketDepthUpdateEvent;
-                    Tab.BestBidAskChangeEvent -= Tab_BestBidAskChangeEvent;
-                    Tab.Connector.ConnectorStartedReconnectEvent -= Connector_ConnectorStartedReconnectEvent;
-                    Tab = null;
-                }
-
-                Closed -= PositionOpenUi2_Closed;
-
-                if (_marketDepthPainter != null)
-                {
-                    _marketDepthPainter.UserClickOnMDAndSelectPriceEvent -= _marketDepthPainter_UserClickOnMDAndSelectPriceEvent;
-                    _marketDepthPainter.StopPaint();
-                    _marketDepthPainter.Delete();
-                    _marketDepthPainter = null;
-                }
-
-                Position = null;
-            }
-            catch
-            {
-                // ignore
-            }
-
-            _isDeleted = true;
-        }
 
         private bool _isDeleted;
 
@@ -300,7 +392,7 @@ namespace OsEngine.OsTrader.Panels.Tab.Internal
             LabelTabNameValue.Content = Tab.TabName;
         }
 
-        MarketDepthPainter _marketDepthPainter;
+        private MarketDepthPainter _marketDepthPainter;
 
         public BotTabSimple Tab;
 
@@ -325,6 +417,7 @@ namespace OsEngine.OsTrader.Panels.Tab.Internal
             TextBoxLimitPrice.Text = priceSelectedUser.ToStringWithNoEndZero();
             TextBoxStopActivationPrice.Text = priceSelectedUser.ToStringWithNoEndZero();
             TextBoxStopPrice.Text = priceSelectedUser.ToStringWithNoEndZero();
+            TextBoxStopMarketActivationPrice.Text = priceSelectedUser.ToStringWithNoEndZero();
             TextBoxProfitActivationPrice.Text = priceSelectedUser.ToStringWithNoEndZero();
             TextBoxProfitPrice.Text = priceSelectedUser.ToStringWithNoEndZero();
 
@@ -348,93 +441,130 @@ namespace OsEngine.OsTrader.Panels.Tab.Internal
 
         private void ButtonCloseAtLimit_Click(object sender, RoutedEventArgs e)
         {
-            decimal price = 0;
-
             try
             {
-                price = TextBoxLimitPrice.Text.ToDecimal();
-            }
-            catch (Exception ex)
-            {
-                Tab.SetNewLogMessage(
-                    OsLocalization.Trader.Label390 + "\n" + ex.Message.ToString(), Logging.LogMessageType.Error);
-                return;
-            }
-
-            decimal volume = 0;
-
-            try
-            {
-                volume = TextBoxLimitVolumeToClose.Text.ToDecimal();
-            }
-            catch (Exception ex)
-            {
-                Tab.SetNewLogMessage(
-                    OsLocalization.Trader.Label389 + "\n" + ex.Message.ToString(), Logging.LogMessageType.Error);
-                return;
-            }
-
-            if (volume <= 0)
-            {
-                Tab.SetNewLogMessage(
-                 OsLocalization.Trader.Label389, Logging.LogMessageType.Error);
-                return;
-            }
-
-            if (Position.CloseActive == true)
-            {
-                AcceptDialogUi ui = new AcceptDialogUi(OsLocalization.Trader.Label227);
-                ui.ShowDialog();
-
-                if (ui.UserAcceptAction == false)
+                if (_isDeleted || Tab == null || Position == null)
                 {
                     return;
                 }
-            }
 
-            Tab.CloseAtLimit(Position, price, volume);
+                decimal price = 0;
+
+                try
+                {
+                    price = TextBoxLimitPrice.Text.ToDecimal();
+                }
+                catch (Exception ex)
+                {
+                    Tab.SetNewLogMessage(
+                        OsLocalization.Trader.Label390 + "\n" + ex.Message.ToString(), Logging.LogMessageType.Error);
+                    return;
+                }
+
+                decimal volume = 0;
+
+                try
+                {
+                    volume = TextBoxLimitVolumeToClose.Text.ToDecimal();
+                }
+                catch (Exception ex)
+                {
+                    Tab.SetNewLogMessage(
+                        OsLocalization.Trader.Label389 + "\n" + ex.Message.ToString(), Logging.LogMessageType.Error);
+                    return;
+                }
+
+                if (volume <= 0)
+                {
+                    Tab.SetNewLogMessage(
+                     OsLocalization.Trader.Label389, Logging.LogMessageType.Error);
+                    return;
+                }
+
+                if (Position.CloseActive == true)
+                {
+                    AcceptDialogUi ui = new AcceptDialogUi(OsLocalization.Trader.Label227);
+                    ui.ShowDialog();
+
+                    if (ui.UserAcceptAction == false)
+                    {
+                        return;
+                    }
+                }
+
+                // диалог качает диспетчер — за время диалога окно могло закрыться (Closed обнуляет Tab/Position), ордер не шлём
+                if (_isDeleted || Tab == null || Position == null)
+                {
+                    return;
+                }
+
+                Tab.CloseAtLimit(Position, price, volume);
+            }
+            catch (Exception ex)
+            {
+                Tab?.SetNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
         }
 
         private void ButtonCloseAtMarket_Click(object sender, RoutedEventArgs e)
         {
-            if (Position.CloseActive == true)
+            try
             {
-                AcceptDialogUi ui = new AcceptDialogUi(OsLocalization.Trader.Label227);
-                ui.ShowDialog();
-
-                if (ui.UserAcceptAction == false)
+                if (_isDeleted || Tab == null || Position == null)
                 {
                     return;
                 }
-            }
 
-            if (string.IsNullOrEmpty(TextBoxMarketVolumeToClose.Text))
-            {
-                Tab.SetNewLogMessage(OsLocalization.Trader.Label389, Logging.LogMessageType.Error);
-                return;
-            }
+                if (Position.CloseActive == true)
+                {
+                    AcceptDialogUi ui = new AcceptDialogUi(OsLocalization.Trader.Label227);
+                    ui.ShowDialog();
 
-            decimal volume = 0;
+                    if (ui.UserAcceptAction == false)
+                    {
+                        return;
+                    }
+                }
 
-            try
-            {
-                volume = TextBoxMarketVolumeToClose.Text.ToDecimal();
+                // re-check сразу после возвращения из диалога, до веток валидации объёма:
+                // при мёртвом окне они бросили бы NRE во внешний catch и сообщение об объёме потерялось
+                if (_isDeleted || Tab == null || Position == null)
+                {
+                    return;
+                }
+
+                if (string.IsNullOrEmpty(TextBoxMarketVolumeToClose.Text))
+                {
+                    Tab.SetNewLogMessage(OsLocalization.Trader.Label389, Logging.LogMessageType.Error);
+                    return;
+                }
+
+                decimal volume = 0;
+
+                try
+                {
+                    volume = TextBoxMarketVolumeToClose.Text.ToDecimal();
+                }
+                catch (Exception ex)
+                {
+                    Tab.SetNewLogMessage(
+                        OsLocalization.Trader.Label389 + "\n" + ex.ToString(),
+                        Logging.LogMessageType.Error);
+                    return;
+                }
+
+                if (volume <= 0)
+                {
+                    Tab.SetNewLogMessage(OsLocalization.Trader.Label389, Logging.LogMessageType.Error);
+                    return;
+                }
+
+                Tab.CloseAtMarket(Position, volume);
             }
             catch (Exception ex)
             {
-                Tab.SetNewLogMessage(
-                    OsLocalization.Trader.Label389 + "\n" + ex.ToString(),
-                    Logging.LogMessageType.Error);
-                return;
+                Tab?.SetNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
             }
-
-            if (volume <= 0)
-            {
-                Tab.SetNewLogMessage(OsLocalization.Trader.Label389, Logging.LogMessageType.Error);
-                return;
-            }
-
-            Tab.CloseAtMarket(Position, volume);
         }
 
         private void ButtonCloseAtStop_Click(object sender, RoutedEventArgs e)
@@ -459,7 +589,75 @@ namespace OsEngine.OsTrader.Panels.Tab.Internal
                 return;
             }
 
+            if (CheckBoxServerStopOrder.IsChecked.Value)
+            {
+                decimal volume = 0;
+
+                try
+                {
+                    volume = TextBoxStopVolumeToClose.Text.ToDecimal();
+                }
+                catch (Exception ex)
+                {
+                    Tab.SetNewLogMessage(ex.Message.ToString(), Logging.LogMessageType.Error);
+                    return;
+                }
+
+                if (volume <= 0)
+                {
+                    return;
+                }
+
+                Tab.CloseAtStopOnServer(Position, priceActivation, priceOrder, volume);
+                return;
+            }
+
             Tab.CloseAtStop(Position, priceActivation, priceOrder);
+        }
+
+        private void ButtonCloseAtStopMarket_Click(object sender, RoutedEventArgs e)
+        {
+            decimal priceActivation = 0;
+
+            try
+            {
+                priceActivation = TextBoxStopMarketActivationPrice.Text.ToDecimal();
+            }
+            catch (Exception ex)
+            {
+                Tab.SetNewLogMessage(ex.Message.ToString(), Logging.LogMessageType.Error);
+                return;
+            }
+
+            if (priceActivation == 0)
+            {
+                return;
+            }
+
+            if (CheckBoxServerStopMarket.IsChecked.Value)
+            {
+                decimal volume = 0;
+
+                try
+                {
+                    volume = TextBoxStopMarketVolumeToClose.Text.ToDecimal();
+                }
+                catch (Exception ex)
+                {
+                    Tab.SetNewLogMessage(ex.Message.ToString(), Logging.LogMessageType.Error);
+                    return;
+                }
+
+                if (volume <= 0)
+                {
+                    return;
+                }
+
+                Tab.CloseAtStopMarketOnServer(Position, priceActivation, volume);
+                return;
+            }
+
+            Tab.CloseAtStopMarket(Position, priceActivation);
         }
 
         private void ButtonCloseAtProfit_Click(object sender, RoutedEventArgs e)
@@ -650,6 +848,8 @@ namespace OsEngine.OsTrader.Panels.Tab.Internal
                     LabelLimitAllOpenVolumeSend.Content = curPosAll;
                     LabelMarketAllOpenVolumeSend.Content = curPosAll;
                     LabelFakeAllOpenVolume.Content = curPosAll;
+                    LabelStopAllOpenVolumeSend.Content = curPosAll;
+                    LabelStopMarketAllOpenVolumeSend.Content = curPosAll;
                 }
             }
             catch
@@ -671,7 +871,7 @@ namespace OsEngine.OsTrader.Panels.Tab.Internal
             }
             catch (Exception ex)
             {
-                Tab.SetNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+                Tab?.SetNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
             }
         }
 
@@ -679,14 +879,62 @@ namespace OsEngine.OsTrader.Panels.Tab.Internal
         {
             try
             {
-                Position.StopOrderIsActive = false;
-                Position.StopOrderPrice = 0;
-                Position.StopOrderRedLine = 0;
+                if (CheckBoxServerStopOrder.IsChecked.Value)
+                {
+                    Tab.CloseAtStopOnServerCancel(Position);
+                }
+                else
+                {
+                    Position.StopOrderIsActive = false;
+                    Position.StopOrderPrice = 0;
+                    Position.StopOrderRedLine = 0;
+                }
             }
             catch (Exception ex)
             {
-                Tab.SetNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+                Tab?.SetNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
             }
+        }
+
+        private void ButtonRevokeStopMarket_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (CheckBoxServerStopMarket.IsChecked.Value)
+                {
+                    Tab.CloseAtStopOnServerCancel(Position);
+                }
+                else
+                {
+                    Position.StopOrderIsActive = false;
+                    Position.StopOrderPrice = 0;
+                    Position.StopOrderRedLine = 0;
+                }
+            }
+            catch (Exception ex)
+            {
+                Tab?.SetNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private void CheckBoxServerStopOrder_Click(object sender, RoutedEventArgs e)
+        {
+            Tab.ServerStopOrdersIsOn = CheckBoxServerStopOrder.IsChecked.Value;
+        }
+
+        private void CheckBoxServerStopMarket_Click(object sender, RoutedEventArgs e)
+        {
+            Tab.ServerStopOrdersIsOn = CheckBoxServerStopMarket.IsChecked.Value;
+        }
+
+        private void LabelStopAllOpenVolumeSend_MouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+        {
+            TextBoxStopVolumeToClose.Text = Position.OpenVolume.ToStringWithNoEndZero();
+        }
+
+        private void LabelStopMarketAllOpenVolumeSend_MouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+        {
+            TextBoxStopMarketVolumeToClose.Text = Position.OpenVolume.ToStringWithNoEndZero();
         }
 
         private void ButtonRevokeLimit_Click(object sender, RoutedEventArgs e)
@@ -705,7 +953,7 @@ namespace OsEngine.OsTrader.Panels.Tab.Internal
             }
             catch (Exception ex)
             {
-                Tab.SetNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+                Tab?.SetNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
             }
         }
 
@@ -731,6 +979,7 @@ namespace OsEngine.OsTrader.Panels.Tab.Internal
         Limit,
         Market,
         Stop,
+        StopMarket,
         Profit,
         Fake
     }

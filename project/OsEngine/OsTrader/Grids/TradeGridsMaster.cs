@@ -57,6 +57,28 @@ namespace OsEngine.OsTrader.Grids
         {
             _tab = null;
 
+            // останавливаем сетки: иначе их рабочие потоки и подписки на события
+            // вкладки продолжают жить после удаления робота
+            if (TradeGrids != null
+                && TradeGrids.Count > 0)
+            {
+                TradeGrid[] grids = TradeGrids.ToArray();
+
+                for (int i = 0; i < grids.Length; i++)
+                {
+                    try
+                    {
+                        grids[i].Delete();
+                    }
+                    catch (Exception error)
+                    {
+                        SendNewLogMessage(error.ToString(), LogMessageType.Error);
+                    }
+                }
+
+                TradeGrids.Clear();
+            }
+
             if (_startProgram == StartProgram.IsOsOptimizer)
             {
                 return;
@@ -181,6 +203,40 @@ namespace OsEngine.OsTrader.Grids
 
             SaveGrids();
             PaintGridView();
+        }
+
+        /// <summary>
+        /// удалить сетку по номеру без диалоговых окон (для MCP API)
+        /// </summary>
+        public bool DeleteGridByNumber(int num)
+        {
+            for (int i = 0; i < TradeGrids.Count; i++)
+            {
+                if (TradeGrids[i].Number == num)
+                {
+                    for (int j = _tradeGridUis.Count - 1; j >= 0; j--)
+                    {
+                        if (_tradeGridUis[j].Number == num)
+                        {
+                            _tradeGridUis[j].Close();
+                        }
+                    }
+
+                    TradeGrids[i].NeedToSaveEvent -= NewGrid_NeedToSaveEvent;
+                    TradeGrids[i].LogMessageEvent -= SendNewLogMessage;
+                    TradeGrids[i].RePaintSettingsEvent -= NewGrid_UpdateTableEvent;
+                    TradeGrids[i].DeleteGrid();
+                    TradeGrids[i].Delete();
+                    TradeGrids[i].Regime = TradeGridRegime.Off;
+                    TradeGrids.RemoveAt(i);
+
+                    SaveGrids();
+                    PaintGridView();
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private List<TradeGridUi> _tradeGridUis = new List<TradeGridUi>();
@@ -428,9 +484,18 @@ namespace OsEngine.OsTrader.Grids
                     return;
                 }
 
-                if (_gridViewInstances.InvokeRequired)
+                // InvokeRequired лжёт без хендла DataGridView в WindowsFormsHost; хост в локаль — StopPaint на UI-треде может обнулить поле между чтениями
+                WindowsFormsHost host = _hostGrid;
+
+                if (host == null)
                 {
-                    _gridViewInstances.Invoke(new Action(PaintGridView));
+                    // грид не размещён в UI — рисовать нечего; следующий StartPaint перерисует
+                    return;
+                }
+
+                if (host.Dispatcher.CheckAccess() == false)
+                {
+                    host.Dispatcher.Invoke(new Action(PaintGridView));
                     return;
                 }
 

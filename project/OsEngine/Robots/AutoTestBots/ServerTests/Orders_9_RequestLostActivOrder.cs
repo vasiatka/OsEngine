@@ -37,14 +37,14 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
             if (serverPermission.CanQueryOrderStatus == false)
             {
-                SetNewServiceInfo("No permission. CanQueryOrderStatus == false. Test over");
+                SetTestSkipped("No permission. CanQueryOrderStatus == false. Test over");
                 TestEnded();
                 return;
             }
 
             List<Security> securities = Server.Securities;
 
-            if (securities == null &&
+            if (securities == null ||
                 securities.Count == 0)
             {
                 SetNewError("Error 2. No securities found");
@@ -119,9 +119,9 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
             // 2 выставляем ордер на покупку. Далеко от края стакана
 
-            decimal price = Math.Round((md.Asks[0].Price.ToDecimal() + md.Bids[0].Price.ToDecimal()) / 2, mySecurity.Decimals);
+            decimal price = AlignPriceToStep((md.Asks[0].Price.ToDecimal() + md.Bids[0].Price.ToDecimal()) / 2, mySecurity);
             decimal volume = VolumeToTrade;
-            price = Math.Round(price - price * 0.01m, mySecurity.Decimals); // проскальзывание 1%
+            price = AlignPriceToStep(price - price * 0.01m, mySecurity); // проскальзывание 1%
 
             Order newOrder = CreateOrder(mySecurity, price, volume, Side.Buy);
 
@@ -235,6 +235,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
             order.Volume = volume;
             order.Side = side;
             order.NumberUser = NumberGen.GetNumberOrder(StartProgram.IsOsTrader);
+            _myOrderNumbers.Add(order.NumberUser);
             order.ServerType = Server.ServerType;
             order.TypeOrder = OrderPriceType.Limit;
             order.SecurityNameCode = sec.Name;
@@ -245,6 +246,8 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
         }
 
         List<Order> _ordersActive = new List<Order>();
+
+        private HashSet<int> _myOrderNumbers = new HashSet<int>();
         List<Order> _ordersCancel = new List<Order>();
         List<Order> _ordersDone = new List<Order>();
         List<Order> _ordersFail = new List<Order>();
@@ -263,6 +266,11 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
         private void Server_NewOrderIncomeEvent(Order order)
         {
+            if (_myOrderNumbers.Contains(order.NumberUser) == false)
+            {
+                return;
+            }
+
             if (order.State == OrderStateType.None)
             {
                 this.SetNewError("Error 10. Order with state NONE");

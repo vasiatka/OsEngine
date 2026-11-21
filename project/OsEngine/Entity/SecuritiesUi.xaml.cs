@@ -83,10 +83,13 @@ namespace OsEngine.Entity
                 TextBoxSearchSecurity.KeyDown -= TextBoxSearchSecurity_KeyDown;
                 ButtonRightInSearchResults.Click -= ButtonRightInSearchResults_Click;
                 ButtonLeftInSearchResults.Click -= ButtonLeftInSearchResults_Click;
+
+                ComboBoxClass.SelectionChanged -= ComboBoxClass_SelectionChanged;
+                Closed -= SecuritiesUi_Closed;
             }
             catch
             {
-
+                // ignore
             }
         }
 
@@ -177,7 +180,7 @@ namespace OsEngine.Entity
         private void CreateTable()
         {
             _gridSecurities = DataGridFactory.GetDataGridView(DataGridViewSelectionMode.FullRowSelect,
-    DataGridViewAutoSizeRowsMode.AllCells);
+    DataGridViewAutoSizeRowsMode.AllCells, true);
             _gridSecurities.ScrollBars = ScrollBars.Vertical;
 
             DataGridViewTextBoxCell cell0 = new DataGridViewTextBoxCell();

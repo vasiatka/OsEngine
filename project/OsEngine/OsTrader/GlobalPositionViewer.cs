@@ -114,9 +114,9 @@ namespace OsEngine.OsTrader
         {
             try
             {
-                if (_gridOpenPoses.InvokeRequired)
+                if (_hostOpenPoses != null && !_hostOpenPoses.Dispatcher.CheckAccess())
                 {
-                    _gridOpenPoses.Invoke(new Action(ClearJournals));
+                    _hostOpenPoses.Dispatcher.Invoke(new Action(ClearJournals));
                     return;
                 }
 
@@ -656,9 +656,13 @@ namespace OsEngine.OsTrader
 
         private void SortRowPosition(DataGridView grid, List<Position> positions, SortedMode sortedMode)
         {
-            if (grid.InvokeRequired)
+            if (_hostOpenPoses == null)
             {
-                grid.Invoke(new Action<DataGridView, List<Position>, SortedMode>(SortRowPosition), grid, positions, sortedMode);
+                return;
+            }
+            if (!_hostOpenPoses.Dispatcher.CheckAccess())
+            {
+                _hostOpenPoses.Dispatcher.Invoke(new Action<DataGridView, List<Position>, SortedMode>(SortRowPosition), grid, positions, sortedMode);
                 return;
             }
 
@@ -788,6 +792,12 @@ namespace OsEngine.OsTrader
                 for (int i = 0; i < sortPositions.Count; i++)
                 {
                     Position pos = sortPositions[i];
+
+                    if(pos == null)
+                    {
+                        continue;
+                    }
+
                     int number = pos.Number;
 
                     if (rowsByNumber.TryGetValue(number, out DataGridViewRow existingRow))
@@ -1231,9 +1241,10 @@ namespace OsEngine.OsTrader
         {
             try
             {
-                if (_lastClickGrid.InvokeRequired)
+                WindowsFormsHost host = _lastClickGrid == _gridClosePoses ? _hostClosePoses : _hostOpenPoses;
+                if (host != null && !host.Dispatcher.CheckAccess())
                 {
-                    _lastClickGrid.Invoke(new Action<Color>(ColoredRow), color);
+                    host.Dispatcher.Invoke(new Action<Color>(ColoredRow), color);
                     return;
                 }
 
@@ -1261,7 +1272,7 @@ namespace OsEngine.OsTrader
             }
             else if (type == LogMessageType.Error)
             {
-                System.Windows.MessageBox.Show(message);
+                Market.ServerMaster.SendNewLogMessage(message, LogMessageType.Error);
             }
         }
 

@@ -1,4 +1,4 @@
-﻿/*
+/*
  *Your rights to use the code are governed by this license https://github.com/AlexWan/OsEngine/blob/master/LICENSE
  *Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
 */
@@ -13,6 +13,7 @@ using OsEngine.Entity;
 using OsEngine.Instructions;
 using OsEngine.Language;
 using OsEngine.Market.Servers.Entity;
+using OsEngine.Market.ServerEncryption;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Threading;
@@ -64,6 +65,7 @@ namespace OsEngine.Market.Servers
             Label21.Content = OsLocalization.Market.Label21;
             ButtonConnect.Content = OsLocalization.Market.ButtonConnect;
             ButtonAbort.Content = OsLocalization.Market.ButtonDisconnect;
+            ButtonEncryption.Content = OsLocalization.Market.Label341;
             LabelCurrentConnectionName.Content = OsLocalization.Market.Label164;
             LabelPreConfiguredConnection.Content = OsLocalization.Market.Label166;
 
@@ -84,6 +86,7 @@ namespace OsEngine.Market.Servers
                 ChangeActiveServer(numServerInArray);
 
                 Thread worker = new Thread(UpdateStatusThread);
+                worker.IsBackground = true;
                 worker.Start();
             }
 
@@ -106,55 +109,131 @@ namespace OsEngine.Market.Servers
             }
 
             StartButtonBlinkAnimation();
+
+            Loaded += AServerParameterUi_Loaded;
         }
+
+        private void AServerParameterUi_Loaded(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                Loaded -= AServerParameterUi_Loaded;
+                TryShowEncryptionOffer();
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private void AServerParameterUi_Closed(object sender, EventArgs e)
+        {
+            try
+            {
+                _uiIsClosed = true;
+
+                if (_blinkTimer != null)
+                {
+                    _blinkTimer.Stop();
+                    _blinkTimer.Tick -= _blinkTimer_Tick;
+                    _blinkTimer = null;
+                }
+
+                ButtonConnect.Click -= ButtonConnect_Click;
+                ButtonAbort.Click -= ButtonAbort_Click;
+                ButtonPostsServerParameter.Click -= ButtonPostsAServerParameter_Click;
+
+                Loaded -= AServerParameterUi_Loaded;
+
+                ServerMaster.ServerDeleteEvent -= ServerMaster_ServerDeleteEvent;
+
+                if (_server != null)
+                {
+                    _server.Log.StopPaint();
+                    _server.ConnectStatusChangeEvent -= Server_ConnectStatusChangeEvent;
+                }
+
+                if (_instructionsUi != null)
+                {
+                    _instructionsUi.Closed -= _instructionsUi_Closed;
+                    _instructionsUi = null;
+                }
+
+                DeleteGridServerParameters();
+                DeleteGridConnections();
+
+                HostLog.Child = null;
+                HostPreConfiguredConnections.Child = null;
+                HostSettings.Child = null;
+
+                _serversArray = null;
+                _server = null;
+
+                Closed -= AServerParameterUi_Closed;
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private DispatcherTimer _blinkTimer;
+        private int _blinkCount;
+        private bool _isGreenVisible = true;
 
         private void StartButtonBlinkAnimation()
         {
             try
             {
-                DispatcherTimer timer = new DispatcherTimer();
-                int blinkCount = 0;
-                bool isGreenVisible = true;
-
-                timer.Interval = TimeSpan.FromMilliseconds(300);
-                timer.Tick += (s, e) =>
-                {
-                    try
-                    {
-                        if (blinkCount >= 20)
-                        {
-                            timer.Stop();
-                            GreenCollectionServerParameter.Opacity = 1;
-                            WhiteCollectionServerParameter.Opacity = 0;
-                            return;
-                        }
-
-                        if (isGreenVisible)
-                        {
-                            GreenCollectionServerParameter.Opacity = 0;
-                            WhiteCollectionServerParameter.Opacity = 1;
-                        }
-                        else
-                        {
-                            GreenCollectionServerParameter.Opacity = 1;
-                            WhiteCollectionServerParameter.Opacity = 0;
-                        }
-
-                        isGreenVisible = !isGreenVisible;
-                        blinkCount++;
-                    }
-                    catch (Exception ex)
-                    {
-                        ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
-                        timer.Stop();
-                    }
-                };
-
-                timer.Start();
+                _blinkTimer = new DispatcherTimer();
+                _blinkTimer.Interval = TimeSpan.FromMilliseconds(300);
+                _blinkTimer.Tick += _blinkTimer_Tick;
+                _blinkTimer.Start();
             }
             catch (Exception ex)
             {
                 ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private void _blinkTimer_Tick(object sender, EventArgs e)
+        {
+            if (_blinkTimer == null)
+            {
+                return;
+            }
+
+            try
+            {
+                if (_blinkCount >= 20)
+                {
+                    _blinkTimer.Stop();
+                    GreenCollectionServerParameter.Opacity = 1;
+                    WhiteCollectionServerParameter.Opacity = 0;
+                    return;
+                }
+
+                if (_isGreenVisible)
+                {
+                    GreenCollectionServerParameter.Opacity = 0;
+                    WhiteCollectionServerParameter.Opacity = 1;
+                }
+                else
+                {
+                    GreenCollectionServerParameter.Opacity = 1;
+                    WhiteCollectionServerParameter.Opacity = 0;
+                }
+
+                _isGreenVisible = !_isGreenVisible;
+                _blinkCount++;
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+                if (_blinkTimer != null)
+                {
+                    _blinkTimer.Stop();
+                }
             }
         }
 
@@ -201,42 +280,7 @@ namespace OsEngine.Market.Servers
             }
         }
 
-        private void AServerParameterUi_Closed(object sender, EventArgs e)
-        {
-            _uiIsClosed = true;
-            this.Closed -= AServerParameterUi_Closed;
-            ServerMaster.ServerDeleteEvent -= ServerMaster_ServerDeleteEvent;
-
-            _server.Log.StopPaint();
-            _server.ConnectStatusChangeEvent -= Server_ConnectStatusChangeEvent;
-            _server = null;
-
-            _serversArray = null;
-
-            if (_gridServerParameters != null)
-            {
-                _gridServerParameters.CellValueChanged -= _gridServerParameters_CellValueChanged;
-                _gridServerParameters.Click -= _gridServerParameters_Click;
-                _gridServerParameters.CellClick -= _gridServerParameters_CellClick;
-                _gridServerParameters.DataError -= _gridServerParameters_DataError;
-                _gridServerParameters.Rows.Clear();
-                DataGridFactory.ClearLinks(_gridServerParameters);
-                _gridServerParameters = null;
-            }
-
-            if (_gridConnections != null)
-            {
-                _gridConnections.CellClick -= _gridConnections_CellClick;
-                _gridConnections.CellEndEdit -= _gridConnections_CellEndEdit;
-                _gridConnections.DataError -= _gridConnections_DataError;
-                _gridConnections.Columns.Clear();
-                DataGridFactory.ClearLinks(_gridConnections);
-                _gridConnections = null;
-            }
-
-            HostPreConfiguredConnections.Child = null;
-            HostSettings.Child = null;
-        }
+     
 
         private void ServerMaster_ServerDeleteEvent(IServer server)
         {
@@ -353,6 +397,45 @@ namespace OsEngine.Market.Servers
             ServerMaster.SendNewLogMessage(e.ToString(), Logging.LogMessageType.Error);
         }
 
+        private void DeleteGridConnections()
+        {
+            if (_gridConnections == null)
+            {
+                return;
+            }
+
+            HostPreConfiguredConnections.Child = null;
+            DataGridFactory.ClearLinks(_gridConnections);
+            _gridConnections.CellClick -= _gridConnections_CellClick;
+            _gridConnections.CellEndEdit -= _gridConnections_CellEndEdit;
+            _gridConnections.DataError -= _gridConnections_DataError;
+            _gridConnections.Rows.Clear();
+            _gridConnections.Columns.Clear();
+            _gridConnections.DataSource = null;
+            _gridConnections.Dispose();
+            _gridConnections = null;
+        }
+
+        private void DeleteGridServerParameters()
+        {
+            if (_gridServerParameters == null)
+            {
+                return;
+            }
+
+            HostSettings.Child = null;
+            DataGridFactory.ClearLinks(_gridServerParameters);
+            _gridServerParameters.CellValueChanged -= _gridServerParameters_CellValueChanged;
+            _gridServerParameters.Click -= _gridServerParameters_Click;
+            _gridServerParameters.CellClick -= _gridServerParameters_CellClick;
+            _gridServerParameters.DataError -= _gridServerParameters_DataError;
+            _gridServerParameters.Rows.Clear();
+            _gridServerParameters.Columns.Clear();
+            _gridServerParameters.DataSource = null;
+            _gridServerParameters.Dispose();
+            _gridServerParameters = null;
+        }
+
         private void _gridConnections_CellEndEdit(object sender, DataGridViewCellEventArgs e)
         {
             try
@@ -439,6 +522,7 @@ namespace OsEngine.Market.Servers
                     && row < _gridConnections.Rows.Count - 1)
                 {// Connect
                     ChangeActiveServer(row);
+                    TryShowEncryptionOffer();
                     _server.StartServer();
                 }
             }
@@ -495,32 +579,37 @@ namespace OsEngine.Market.Servers
 
             LabelCurrentConnectionName.Content = label;
 
+            Color selectRowColor = Themes.ThemeManager.GetColorWinForms("OptimizerCursorColor");
+            Color normalRowColor = Themes.ThemeManager.GetColorWinForms("GridTextColor");
+
             for (int i2 = 0; _gridConnections != null && i2 < _gridConnections.Rows.Count; i2++)
             {
                 DataGridViewRow row = _gridConnections.Rows[i2];
 
-                if (i2 == number)
+                for (int i = 0; i < row.Cells.Count; i++)
                 {
-                    for (int i = 0; i < row.Cells.Count; i++)
+                    if (i == 3)
                     {
-                        if (i == 3)
-                        {
-                            continue;
-                        }
-                        row.Cells[i].Style.ForeColor = Color.FromArgb(255, 83, 0);
-                        row.Cells[i].Style.SelectionForeColor = Color.FromArgb(255, 83, 0);
+                        continue;
                     }
-                }
-                else
-                {
-                    for (int i = 0; i < row.Cells.Count; i++)
+
+                    // каждой ячейке — свой клон стиля с явным цветом текста:
+                    // иначе покраска выделенной строки протекает на всю таблицу,
+                    // а у DefaultCellStyle этого грида чёрный ForeColor
+                    DataGridViewCellStyle style = (DataGridViewCellStyle)_gridConnections.DefaultCellStyle.Clone();
+
+                    if (i2 == number)
                     {
-                        if (i == 3)
-                        {
-                            continue;
-                        }
-                        row.Cells[i].Style = _gridConnections.DefaultCellStyle;
+                        style.ForeColor = selectRowColor;
+                        style.SelectionForeColor = selectRowColor;
                     }
+                    else
+                    {
+                        style.ForeColor = normalRowColor;
+                        style.SelectionForeColor = normalRowColor;
+                    }
+
+                    row.Cells[i].Style = style;
                 }
             }
 
@@ -849,7 +938,19 @@ namespace OsEngine.Market.Servers
 
             _gridServerParameters.Rows.Clear();
 
-            for (int i = 0; i < param.Count; i++)
+            int visibleParamsCount = param.Count;
+
+            if (_server.NeedToHideStandardParameters == true)
+            {
+                visibleParamsCount = param.Count - _server.ServerStandardParamsCount;
+
+                if (visibleParamsCount < 0)
+                {
+                    visibleParamsCount = 0;
+                }
+            }
+
+            for (int i = 0; i < visibleParamsCount; i++)
             {
                 DataGridViewRow newRow = null;
 
@@ -943,6 +1044,12 @@ namespace OsEngine.Market.Servers
         {
             try
             {
+                if(_gridServerParameters.SelectedCells == null
+                    || _gridServerParameters.SelectedCells.Count == 0)
+                {
+                    return;
+                }
+
                 var s = e.GetType();
 
                 var mouse = (MouseEventArgs)e;
@@ -973,6 +1080,18 @@ namespace OsEngine.Market.Servers
                 else if (param[clickRow].Type == ServerParameterType.Password &&
                 clickColumn == 2)
                 {
+                    if (ServerEncryptionMaster.GetStatus() == ServerEncryptionStatus.Encrypted)
+                    {
+                        // шифрование включено - ключ показываем только после подтверждения мастер-пароля
+                        ServerEncryptionUi encryptionUi = new ServerEncryptionUi(true);
+                        encryptionUi.ShowDialog();
+
+                        if (encryptionUi.UnlockSuccess == false)
+                        {
+                            return;
+                        }
+                    }
+
                     _gridServerParameters.CellValueChanged -= _gridServerParameters_CellValueChanged;
                     _gridServerParameters.Rows[clickRow].Cells[1].Value = ((ServerParameterPassword)param[clickRow]).Value;
                     _gridServerParameters.Rows[clickRow].Cells[1].ReadOnly = false;
@@ -1073,7 +1192,7 @@ namespace OsEngine.Market.Servers
                 nRow.Cells[1].Value = value;
 
                 DataGridViewImageCell imageCell = new DataGridViewImageCell();
-                Bitmap bmp = new Bitmap(System.Windows.Forms.Application.StartupPath + "\\Images\\eye.png");
+                Bitmap bmp = GetEyeImage();
                 imageCell.Style.Alignment = DataGridViewContentAlignment.MiddleCenter;
                 imageCell.Value = bmp;
 
@@ -1092,6 +1211,29 @@ namespace OsEngine.Market.Servers
             }
 
             return nRow;
+        }
+
+        // shortcut: кэш иконки eye на век процесса: грузится один раз, никогда не диспозится
+        // (явный диспоуз дал бы ObjectDisposedException на репейнте у прежних держателей).
+        // Паттерн 0098: репейн только с UI-потока диалога, локи не нужны; неудача кэшируется.
+        private static Bitmap _eyeImage;
+        private static bool _eyeLoadFailed;
+
+        private static Bitmap GetEyeImage()
+        {
+            if (_eyeImage == null && _eyeLoadFailed == false)
+            {
+                try
+                {
+                    _eyeImage = new Bitmap(System.Windows.Forms.Application.StartupPath + "\\Images\\eye.png");
+                }
+                catch (Exception)
+                {
+                    _eyeLoadFailed = true; // неудача кэшируется, повторного file I/O нет
+                }
+            }
+
+            return _eyeImage;
         }
 
         private DataGridViewRow GetPathParamRow(ServerParameterPath param)
@@ -1216,7 +1358,19 @@ namespace OsEngine.Market.Servers
         {
             List<IServerParameter> param = _server.ServerParameters;
 
-            for (int i = 0; i < param.Count; i++)
+            int visibleParamsCount = param.Count;
+
+            if (_server.NeedToHideStandardParameters == true)
+            {
+                visibleParamsCount = param.Count - _server.ServerStandardParamsCount;
+
+                if (visibleParamsCount < 0)
+                {
+                    visibleParamsCount = 0;
+                }
+            }
+
+            for (int i = 0; i < visibleParamsCount; i++)
             {
                 if (_gridServerParameters.Rows[i].Cells[1].Value == null)
                 {
@@ -1280,7 +1434,65 @@ namespace OsEngine.Market.Servers
 
         private void ButtonConnect_Click(object sender, RoutedEventArgs e)
         {
+            TryShowEncryptionOffer();
             _server.StartServer();
+        }
+
+        private void ButtonEncryption_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                ServerEncryptionUi ui = new ServerEncryptionUi(false);
+                ui.ShowDialog();
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private void TryShowEncryptionOffer()
+        {
+            try
+            {
+                if (ServerEncryptionMaster.GetStatus() != ServerEncryptionStatus.NotChosen)
+                {
+                    return;
+                }
+
+                bool hasPasswordParameters = false;
+
+                for (int i = 0; i < _server.ServerParameters.Count; i++)
+                {
+                    if (_server.ServerParameters[i].Type == ServerParameterType.Password)
+                    {
+                        hasPasswordParameters = true;
+                        break;
+                    }
+                }
+
+                if (hasPasswordParameters == false)
+                {
+                    return;
+                }
+
+                AcceptDialogUi ui = new AcceptDialogUi(OsLocalization.Market.Label343);
+                ui.ShowDialog();
+
+                if (ui.UserAcceptAction)
+                {
+                    ServerEncryptionUi encryptionUi = new ServerEncryptionUi(false);
+                    encryptionUi.ShowDialog();
+                }
+                else
+                {
+                    ServerEncryptionMaster.SetDeclined();
+                }
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
         }
 
         private void ButtonAbort_Click(object sender, RoutedEventArgs e)

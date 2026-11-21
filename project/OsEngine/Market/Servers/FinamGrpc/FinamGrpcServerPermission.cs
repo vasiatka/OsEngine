@@ -1,4 +1,4 @@
-/*
+﻿/*
  *Your rights to use the code are governed by this license https://github.com/AlexWan/OsEngine/blob/master/LICENSE
  *Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
 */
@@ -118,6 +118,11 @@ namespace OsEngine.Market.Servers.FinamGrpc
             get { return true; }
         }
 
+        public bool StopOrdersIsSupport
+        {
+            get { return false; }
+        }
+
         public int WaitTimeSecondsAfterFirstStartToSendOrders
         {
             get { return 60; }
@@ -145,13 +150,13 @@ namespace OsEngine.Market.Servers.FinamGrpc
         private TimeFramePermission _tradeTimeFramePermission
             = new TimeFramePermission()
             {
-                TimeFrameSec1IsOn = false,
-                TimeFrameSec2IsOn = false,
-                TimeFrameSec5IsOn = false,
-                TimeFrameSec10IsOn = false,
-                TimeFrameSec15IsOn = false,
-                TimeFrameSec20IsOn = false,
-                TimeFrameSec30IsOn = false,
+                TimeFrameSec1IsOn = true,
+                TimeFrameSec2IsOn = true,
+                TimeFrameSec5IsOn = true,
+                TimeFrameSec10IsOn = true,
+                TimeFrameSec15IsOn = true,
+                TimeFrameSec20IsOn = true,
+                TimeFrameSec30IsOn = true,
                 TimeFrameMin1IsOn = true,
                 TimeFrameMin2IsOn = false,
                 TimeFrameMin3IsOn = false,
@@ -183,10 +188,11 @@ namespace OsEngine.Market.Servers.FinamGrpc
             {
                 string[] values = new string[]
                 {
-                    "rub",
-                    "usd",
-                    "eur",
-                    "hkd"
+                    "RUB",
+                    "USD",
+                    "EUR",
+                    "HKD",
+                    "CNY"
                 };
 
                 return values;
@@ -296,8 +302,8 @@ namespace OsEngine.Market.Servers.FinamGrpc
                 return new OrderLifeTimePermission
                 {
                     GtcIsReady = true,
-                    SpecifiedIsReady = true,
-                    DayIsReady = false
+                    SpecifiedIsReady = false,
+                    DayIsReady = true
                 };
             }
         }

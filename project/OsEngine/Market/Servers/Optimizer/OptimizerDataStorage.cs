@@ -9,6 +9,7 @@ using System.Globalization;
 using System.IO;
 using System.Threading;
 using System.Windows.Markup;
+using Newtonsoft.Json;
 using OsEngine.Entity;
 using OsEngine.Language;
 using OsEngine.Logging;
@@ -30,6 +31,7 @@ namespace OsEngine.Market.Servers.Optimizer
                 ;
             TypeTesterData = TesterDataType.Candle;
             Load();
+            LoadMarginAndTaxTables();
 
             if (_activeSet != null)
             {
@@ -93,6 +95,87 @@ namespace OsEngine.Market.Servers.Optimizer
         }
         private TesterDataType _typeTesterData;
 
+        public bool DividendsIsOn
+        {
+            get { return _dividendsIsOn; }
+            set
+            {
+                if (value == _dividendsIsOn)
+                {
+                    return;
+                }
+
+                _dividendsIsOn = value;
+                Save();
+            }
+        }
+        private bool _dividendsIsOn;
+
+        public string MarginRegime
+        {
+            get { return _marginRegime; }
+            set
+            {
+                if (value == _marginRegime)
+                {
+                    return;
+                }
+
+                _marginRegime = value;
+                Save();
+            }
+        }
+        private string _marginRegime = "Off";
+
+        public bool TaxesIsOn
+        {
+            get { return _taxesIsOn; }
+            set
+            {
+                if (value == _taxesIsOn)
+                {
+                    return;
+                }
+
+                _taxesIsOn = value;
+                Save();
+            }
+        }
+        private bool _taxesIsOn;
+
+        /// <summary>FEATURE-0107. Keep only a window of N not-yet-read ticks per security in tick mode.</summary>
+        public bool RemoveTradesFromMemory
+        {
+            get { return _removeTradesFromMemory; }
+            set
+            {
+                if (value == _removeTradesFromMemory)
+                {
+                    return;
+                }
+
+                _removeTradesFromMemory = value;
+                Save();
+            }
+        }
+        private bool _removeTradesFromMemory;
+
+        public int TradesInMemoryCount
+        {
+            get { return _tradesInMemoryCount; }
+            set
+            {
+                if (value == _tradesInMemoryCount)
+                {
+                    return;
+                }
+
+                _tradesInMemoryCount = value;
+                Save();
+            }
+        }
+        private int _tradesInMemoryCount = 1000;
+
         private void Load()
         {
             if (!File.Exists(@"Engine\" + _name + @"OptimizerDataStorage.txt"))
@@ -108,6 +191,36 @@ namespace OsEngine.Market.Servers.Optimizer
                     Enum.TryParse(reader.ReadLine(), out _typeTesterData);
                     Enum.TryParse(reader.ReadLine(), out _sourceDataType);
                     _pathToFolder = reader.ReadLine();
+
+                    if(reader.EndOfStream == false)
+                    {
+                        _dividendsIsOn = Convert.ToBoolean(reader.ReadLine());
+                    }
+
+                    if (reader.EndOfStream == false)
+                    {
+                        _marginRegime = reader.ReadLine();
+                    }
+
+                    if (reader.EndOfStream == false)
+                    {
+                        _taxesIsOn = Convert.ToBoolean(reader.ReadLine());
+                    }
+
+                    if (reader.EndOfStream == false)
+                    {
+                        _removeTradesFromMemory = Convert.ToBoolean(reader.ReadLine());
+                    }
+
+                    if (reader.EndOfStream == false)
+                    {
+                        int tradesInMemoryCount;
+                        if (int.TryParse(reader.ReadLine(), out tradesInMemoryCount) == true &&
+                            tradesInMemoryCount > 0)
+                        {
+                            _tradesInMemoryCount = tradesInMemoryCount;
+                        }
+                    }
 
                     reader.Close();
                 }
@@ -128,6 +241,11 @@ namespace OsEngine.Market.Servers.Optimizer
                     writer.WriteLine(_typeTesterData);
                     writer.WriteLine(_sourceDataType);
                     writer.WriteLine(_pathToFolder);
+                    writer.WriteLine(_dividendsIsOn);
+                    writer.WriteLine(_marginRegime);
+                    writer.WriteLine(_taxesIsOn);
+                    writer.WriteLine(_removeTradesFromMemory);
+                    writer.WriteLine(_tradesInMemoryCount);
                     writer.Close();
                 }
             }
@@ -136,6 +254,184 @@ namespace OsEngine.Market.Servers.Optimizer
                 // ignored
             }
         }
+
+        #region Margin and tax tables
+
+        private Dictionary<int, List<ListTableSumm>> _marginTableSumm;
+
+        private List<ListTablePeriods> _marginTablePercent;
+
+        private List<ListTablePeriods> _taxTable;
+
+        public Dictionary<int, List<ListTableSumm>> GetMarginTableSumm()
+        {
+            return _marginTableSumm;
+        }
+
+        public void SetMarginTableSumm(int year, List<ListTableSumm> list)
+        {
+            _marginTableSumm[year] = list;
+            SaveMarginTableSumm();
+        }
+
+        public List<ListTablePeriods> GetMarginTablePercent()
+        {
+            return _marginTablePercent;
+        }
+
+        public void SetMarginTablePercent(List<ListTablePeriods> list)
+        {
+            _marginTablePercent = list;
+            SaveMarginTablePercent();
+        }
+
+        public List<ListTablePeriods> GetTaxTable()
+        {
+            return _taxTable;
+        }
+
+        public void SetTaxTable(List<ListTablePeriods> list)
+        {
+            _taxTable = list;
+            SaveTaxTable();
+        }
+
+        private void LoadMarginAndTaxTables()
+        {
+            // те же файлы, что и у тестового сервера: настройки общие,
+            // одновременно тестер и оптимизатор не запускаются
+            _marginTableSumm = LoadTableFromFile<Dictionary<int, List<ListTableSumm>>>(@"Engine\TesterServerMarginSumm.json");
+
+            if (_marginTableSumm == null
+                || _marginTableSumm.Count == 0)
+            {
+                _marginTableSumm = GetDefaultMarginSummTable();
+            }
+
+            _marginTablePercent = LoadTableFromFile<List<ListTablePeriods>>(@"Engine\TesterServerMarginPercent.json");
+
+            if (_marginTablePercent == null
+                || _marginTablePercent.Count == 0)
+            {
+                _marginTablePercent = GetDefaultRateTable();
+            }
+
+            _taxTable = LoadTableFromFile<List<ListTablePeriods>>(@"Engine\TesterServerTaxes.json");
+
+            if (_taxTable == null
+                || _taxTable.Count == 0)
+            {
+                _taxTable = GetDefaultRateTable();
+            }
+        }
+
+        private T LoadTableFromFile<T>(string fileName)
+        {
+            try
+            {
+                if (!File.Exists(fileName))
+                {
+                    return default(T);
+                }
+
+                string json = File.ReadAllText(fileName);
+                return JsonConvert.DeserializeObject<T>(json);
+            }
+            catch (Exception error)
+            {
+                SendLogMessage(error.ToString(), LogMessageType.Error);
+                return default(T);
+            }
+        }
+
+        private void SaveTableToFile(string fileName, object table)
+        {
+            try
+            {
+                string json = JsonConvert.SerializeObject(table, Formatting.Indented);
+                File.WriteAllText(fileName, json);
+            }
+            catch (Exception error)
+            {
+                SendLogMessage(error.ToString(), LogMessageType.Error);
+            }
+        }
+
+        private void SaveMarginTableSumm()
+        {
+            SaveTableToFile(@"Engine\TesterServerMarginSumm.json", _marginTableSumm);
+        }
+
+        private void SaveMarginTablePercent()
+        {
+            SaveTableToFile(@"Engine\TesterServerMarginPercent.json", _marginTablePercent);
+        }
+
+        private void SaveTaxTable()
+        {
+            SaveTableToFile(@"Engine\TesterServerTaxes.json", _taxTable);
+        }
+
+        private List<ListTablePeriods> GetDefaultRateTable()
+        {
+            List<ListTablePeriods> list = new List<ListTablePeriods>();
+
+            for (int i = 2000; i < 2031; i++)
+            {
+                list.Add(new ListTablePeriods() { Year = i, Rate = 13 });
+            }
+
+            return list;
+        }
+
+        private Dictionary<int, List<ListTableSumm>> GetDefaultMarginSummTable()
+        {
+            Dictionary<int, List<ListTableSumm>> result = new Dictionary<int, List<ListTableSumm>>();
+
+            for (int year = 2000; year < 2031; year++)
+            {
+                result[year] = GetDefaultMarginSummToYear(year);
+            }
+
+            return result;
+        }
+
+        private List<ListTableSumm> GetDefaultMarginSummToYear(int year)
+        {
+            List<ListTableSumm> list = new List<ListTableSumm>();
+
+            if (year >= 2024)
+            {
+                list.Add(new ListTableSumm() { Summ = 5000, TypeValue = TypeValueTableSumm.Absolute, Rate = 0 });
+                list.Add(new ListTableSumm() { Summ = 50000, TypeValue = TypeValueTableSumm.Absolute, Rate = 45 });
+                list.Add(new ListTableSumm() { Summ = 100000, TypeValue = TypeValueTableSumm.Absolute, Rate = 90 });
+                list.Add(new ListTableSumm() { Summ = 250000, TypeValue = TypeValueTableSumm.Absolute, Rate = 215 });
+                list.Add(new ListTableSumm() { Summ = 500000, TypeValue = TypeValueTableSumm.Absolute, Rate = 430 });
+                list.Add(new ListTableSumm() { Summ = 1000000, TypeValue = TypeValueTableSumm.Absolute, Rate = 850 });
+                list.Add(new ListTableSumm() { Summ = 2500000, TypeValue = TypeValueTableSumm.Absolute, Rate = 2100 });
+                list.Add(new ListTableSumm() { Summ = 5000000, TypeValue = TypeValueTableSumm.Absolute, Rate = 4100 });
+                list.Add(new ListTableSumm() { Summ = 10000000, TypeValue = TypeValueTableSumm.Absolute, Rate = 8000 });
+                list.Add(new ListTableSumm() { Summ = 25000000, TypeValue = TypeValueTableSumm.Percent, Rate = 0.078m });
+                list.Add(new ListTableSumm() { Summ = 50000000, TypeValue = TypeValueTableSumm.Percent, Rate = 0.075m });
+                list.Add(new ListTableSumm() { Summ = 60000000, TypeValue = TypeValueTableSumm.Percent, Rate = 0.067m });
+            }
+            else
+            {
+                list.Add(new ListTableSumm() { Summ = 50000, TypeValue = TypeValueTableSumm.Absolute, Rate = 25 });
+                list.Add(new ListTableSumm() { Summ = 100000, TypeValue = TypeValueTableSumm.Absolute, Rate = 45 });
+                list.Add(new ListTableSumm() { Summ = 200000, TypeValue = TypeValueTableSumm.Absolute, Rate = 85 });
+                list.Add(new ListTableSumm() { Summ = 300000, TypeValue = TypeValueTableSumm.Absolute, Rate = 115 });
+                list.Add(new ListTableSumm() { Summ = 500000, TypeValue = TypeValueTableSumm.Absolute, Rate = 185 });
+                list.Add(new ListTableSumm() { Summ = 1000000, TypeValue = TypeValueTableSumm.Absolute, Rate = 365 });
+                list.Add(new ListTableSumm() { Summ = 2000000, TypeValue = TypeValueTableSumm.Absolute, Rate = 700 });
+                list.Add(new ListTableSumm() { Summ = 5000000, TypeValue = TypeValueTableSumm.Absolute, Rate = 1700 });
+                list.Add(new ListTableSumm() { Summ = 6000000, TypeValue = TypeValueTableSumm.Percent, Rate = 0.033m });
+            }
+
+            return list;
+        }
+
+        #endregion
 
         public TesterSourceDataType SourceDataType
         {
@@ -1092,11 +1388,22 @@ namespace OsEngine.Market.Servers.Optimizer
                         MarketDepth tradeN = new MarketDepth();
                         tradeN.SetMarketDepthFromString(reader.ReadLine());
 
-                        decimal open = (decimal)Convert.ToDouble(tradeN.Bids[0].Price);
+                        decimal open = 0m;
+
+                        if (tradeN.Bids != null && tradeN.Bids.Count > 0)
+                        {
+                            open = (decimal)Convert.ToDouble(tradeN.Bids[0].Price);
+                        }
+
+                        if (open == 0 && tradeN.Asks != null && tradeN.Asks.Count > 0)
+                        {
+                            open = (decimal)Convert.ToDouble(tradeN.Asks[0].Price);
+                        }
 
                         if (open == 0)
                         {
-                            open = (decimal)Convert.ToDouble(tradeN.Asks[0].Price);
+                            // no price in this sample (one-sided book: limit up/down, auction) / в пробе нет цены: стакан с одной стороной
+                            continue;
                         }
 
                         if (open.ToString(culture).Split('.').Length > 1)
@@ -1173,6 +1480,12 @@ namespace OsEngine.Market.Servers.Optimizer
                                 countFive++;
                             }
                         }
+                    }
+
+                    if (minPriceStep == decimal.MaxValue)
+                    {
+                        // none of the 20 probes gave a usable price — file is unusable, drop it / ни одна из 20 проб не дала цены — файл непригоден, отсев
+                        throw new InvalidDataException("Market depth file has no usable price sample in header: " + name);
                     }
 
 
@@ -1802,6 +2115,24 @@ namespace OsEngine.Market.Servers.Optimizer
                     {
                         return storage;
                     }
+
+                    if (_removeTradesFromMemory == true)
+                    {
+                        // FEATURE-0107: window access holds its own file cursor, so such storage is not cached.
+                        // Repeated requests for the same key are filtered in OptimizerServer.GetDataToSecurity
+
+                        DataStorage windowStorage = CreateWindowTradeStorage(security, timeFrame, timeStart, timeEnd);
+
+                        if (windowStorage == null)
+                        {
+                            SendLogMessage(OsLocalization.Market.Message29 + security.Name + OsLocalization.Market.Message30 + _typeTesterData, LogMessageType.Error);
+                            return null;
+                        }
+
+                        windowStorage.StorageType = TesterDataType.TickOnlyReadyCandle;
+                        return windowStorage;
+                    }
+
                     storage = LoadTradesFromFolder(security, timeStart, timeEnd);
                     storage.StorageType = TesterDataType.TickOnlyReadyCandle;
 
@@ -1825,6 +2156,22 @@ namespace OsEngine.Market.Servers.Optimizer
                     if (storage != null)
                     {
                         return storage;
+                    }
+
+                    if (_removeTradesFromMemory == true)
+                    {
+                        // FEATURE-0107: see comment in TickOnlyReadyCandle branch
+
+                        DataStorage windowStorage = CreateWindowTradeStorage(security, timeFrame, timeStart, timeEnd);
+
+                        if (windowStorage == null)
+                        {
+                            SendLogMessage(OsLocalization.Market.Message29 + security.Name + OsLocalization.Market.Message30 + _typeTesterData, LogMessageType.Error);
+                            return null;
+                        }
+
+                        windowStorage.StorageType = TesterDataType.TickAllCandleState;
+                        return windowStorage;
                     }
 
                     storage = LoadTradesFromFolder(security, timeStart, timeEnd);
@@ -2006,6 +2353,45 @@ namespace OsEngine.Market.Servers.Optimizer
             return null;
         }
 
+        private DataStorage CreateWindowTradeStorage(Security security, TimeFrame timeFrame, DateTime timeStart, DateTime timeEnd)
+        {
+            try
+            {
+                SecurityTester sec = SecuritiesTester.Find(
+                    s => s.Security.Name == security.Name && s.DataType == SecurityTesterDataType.Tick);
+
+                if (sec == null)
+                {
+                    return null;
+                }
+
+                TradeFileWindowAccess access = new TradeFileWindowAccess(security, sec.FileAddress,
+                    timeStart, timeEnd, _tradesInMemoryCount,
+                    message => SendLogMessage(message, LogMessageType.Error));
+
+                if (access.Count == 0)
+                {
+                    SendLogMessage(OsLocalization.Market.Message34 + timeStart.ToShortDateString() +
+                                   OsLocalization.Market.Message33 + timeEnd.ToShortDateString() + OsLocalization.Market.Message14 + security.Name, LogMessageType.Error);
+                }
+
+                DataStorage storage = new DataStorage();
+                storage.Security = security;
+                storage.TimeFrame = timeFrame; // the dedup key in OptimizerServer.GetDataToSecurity matches on it
+                storage.TimeEnd = timeEnd;
+                storage.TimeStart = timeStart;
+                storage.TradeAccess = access;
+
+                return storage;
+            }
+            catch (Exception ex)
+            {
+                SendLogMessage(ex.ToString(), LogMessageType.Error);
+            }
+
+            return null;
+        }
+
         private DataStorage LoadMarketDepthFromFolder(Security security, DateTime timeStart, DateTime timeEnd)
         {
             try
@@ -2096,6 +2482,9 @@ namespace OsEngine.Market.Servers.Optimizer
 
         public List<Trade> Trades;
 
+        /// <summary>FEATURE-0107. Access to ticks instead of the Trades list when RemoveTradesFromMemory is on.</summary>
+        public ITradeAccess TradeAccess;
+
         public List<MarketDepth> MarketDepths;
 
         public TimeFrame TimeFrame;
@@ -2132,6 +2521,12 @@ namespace OsEngine.Market.Servers.Optimizer
             {
                 Trades.Clear();
                 Trades = null;
+            }
+
+            if (TradeAccess != null)
+            {
+                TradeAccess.Dispose();
+                TradeAccess = null;
             }
 
             if (MarketDepths != null)

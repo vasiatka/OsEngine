@@ -228,61 +228,16 @@ namespace OsEngine.OsTrader.Panels.Tab
             StartButtonBlinkAnimation();
         }
 
-        private void StartButtonBlinkAnimation()
-        {
-            try
-            {
-                DispatcherTimer timer = new DispatcherTimer();
-                int blinkCount = 0;
-                bool isGreenVisible = true;
-
-                timer.Interval = TimeSpan.FromMilliseconds(300);
-                timer.Tick += (s, e) =>
-                {
-                    try
-                    {
-                        if (blinkCount >= 20)
-                        {
-                            timer.Stop();
-                            PostGreenTabPair.Opacity = 1;
-                            PostWhiteTabPair.Opacity = 0;
-                            return;
-                        }
-
-                        if (isGreenVisible)
-                        {
-                            PostGreenTabPair.Opacity = 0;
-                            PostWhiteTabPair.Opacity = 1;
-                        }
-                        else
-                        {
-                            PostGreenTabPair.Opacity = 1;
-                            PostWhiteTabPair.Opacity = 0;
-                        }
-
-                        isGreenVisible = !isGreenVisible;
-                        blinkCount++;
-                    }
-                    catch (Exception ex)
-                    {
-                        ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
-                        timer.Stop();
-                    }
-                };
-
-                timer.Start();
-            }
-            catch (Exception ex)
-            {
-                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
-            }
-        }
-
         private void BotTabPairUi_Closed(object sender, EventArgs e)
         {
             try
             {
-                Closed -= BotTabPairUi_Closed;
+                if (_blinkTimer != null)
+                {
+                    _blinkTimer.Stop();
+                    _blinkTimer.Tick -= _blinkTimer_Tick;
+                    _blinkTimer = null;
+                }
 
                 TextBoxCorrelationLookBack.TextChanged -= TextBoxCorrelationLookBack_TextChanged;
                 TextBoxCointegrationLookBack.TextChanged -= TextBoxCointegrationLookBack_TextChanged;
@@ -295,19 +250,22 @@ namespace OsEngine.OsTrader.Panels.Tab
                 ButtonClosePositions.Click -= ButtonClosePositions_Click;
                 ButtonPairJournal.Click -= ButtonPairJournal_Click;
                 ButtonHideShowRightPanel.Click -= ButtonHideShowRightPanel_Click;
+                ButtonSec1Connection.Click -= ButtonSec1Connection_Click;
+                ButtonSec2Connection.Click -= ButtonSec2Connection_Click;
+                ButtonPostTabPair.Click -= ButtonPostTabPair_Click;
 
                 CheckBoxCorrelationAutoIsOn.Click -= CheckBoxCorrelationAutoIsOn_Click;
                 CheckBoxCointegrationAutoIsOn.Click -= CheckBoxCointegrationAutoIsOn_Click;
 
+                ComboBoxSec1Volume.SelectionChanged -= ComboBoxSec1Volume_SelectionChanged;
+                ComboBoxSec1Slippage.SelectionChanged -= ComboBoxSec1Slippage_SelectionChanged;
+                ComboBoxSec2Volume.SelectionChanged -= ComboBoxSec2Volume_SelectionChanged;
+                ComboBoxSec2Slippage.SelectionChanged -= ComboBoxSec2Slippage_SelectionChanged;
+                ComboBoxSec1Regime.SelectionChanged -= ComboBoxSec1Regime_SelectionChanged;
+                ComboBoxSec2Regime.SelectionChanged -= ComboBoxSec2Regime_SelectionChanged;
+
                 TextBoxSec1Volume.TextChanged -= TextBoxSec1Volume_TextChanged;
                 TextBoxSec1Slippage.TextChanged -= TextBoxSec1Slippage_TextChanged;
-
-                TextBoxSec2Volume.TextChanged -= TextBoxSec2Volume_TextChanged;
-                TextBoxSec2Slippage.TextChanged -= TextBoxSec2Slippage_TextChanged;
-
-                TextBoxSec1Volume.TextChanged -= TextBoxSec1Volume_TextChanged;
-                TextBoxSec1Slippage.TextChanged -= TextBoxSec1Slippage_TextChanged;
-
                 TextBoxSec2Volume.TextChanged -= TextBoxSec2Volume_TextChanged;
                 TextBoxSec2Slippage.TextChanged -= TextBoxSec2Slippage_TextChanged;
 
@@ -333,15 +291,50 @@ namespace OsEngine.OsTrader.Panels.Tab
                     _chartSec2 = null;
                 }
 
+                if (HostSec1 != null)
+                {
+                    HostSec1.Child = null;
+                }
+                if (HostSec2 != null)
+                {
+                    HostSec2.Child = null;
+                }
+
                 if (_chartCorrelation != null)
                 {
-                    _chartCorrelation.Series.Clear();
+                    try
+                    {
+                        if (HostCorrelation != null)
+                        {
+                            HostCorrelation.Child = null;
+                        }
+                        _chartCorrelation.Series.Clear();
+                        _chartCorrelation.ChartAreas.Clear();
+                        _chartCorrelation.Dispose();
+                    }
+                    catch (Exception ex)
+                    {
+                        ServerMaster.SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+                    }
                     _chartCorrelation = null;
                 }
 
                 if (_chartCointegration != null)
                 {
-                    _chartCointegration.Series.Clear();
+                    try
+                    {
+                        if (HostCointegration != null)
+                        {
+                            HostCointegration.Child = null;
+                        }
+                        _chartCointegration.Series.Clear();
+                        _chartCointegration.ChartAreas.Clear();
+                        _chartCointegration.Dispose();
+                    }
+                    catch (Exception ex)
+                    {
+                        ServerMaster.SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+                    }
                     _chartCointegration = null;
                 }
 
@@ -394,11 +387,75 @@ namespace OsEngine.OsTrader.Panels.Tab
                 _pair.PairDeletedEvent -= _pair_PairDeletedEvent;
                 _pair = null;
 
-
+                Closed -= BotTabPairUi_Closed;
             }
-            catch
+            catch (Exception ex)
             {
-                // ignore
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private DispatcherTimer _blinkTimer;
+
+        private int _blinkCount;
+
+        private bool _isGreenVisible = true;
+
+        private void StartButtonBlinkAnimation()
+        {
+            try
+            {
+                _blinkTimer = new DispatcherTimer();
+                _blinkTimer.Interval = TimeSpan.FromMilliseconds(300);
+                _blinkTimer.Tick += _blinkTimer_Tick;
+                _blinkTimer.Start();
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private void _blinkTimer_Tick(object sender, EventArgs e)
+        {
+            if (_blinkTimer == null)
+            {
+                return;
+            }
+
+            try
+            {
+                if (_blinkCount >= 20)
+                {
+                    _blinkTimer.Stop();
+                    _blinkTimer.Tick -= _blinkTimer_Tick;
+                    _blinkTimer = null;
+                    PostGreenTabPair.Opacity = 1;
+                    PostWhiteTabPair.Opacity = 0;
+                    return;
+                }
+
+                if (_isGreenVisible)
+                {
+                    PostGreenTabPair.Opacity = 0;
+                    PostWhiteTabPair.Opacity = 1;
+                }
+                else
+                {
+                    PostGreenTabPair.Opacity = 1;
+                    PostWhiteTabPair.Opacity = 0;
+                }
+
+                _isGreenVisible = !_isGreenVisible;
+                _blinkCount++;
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+                if (_blinkTimer != null)
+                {
+                    _blinkTimer.Stop();
+                }
             }
         }
 
@@ -444,7 +501,7 @@ namespace OsEngine.OsTrader.Panels.Tab
             _pair.Save();
         }
 
-        JournalUi2 _journalUi2;
+        private JournalUi2 _journalUi2;
 
         private void ButtonPairJournal_Click(object sender, RoutedEventArgs e)
         {
@@ -856,7 +913,7 @@ namespace OsEngine.OsTrader.Panels.Tab
 
         // обработка нажатий на кнопки
 
-        PairToTrade _pair;
+        private PairToTrade _pair;
 
         private void ButtonCointegrationReload_Click(object sender, RoutedEventArgs e)
         {
@@ -870,9 +927,9 @@ namespace OsEngine.OsTrader.Panels.Tab
 
         // прорисовка инструментов
 
-        ChartCandleMaster _chartSec1;
+        private ChartCandleMaster _chartSec1;
 
-        ChartCandleMaster _chartSec2;
+        private ChartCandleMaster _chartSec2;
 
         private void PaintCandles()
         {
@@ -930,19 +987,20 @@ namespace OsEngine.OsTrader.Panels.Tab
 
             _chartCorrelation.ChartAreas.Clear();
             _chartCorrelation.ChartAreas.Add(area);
-            _chartCorrelation.BackColor = Color.FromArgb(21, 26, 30);
-            _chartCorrelation.ChartAreas[0].AxisX.TitleForeColor = Color.FromArgb(149, 159, 176);
+            _chartCorrelation.BackColor = Themes.ThemeManager.GetColorWinForms("StandardBackGroundColorLight");
+            _chartCorrelation.ChartAreas[0].AxisX.TitleForeColor = Themes.ThemeManager.GetColorWinForms("OptimizerChartTextColor");
 
             for (int i = 0; _chartCorrelation.ChartAreas != null && i < _chartCorrelation.ChartAreas.Count; i++)
             {
-                _chartCorrelation.ChartAreas[i].BackColor = Color.FromArgb(21, 26, 30);
-                _chartCorrelation.ChartAreas[i].BorderColor = Color.FromArgb(17, 18, 23);
-                _chartCorrelation.ChartAreas[i].CursorY.LineColor = Color.FromArgb(149, 159, 176);
-                _chartCorrelation.ChartAreas[i].CursorX.LineColor = Color.FromArgb(149, 159, 176);
+                _chartCorrelation.ChartAreas[i].BackColor = Themes.ThemeManager.GetColorWinForms("StandardBackGroundColorLight");
+                _chartCorrelation.ChartAreas[i].BorderColor = Themes.ThemeManager.GetColorWinForms("StandardBackGroundColor");
+                _chartCorrelation.ChartAreas[i].CursorY.LineColor = Themes.ThemeManager.GetColorWinForms("OptimizerChartTextColor");
+                _chartCorrelation.ChartAreas[i].CursorX.LineColor = Themes.ThemeManager.GetColorWinForms("OptimizerChartTextColor");
 
                 foreach (var axe in _chartCorrelation.ChartAreas[i].Axes)
                 {
-                    axe.LabelStyle.ForeColor = Color.FromArgb(149, 159, 176);
+                    axe.LabelStyle.ForeColor = Themes.ThemeManager.GetColorWinForms("OptimizerChartTextColor");
+                    axe.LabelStyle.Font = Themes.ThemeManager.GetChartAxisFont();
                 }
             }
 
@@ -989,15 +1047,15 @@ namespace OsEngine.OsTrader.Panels.Tab
 
                     if (val > 0)
                     {
-                        series.Points[series.Points.Count - 1].Color = Color.DarkGreen;
-                        series.Points[series.Points.Count - 1].BorderColor = Color.DarkGreen;
-                        series.Points[series.Points.Count - 1].BackSecondaryColor = Color.DarkGreen;
+                        series.Points[series.Points.Count - 1].Color = Themes.ThemeManager.GetColorWinForms("OptimizerProfitBarColor");
+                        series.Points[series.Points.Count - 1].BorderColor = Themes.ThemeManager.GetColorWinForms("OptimizerProfitBarColor");
+                        series.Points[series.Points.Count - 1].BackSecondaryColor = Themes.ThemeManager.GetColorWinForms("OptimizerProfitBarColor");
                     }
                     else
                     {
-                        series.Points[series.Points.Count - 1].Color = Color.DarkRed;
-                        series.Points[series.Points.Count - 1].BorderColor = Color.DarkRed;
-                        series.Points[series.Points.Count - 1].BackSecondaryColor = Color.DarkRed;
+                        series.Points[series.Points.Count - 1].Color = Themes.ThemeManager.GetColorWinForms("ChartBarMinusColor");
+                        series.Points[series.Points.Count - 1].BorderColor = Themes.ThemeManager.GetColorWinForms("ChartBarMinusColor");
+                        series.Points[series.Points.Count - 1].BackSecondaryColor = Themes.ThemeManager.GetColorWinForms("ChartBarMinusColor");
                     }
 
                     string toolTip = "";
@@ -1010,7 +1068,7 @@ namespace OsEngine.OsTrader.Panels.Tab
                     if (i + 1 == values.Count)
                     { // last point
                         series.Points[series.Points.Count - 1].Label = val.ToStringWithNoEndZero();
-                        series.Points[series.Points.Count - 1].LabelForeColor = Color.AntiqueWhite;
+                        series.Points[series.Points.Count - 1].LabelForeColor = Themes.ThemeManager.GetColorWinForms("JournalEquityTotalColor");
                     }
 
                 }
@@ -1038,19 +1096,20 @@ namespace OsEngine.OsTrader.Panels.Tab
 
             _chartCointegration.ChartAreas.Clear();
             _chartCointegration.ChartAreas.Add(area);
-            _chartCointegration.BackColor = Color.FromArgb(21, 26, 30);
-            _chartCointegration.ChartAreas[0].AxisX.TitleForeColor = Color.FromArgb(149, 159, 176);
+            _chartCointegration.BackColor = Themes.ThemeManager.GetColorWinForms("StandardBackGroundColorLight");
+            _chartCointegration.ChartAreas[0].AxisX.TitleForeColor = Themes.ThemeManager.GetColorWinForms("OptimizerChartTextColor");
 
             for (int i = 0; _chartCointegration.ChartAreas != null && i < _chartCointegration.ChartAreas.Count; i++)
             {
-                _chartCointegration.ChartAreas[i].BackColor = Color.FromArgb(21, 26, 30);
-                _chartCointegration.ChartAreas[i].BorderColor = Color.FromArgb(17, 18, 23);
-                _chartCointegration.ChartAreas[i].CursorY.LineColor = Color.FromArgb(149, 159, 176);
-                _chartCointegration.ChartAreas[i].CursorX.LineColor = Color.FromArgb(149, 159, 176);
+                _chartCointegration.ChartAreas[i].BackColor = Themes.ThemeManager.GetColorWinForms("StandardBackGroundColorLight");
+                _chartCointegration.ChartAreas[i].BorderColor = Themes.ThemeManager.GetColorWinForms("StandardBackGroundColor");
+                _chartCointegration.ChartAreas[i].CursorY.LineColor = Themes.ThemeManager.GetColorWinForms("OptimizerChartTextColor");
+                _chartCointegration.ChartAreas[i].CursorX.LineColor = Themes.ThemeManager.GetColorWinForms("OptimizerChartTextColor");
 
                 foreach (var axe in _chartCointegration.ChartAreas[i].Axes)
                 {
-                    axe.LabelStyle.ForeColor = Color.FromArgb(149, 159, 176);
+                    axe.LabelStyle.ForeColor = Themes.ThemeManager.GetColorWinForms("OptimizerChartTextColor");
+                    axe.LabelStyle.Font = Themes.ThemeManager.GetChartAxisFont();
                 }
             }
 
@@ -1064,14 +1123,14 @@ namespace OsEngine.OsTrader.Panels.Tab
 
             Series seriesUpLine = new Series();
             seriesUpLine.ChartType = SeriesChartType.Line;
-            seriesUpLine.Color = Color.AliceBlue;
+            seriesUpLine.Color = Themes.ThemeManager.GetColorWinForms("JournalEquityTotalColor");
             _chartCointegration.Series.Add(seriesUpLine);
 
             // Линия нижняя
 
             Series seriesDownLine = new Series();
             seriesDownLine.ChartType = SeriesChartType.Line;
-            seriesDownLine.Color = Color.AliceBlue;
+            seriesDownLine.Color = Themes.ThemeManager.GetColorWinForms("JournalEquityTotalColor");
             _chartCointegration.Series.Add(seriesDownLine);
 
             HostCointegration.Child = _chartCointegration;
@@ -1122,15 +1181,15 @@ namespace OsEngine.OsTrader.Panels.Tab
 
                     if (val > 0)
                     {
-                        series.Points[series.Points.Count - 1].Color = Color.DarkGreen;
-                        series.Points[series.Points.Count - 1].BorderColor = Color.DarkGreen;
-                        series.Points[series.Points.Count - 1].BackSecondaryColor = Color.DarkGreen;
+                        series.Points[series.Points.Count - 1].Color = Themes.ThemeManager.GetColorWinForms("OptimizerProfitBarColor");
+                        series.Points[series.Points.Count - 1].BorderColor = Themes.ThemeManager.GetColorWinForms("OptimizerProfitBarColor");
+                        series.Points[series.Points.Count - 1].BackSecondaryColor = Themes.ThemeManager.GetColorWinForms("OptimizerProfitBarColor");
                     }
                     else
                     {
-                        series.Points[series.Points.Count - 1].Color = Color.DarkRed;
-                        series.Points[series.Points.Count - 1].BorderColor = Color.DarkRed;
-                        series.Points[series.Points.Count - 1].BackSecondaryColor = Color.DarkRed;
+                        series.Points[series.Points.Count - 1].Color = Themes.ThemeManager.GetColorWinForms("ChartBarMinusColor");
+                        series.Points[series.Points.Count - 1].BorderColor = Themes.ThemeManager.GetColorWinForms("ChartBarMinusColor");
+                        series.Points[series.Points.Count - 1].BackSecondaryColor = Themes.ThemeManager.GetColorWinForms("ChartBarMinusColor");
                     }
 
                     string toolTip = "";
@@ -1143,7 +1202,7 @@ namespace OsEngine.OsTrader.Panels.Tab
                     if (i + 1 == values.Count)
                     { // last point
                         series.Points[series.Points.Count - 1].Label = val.ToStringWithNoEndZero();
-                        series.Points[series.Points.Count - 1].LabelForeColor = Color.AntiqueWhite;
+                        series.Points[series.Points.Count - 1].LabelForeColor = Themes.ThemeManager.GetColorWinForms("JournalEquityTotalColor");
                     }
 
                 }

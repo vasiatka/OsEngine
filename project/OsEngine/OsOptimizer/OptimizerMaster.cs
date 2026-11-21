@@ -28,6 +28,8 @@ namespace OsEngine.OsOptimizer
     {
         #region Service
 
+        public static OptimizerMaster Master;
+
         public OptimizerMaster()
         {
             _log = new Log("OptimizerLog", StartProgram.IsTester);
@@ -69,32 +71,91 @@ namespace OsEngine.OsOptimizer
             _optimizerExecutor.TimeToEndChangeEvent += _optimizerExecutor_TimeToEndChangeEvent;
             ProgressBarStatuses = new List<ProgressBarStatus>();
             PrimeProgressBarStatus = new ProgressBarStatus();
+
+            // публикуем мастер только после полной инициализации:
+            // запросы MCP не должны попадать в полусобранный объект
+            Master = this;
         }
 
         public int GetMaxBotsCount()
         {
-            if (_parameters == null ||
-                _parametersOn == null)
+            // Пара списков снимается и считается под локом: подсчёт мутирует живые параметры,
+            // а геттеры пересобирают поля между двумя проходами (BUG-0341)
+            lock (ParametersLock)
             {
-                return 0;
+                List<IIStrategyParameter> parameters = _parameters;
+                List<bool> parametersOn = _parametersOn;
+
+                if (parameters == null ||
+                    parametersOn == null)
+                {
+                    return 0;
+                }
+
+                int value = _optimizerExecutor.BotCountOneFaze(parameters, parametersOn) * IterationCount * 2;
+
+                if (LastInSample)
+                {
+                    value = value - _optimizerExecutor.BotCountOneFaze(parameters, parametersOn);
+                }
+
+                return value;
             }
+        }
 
-            int value = _optimizerExecutor.BotCountOneFaze(_parameters, _parametersOn) * IterationCount * 2;
+        // Атомарная замена файла (BUG-0404): строки пишутся в .tmp рядом, Flush(true),
+        // затем File.Replace (File.Move, если цели нет). Обрыв посреди записи или
+        // внешняя блокировка цели оставляет предыдущий файл целым; рваный файл больше
+        // не читается. Ошибка — наружу, коллеры пишут её в лог; .tmp чистится best-effort.
+        private void WriteFileAtomic(string path, Action<StreamWriter> writeBody)
+        {
+            string tempPath = path + @".tmp";
 
-            if (LastInSample)
+            try
             {
-                value = value - _optimizerExecutor.BotCountOneFaze(_parameters, _parametersOn);
-            }
+                using (FileStream stream = new FileStream(tempPath, FileMode.Create, FileAccess.Write))
+                using (StreamWriter writer = new StreamWriter(stream))
+                {
+                    writeBody(writer);
 
-            return value;
+                    writer.Flush();
+
+                    // сброс буферов ОС: на .tmp уже лежат полные данные до замены (BUG-0404)
+                    stream.Flush(true);
+                }
+
+                if (File.Exists(path))
+                {
+                    File.Replace(tempPath, path, null);
+                }
+                else
+                {
+                    File.Move(tempPath, path);
+                }
+            }
+            catch
+            {
+                try
+                {
+                    if (File.Exists(tempPath))
+                    {
+                        File.Delete(tempPath);
+                    }
+                }
+                catch (Exception cleanupError)
+                {
+                    SendLogMessage(@"Cannot remove " + tempPath + @". " + cleanupError.ToString(), LogMessageType.Error);
+                }
+
+                throw;
+            }
         }
 
         private void Save()
         {
             try
             {
-                using (StreamWriter writer = new StreamWriter(@"Engine\OptimizerSettings.txt", false)
-                    )
+                WriteFileAtomic(@"Engine\OptimizerSettings.txt", writer =>
                 {
                     writer.WriteLine(ThreadsCount);
                     writer.WriteLine(StrategyName);
@@ -125,8 +186,9 @@ namespace OsEngine.OsOptimizer
                     writer.WriteLine(_slippageToStopOrder);
                     writer.WriteLine(_cacheIndicatorsIsOn);
 
-                    writer.Close();
-                }
+                    // FEATURE-0089: строка 26 — таймаут зависшего прогона; аддитивно в конец
+                    writer.WriteLine(_hangingTestTimeoutSeconds);
+                });
             }
             catch (Exception error)
             {
@@ -136,6 +198,10 @@ namespace OsEngine.OsOptimizer
 
         private void Load()
         {
+            // FEATURE-0089: таймаут зависшего прогона — позиция 26; в поле, а не через
+            // сеттер, чтобы загрузка не триггерила Save(). Нет строки/файла/битое — 60.
+            _hangingTestTimeoutSeconds = ReadHangingTestTimeout(@"Engine\OptimizerSettings.txt");
+
             if (!File.Exists(@"Engine\OptimizerSettings.txt"))
             {
                 return;
@@ -301,6 +367,68 @@ namespace OsEngine.OsOptimizer
 
         #region Management
 
+        /// <summary>
+        /// Таймаут зависшего прогона по умолчанию, секунд (FEATURE-0089, AC6).
+        /// </summary>
+        public const int HangingTestTimeoutDefault = 60;
+
+        /// <summary>
+        /// Через сколько секунд бездействия Play-пота принудительно снимать прогон (30/60/120 в UI).
+        /// </summary>
+        public int HangingTestTimeoutSeconds
+        {
+            get { return _hangingTestTimeoutSeconds; }
+            set
+            {
+                _hangingTestTimeoutSeconds = value;
+                Save();
+            }
+        }
+        private int _hangingTestTimeoutSeconds = HangingTestTimeoutDefault;
+
+        /// <summary>
+        /// Прочитать таймаут зависшего прогона из OptimizerSettings.txt (позиция 26).
+        /// Старый файл без строки, отсутствие файла, пустое или битое значение —
+        /// 60 без исключения (AC7). Лишние строки после значения игнорируются.
+        /// </summary>
+        public static int ReadHangingTestTimeout(string settingsFilePath)
+        {
+            try
+            {
+                if (File.Exists(settingsFilePath) == false)
+                {
+                    return HangingTestTimeoutDefault;
+                }
+
+                using (StreamReader reader = new StreamReader(settingsFilePath))
+                {
+                    for (int i = 0; i < 25; i++)
+                    {
+                        if (reader.ReadLine() == null)
+                        {
+                            return HangingTestTimeoutDefault;
+                        }
+                    }
+
+                    string line = reader.ReadLine();
+
+                    int value;
+
+                    if (line == null
+                        || int.TryParse(line.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out value) == false)
+                    {
+                        return HangingTestTimeoutDefault;
+                    }
+
+                    return value;
+                }
+            }
+            catch (Exception)
+            {
+                return HangingTestTimeoutDefault;
+            }
+        }
+
         public int ThreadsCount
         {
             get { return _threadsCount; }
@@ -308,6 +436,11 @@ namespace OsEngine.OsOptimizer
             {
                 _threadsCount = value;
                 Save();
+
+                if (TradeSettingsChangedEvent != null)
+                {
+                    TradeSettingsChangedEvent();
+                }
             }
         }
         private int _threadsCount;
@@ -472,10 +605,38 @@ namespace OsEngine.OsOptimizer
                 }
 
                 UpdateServerToSettings();
+
+                if (StrategyChangedEvent != null)
+                {
+                    StrategyChangedEvent();
+                }
             }
             catch (Exception ex)
             {
                 SendLogMessage("Can`t create bot " + _strategyName + " Exception: " + ex.ToString(), LogMessageType.Error);
+            }
+        }
+
+        /// <summary>
+        /// робот для оптимизации создан или пересоздан (нужно для перерисовки UI)
+        /// </summary>
+        public event Action StrategyChangedEvent;
+
+        /// <summary>
+        /// пересчитаны фазы оптимизации (нужно для перерисовки UI)
+        /// </summary>
+        public event Action PhasesChangedEvent;
+
+        /// <summary>
+        /// изменились параметры оптимизации (нужно для перерисовки UI)
+        /// </summary>
+        public event Action ParametersChangedEvent;
+
+        public void NotifyParametersChanged()
+        {
+            if (ParametersChangedEvent != null)
+            {
+                ParametersChangedEvent();
             }
         }
 
@@ -500,6 +661,7 @@ namespace OsEngine.OsOptimizer
             }
 
             ServerToTestBot = ServerMaster.CreateNextOptimizerServer(Storage, -1, 10000);
+            ServerToTestBot.MyRobot = BotToTest;
         }
 
         public void CopyManualSupportSettings(BotManualControl manualControlTo)
@@ -581,6 +743,11 @@ namespace OsEngine.OsOptimizer
             {
                 _startDeposit = value;
                 Save();
+
+                if (TradeSettingsChangedEvent != null)
+                {
+                    TradeSettingsChangedEvent();
+                }
             }
         }
         private decimal _startDeposit;
@@ -598,6 +765,11 @@ namespace OsEngine.OsOptimizer
                 _commissionType = value;
                 Save();
                 UpdateBotManualControlSettings();
+
+                if (TradeSettingsChangedEvent != null)
+                {
+                    TradeSettingsChangedEvent();
+                }
             }
         }
         private CommissionType _commissionType;
@@ -615,9 +787,19 @@ namespace OsEngine.OsOptimizer
                 _commissionValue = value;
                 Save();
                 UpdateBotManualControlSettings();
+
+                if (TradeSettingsChangedEvent != null)
+                {
+                    TradeSettingsChangedEvent();
+                }
             }
         }
         private decimal _commissionValue;
+
+        /// <summary>
+        /// изменились настройки исполнения (депозит, комиссия) — нужно для перерисовки UI
+        /// </summary>
+        public event Action TradeSettingsChangedEvent;
 
         #endregion
 
@@ -1108,6 +1290,11 @@ namespace OsEngine.OsOptimizer
                 }
             }
 
+            if (PhasesChangedEvent != null)
+            {
+                PhasesChangedEvent();
+            }
+
 
             /*while (DaysInFazes(Fazes) != dayAll)
             {
@@ -1176,22 +1363,27 @@ namespace OsEngine.OsOptimizer
                     return null;
                 }
 
-                if (_parameters != null)
+                // Пересборка общего списка под локом: конкурентный пересчёт не должен увидеть
+                // частично очищенное или null-состояние (BUG-0341)
+                lock (ParametersLock)
                 {
-                    _parameters.Clear();
-                    _parameters = null;
-                }
+                    if (_parameters != null)
+                    {
+                        _parameters.Clear();
+                        _parameters = null;
+                    }
 
-                _parameters = new List<IIStrategyParameter>();
+                    _parameters = new List<IIStrategyParameter>();
 
-                for (int i = 0; i < bot.Parameters.Count; i++)
-                {
-                    _parameters.Add(bot.Parameters[i]);
-                }
+                    for (int i = 0; i < bot.Parameters.Count; i++)
+                    {
+                        _parameters.Add(bot.Parameters[i]);
+                    }
 
-                for (int i = 0; i < _parameters.Count; i++)
-                {
-                    GetValueParameterSaveByUser(_parameters[i]);
+                    for (int i = 0; i < _parameters.Count; i++)
+                    {
+                        GetValueParameterSaveByUser(_parameters[i]);
+                    }
                 }
 
                 bot.Delete();
@@ -1222,22 +1414,34 @@ namespace OsEngine.OsOptimizer
                     return null;
                 }
 
-                if (_parameters != null)
+                // То же, что в Parameters: пересборка общего списка под локом (BUG-0341)
+                lock (ParametersLock)
                 {
-                    _parameters.Clear();
-                    _parameters = null;
-                }
+                    if (_parameters != null)
+                    {
+                        _parameters.Clear();
+                        _parameters = null;
+                    }
 
-                _parameters = new List<IIStrategyParameter>();
+                    _parameters = new List<IIStrategyParameter>();
 
-                for (int i = 0; i < bot.Parameters.Count; i++)
-                {
-                    _parameters.Add(bot.Parameters[i]);
+                    for (int i = 0; i < bot.Parameters.Count; i++)
+                    {
+                        _parameters.Add(bot.Parameters[i]);
+                    }
                 }
 
                 return _parameters;
             }
         }
+
+        // Сериализация сетки параметров оптимизатора: пересчёт BotCountOneFaze мутирует живые
+        // объекты, а геттеры пересобирают поля; без лока счёт и файлы стандартов рвались на
+        // склейке (BUG-0341). UI-вызовов и _locker под ним нет. Вложенность односторонняя: Error-ветка
+        // гейта cap(>5 000 000) в BotCountOneFaze идёт через SendLogMessage в Log.ProcessMessage
+        // под lock(_lastErrorMessagesLock) (кольцо ошибок, BUG-0321); обратно в ParametersLock кольцо
+        // не входит — цикла нет.
+        public readonly object ParametersLock = new object();
 
         private List<IIStrategyParameter> _parameters;
 
@@ -1271,53 +1475,65 @@ namespace OsEngine.OsOptimizer
 
         public void SaveStandardParameters()
         {
-            if (_parameters == null ||
-                _parameters.Count == 0)
+            // Снимок живых параметров для файла стандартов под локом: конкурентный пересчёт,
+            // сбрасывающий значения в Start, не должен вклиниться в середину записи (BUG-0341)
+            lock (ParametersLock)
             {
-                return;
-            }
-
-            try
-            {
-                using (StreamWriter writer = new StreamWriter(@"Engine\" + _strategyName + @"_StandartOptimizerParameters.txt", false)
-                    )
+                if (_parameters == null ||
+                    _parameters.Count == 0)
                 {
-                    for (int i = 0; i < _parameters.Count; i++)
-                    {
-                        writer.WriteLine(_parameters[i].GetStringToSave());
-                    }
-
-                    writer.Close();
+                    return;
                 }
-            }
-            catch (Exception)
-            {
-                // ignore
-            }
 
-            SaveParametersOnOffByStrategy();
+                try
+                {
+                    // Сериализация в .tmp под тем же локом: обрыв посреди записи
+                    // оставляет предыдущий файл целым (BUG-0404)
+                    WriteFileAtomic(@"Engine\" + _strategyName + @"_StandartOptimizerParameters.txt",
+                        writer =>
+                        {
+                            for (int i = 0; i < _parameters.Count; i++)
+                            {
+                                writer.WriteLine(_parameters[i].GetStringToSave());
+                            }
+                        });
+                }
+                catch (Exception error)
+                {
+                    SendLogMessage(error.ToString(), LogMessageType.Error);
+                }
+
+                SaveParametersOnOffByStrategy();
+            }
         }
 
         public List<bool> ParametersOn
         {
             get
             {
-
-                _parametersOn = new List<bool>();
-                for (int i = 0; _parameters != null && i < _parameters.Count; i++)
+                // Публикация нового списка флагов под локом: переходное пустое/all-false
+                // состояние не должно попадаться конкурентному пересчёту (BUG-0341)
+                List<bool> result;
+                lock (ParametersLock)
                 {
-                    _parametersOn.Add(false);
+                    _parametersOn = new List<bool>();
+                    for (int i = 0; _parameters != null && i < _parameters.Count; i++)
+                    {
+                        _parametersOn.Add(false);
+                    }
+
+                    List<bool> parametersOnSaveBefore = GetParametersOnOffByStrategy();
+
+                    if (parametersOnSaveBefore != null &&
+                        parametersOnSaveBefore.Count == _parametersOn.Count)
+                    {
+                        _parametersOn = parametersOnSaveBefore;
+                    }
+
+                    result = _parametersOn;
                 }
 
-                List<bool> parametersOnSaveBefore = GetParametersOnOffByStrategy();
-
-                if (parametersOnSaveBefore != null &&
-                    parametersOnSaveBefore.Count == _parametersOn.Count)
-                {
-                    _parametersOn = parametersOnSaveBefore;
-                }
-
-                return _parametersOn;
+                return result;
             }
         }
         private List<bool> _parametersOn;
@@ -1359,20 +1575,18 @@ namespace OsEngine.OsOptimizer
 
             try
             {
-                using (StreamWriter writer = new StreamWriter(@"Engine\" + _strategyName + @"_StandartOptimizerParametersOnOff.txt", false)
-                    )
-                {
-                    for (int i = 0; i < _parametersOn.Count; i++)
+                WriteFileAtomic(@"Engine\" + _strategyName + @"_StandartOptimizerParametersOnOff.txt",
+                    writer =>
                     {
-                        writer.WriteLine(_parametersOn[i].ToString());
-                    }
-
-                    writer.Close();
-                }
+                        for (int i = 0; i < _parametersOn.Count; i++)
+                        {
+                            writer.WriteLine(_parametersOn[i].ToString());
+                        }
+                    });
             }
-            catch (Exception)
+            catch (Exception error)
             {
-                // ignore
+                SendLogMessage(error.ToString(), LogMessageType.Error);
             }
 
         }
@@ -1403,6 +1617,185 @@ namespace OsEngine.OsOptimizer
             _optimizerExecutor.Stop();
         }
 
+        /// <summary>
+        /// проверки готовности к оптимизации без модальных окон (для MCP API)
+        /// </summary>
+        public List<string> CheckReadyDataHeadless()
+        {
+            List<string> errors = new List<string>();
+
+            // хранилище проверяем первым, чтобы не читать SecuritiesTester из null
+            if ((string.IsNullOrEmpty(Storage.ActiveSet)
+                && Storage.SourceDataType == TesterSourceDataType.Set)
+                || Storage.SecuritiesTester == null
+                || Storage.SecuritiesTester.Count == 0)
+            {
+                errors.Add("Data storage is empty. Configure the data source (optimizer_data_set_config)");
+            }
+
+            if (Fazes == null || Fazes.Count == 0)
+            {
+                errors.Add("Optimization phases are not created. Rebuild phases (optimizer_phases_set)");
+            }
+
+            if (BotToTest == null)
+            {
+                errors.Add("Optimization robot is not loaded (optimizer_bot_set)");
+            }
+            else if (errors.Count == 0)
+            {
+                List<IIBotTab> sources = BotToTest.GetTabs();
+                bool noDataFull = true;
+
+                for (int i = 0; i < sources.Count; i++)
+                {
+                    if (sources[i].TabType == BotTabType.Simple)
+                    {
+                        BotTabSimple simple = (BotTabSimple)sources[i];
+
+                        if (string.IsNullOrEmpty(simple.Connector.SecurityName) == false)
+                        {
+                            noDataFull = false;
+
+                            if (HaveSecurityAndTfInStorageHeadless(
+                                simple.Connector.SecurityName, simple.Connector.TimeFrame) == false)
+                            {
+                                errors.Add($"No data in storage for {simple.Connector.SecurityName} {simple.Connector.TimeFrame}");
+                            }
+                        }
+                    }
+                    else if (sources[i].TabType == BotTabType.Index)
+                    {
+                        BotTabIndex index = (BotTabIndex)sources[i];
+
+                        if (index.Tabs != null && index.Tabs.Count > 0)
+                        {
+                            noDataFull = false;
+
+                            for (int i2 = 0; i2 < index.Tabs.Count; i2++)
+                            {
+                                if (HaveSecurityAndTfInStorageHeadless(
+                                    index.Tabs[i2].SecurityName, index.Tabs[i2].TimeFrame) == false)
+                                {
+                                    errors.Add($"No data in storage for {index.Tabs[i2].SecurityName} {index.Tabs[i2].TimeFrame}");
+                                }
+                            }
+                        }
+                    }
+                    else if (sources[i].TabType == BotTabType.Screener)
+                    {
+                        BotTabScreener screener = (BotTabScreener)sources[i];
+
+                        if (screener.Tabs != null && screener.Tabs.Count > 0)
+                        {
+                            noDataFull = false;
+
+                            for (int i2 = 0; i2 < screener.Tabs.Count; i2++)
+                            {
+                                if (HaveSecurityAndTfInStorageHeadless(
+                                    screener.Tabs[i2].Connector.SecurityName, screener.Tabs[i2].Connector.TimeFrame) == false)
+                                {
+                                    errors.Add($"No data in storage for {screener.Tabs[i2].Connector.SecurityName} {screener.Tabs[i2].Connector.TimeFrame}");
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (noDataFull == true)
+                {
+                    errors.Add("No securities configured in robot tabs");
+                }
+            }
+
+            if (string.IsNullOrEmpty(_strategyName))
+            {
+                errors.Add("No strategy selected (optimizer_bot_set)");
+            }
+
+            if (_parametersOn == null || _parameters == null)
+            {
+                errors.Add("Optimization parameters are not loaded");
+            }
+            else
+            {
+                bool onParametersReady = false;
+
+                for (int i = 0; i < _parametersOn.Count; i++)
+                {
+                    if (_parametersOn[i])
+                    {
+                        onParametersReady = true;
+                        break;
+                    }
+                }
+
+                if (onParametersReady == false)
+                {
+                    errors.Add("No parameters enabled for optimization (optimizer_params_set with on=true)");
+                }
+            }
+
+            if (_parameters != null)
+            {
+                for (int i = 0; i < _parameters.Count; i++)
+                {
+                    if (_parameters[i].Name == "Regime" && _parameters[i].Type == StrategyParameterType.String)
+                    {
+                        if (((StrategyParameterString)_parameters[i]).ValueString == "Off")
+                        {
+                            errors.Add("Robot regime is Off");
+                        }
+                    }
+                    else if (_parameters[i].Name == "Regime" && _parameters[i].Type == StrategyParameterType.CheckBox)
+                    {
+                        if (((StrategyParameterCheckBox)_parameters[i]).CheckState == System.Windows.Forms.CheckState.Unchecked)
+                        {
+                            errors.Add("Robot regime is Off");
+                        }
+                    }
+                }
+            }
+
+            return errors;
+        }
+
+        private bool HaveSecurityAndTfInStorageHeadless(string secName, TimeFrame timeFrame)
+        {
+            if (Storage == null || Storage.SecuritiesTester == null)
+            {
+                return false;
+            }
+
+            for (int j = 0; j < Storage.SecuritiesTester.Count; j++)
+            {
+                if (Storage.SecuritiesTester[j].Security.Name == secName
+                    && (Storage.SecuritiesTester[j].TimeFrame == timeFrame
+                        || Storage.SecuritiesTester[j].TimeFrame == TimeFrame.Sec1
+                        || Storage.SecuritiesTester[j].TimeFrame == TimeFrame.Tick))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// запуск оптимизации без модальных окон (для MCP API)
+        /// </summary>
+        public bool StartHeadless()
+        {
+            if (_optimizerExecutor.Start(_parametersOn, _parameters))
+            {
+                ProgressBarStatuses = new List<ProgressBarStatus>();
+                PrimeProgressBarStatus = new ProgressBarStatus();
+                return true;
+            }
+
+            return false;
+        }
+
         private bool CheckReadyData()
         {
             if (Fazes == null || Fazes.Count == 0)
@@ -1413,6 +1806,37 @@ namespace OsEngine.OsOptimizer
                 if (NeedToMoveUiToEvent != null)
                 {
                     NeedToMoveUiToEvent(NeedToMoveUiTo.Fazes);
+                }
+                return false;
+            }
+
+            // хранилище проверяем до обращения к Storage.SecuritiesTester
+            if ((string.IsNullOrEmpty(Storage.ActiveSet)
+                && Storage.SourceDataType == TesterSourceDataType.Set)
+                ||
+                Storage.SecuritiesTester == null
+                ||
+                Storage.SecuritiesTester.Count == 0)
+            {
+                CustomMessageBoxUi ui = new CustomMessageBoxUi(OsLocalization.Optimizer.Message16);
+                ui.ShowDialog();
+                SendLogMessage(OsLocalization.Optimizer.Message16, LogMessageType.System);
+
+                if (NeedToMoveUiToEvent != null)
+                {
+                    NeedToMoveUiToEvent(NeedToMoveUiTo.Storage);
+                }
+                return false;
+            }
+
+            if (BotToTest == null)
+            {
+                CustomMessageBoxUi ui = new CustomMessageBoxUi(OsLocalization.Optimizer.Message17);
+                ui.ShowDialog();
+                SendLogMessage(OsLocalization.Optimizer.Message17, LogMessageType.System);
+                if (NeedToMoveUiToEvent != null)
+                {
+                    NeedToMoveUiToEvent(NeedToMoveUiTo.NameStrategy);
                 }
                 return false;
             }
@@ -1516,24 +1940,6 @@ namespace OsEngine.OsOptimizer
                 }
             }
 
-            if ((string.IsNullOrEmpty(Storage.ActiveSet)
-                && Storage.SourceDataType == TesterSourceDataType.Set)
-                ||
-                Storage.SecuritiesTester == null
-                ||
-                Storage.SecuritiesTester.Count == 0)
-            {
-                CustomMessageBoxUi ui = new CustomMessageBoxUi(OsLocalization.Optimizer.Message16);
-                ui.ShowDialog();
-                SendLogMessage(OsLocalization.Optimizer.Message16, LogMessageType.System);
-
-                if (NeedToMoveUiToEvent != null)
-                {
-                    NeedToMoveUiToEvent(NeedToMoveUiTo.Storage);
-                }
-                return false;
-            }
-
             if (string.IsNullOrEmpty(_strategyName))
             {
                 CustomMessageBoxUi ui = new CustomMessageBoxUi(OsLocalization.Optimizer.Message17);
@@ -1577,6 +1983,18 @@ namespace OsEngine.OsOptimizer
                 return false;
             }
 
+            if (_parameters == null)
+            {
+                CustomMessageBoxUi ui = new CustomMessageBoxUi(OsLocalization.Optimizer.Message44);
+                ui.ShowDialog();
+                SendLogMessage(OsLocalization.Optimizer.Message44, LogMessageType.System);
+
+                if (NeedToMoveUiToEvent != null)
+                {
+                    NeedToMoveUiToEvent(NeedToMoveUiTo.Parameters);
+                }
+                return false;
+            }
 
             // проверка наличия и состояния параметра Regime 
             bool onRgimeOff = false;
@@ -1618,6 +2036,11 @@ namespace OsEngine.OsOptimizer
 
         private bool HaveSecurityAndTfInStorage(string secName, TimeFrame timeFrame)
         {
+            if (Storage == null || Storage.SecuritiesTester == null)
+            {
+                return false;
+            }
+
             // проверяем наличие тайм-фрейма в обойме
 
             bool isInArray = false;

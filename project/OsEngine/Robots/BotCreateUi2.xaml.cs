@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Your rights to use code governed by this license https://github.com/AlexWan/OsEngine/blob/master/LICENSE
  * Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
 */
@@ -128,49 +128,20 @@ namespace OsEngine.Robots
             StartButtonBlinkAnimation();
         }
 
+        private DispatcherTimer _blinkTimer;
+
+        private int _blinkCount;
+
+        private bool _isGreenVisible = true;
+
         private void StartButtonBlinkAnimation()
         {
             try
             {
-                DispatcherTimer timer = new DispatcherTimer();
-                int blinkCount = 0;
-                bool isGreenVisible = true;
-
-                timer.Interval = TimeSpan.FromMilliseconds(300);
-                timer.Tick += (s, e) =>
-                {
-                    try
-                    {
-                        if (blinkCount >= 20)
-                        {
-                            timer.Stop();
-                            PostGreenRobots.Opacity = 1;
-                            PostWhiteRobots.Opacity = 0;
-                            return;
-                        }
-
-                        if (isGreenVisible)
-                        {
-                            PostGreenRobots.Opacity = 0;
-                            PostWhiteRobots.Opacity = 1;
-                        }
-                        else
-                        {
-                            PostGreenRobots.Opacity = 1;
-                            PostWhiteRobots.Opacity = 0;
-                        }
-
-                        isGreenVisible = !isGreenVisible;
-                        blinkCount++;
-                    }
-                    catch (Exception ex)
-                    {
-                        ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
-                        timer.Stop();
-                    }
-                };
-
-                timer.Start();
+                _blinkTimer = new DispatcherTimer();
+                _blinkTimer.Interval = TimeSpan.FromMilliseconds(300);
+                _blinkTimer.Tick += _blinkTimer_Tick;
+                _blinkTimer.Start();
             }
             catch (Exception ex)
             {
@@ -178,13 +149,58 @@ namespace OsEngine.Robots
             }
         }
 
+        private void _blinkTimer_Tick(object sender, EventArgs e)
+        {
+            if (_blinkTimer == null)
+            {
+                return;
+            }
+
+            try
+            {
+                if (_blinkCount >= 20)
+                {
+                    _blinkTimer.Stop();
+                    _blinkTimer.Tick -= _blinkTimer_Tick;
+                    _blinkTimer = null;
+                    PostGreenRobots.Opacity = 1;
+                    PostWhiteRobots.Opacity = 0;
+                    return;
+                }
+
+                if (_isGreenVisible)
+                {
+                    PostGreenRobots.Opacity = 0;
+                    PostWhiteRobots.Opacity = 1;
+                }
+                else
+                {
+                    PostGreenRobots.Opacity = 1;
+                    PostWhiteRobots.Opacity = 0;
+                }
+
+                _isGreenVisible = !_isGreenVisible;
+                _blinkCount++;
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+                if (_blinkTimer != null)
+                {
+                    _blinkTimer.Stop();
+                    _blinkTimer.Tick -= _blinkTimer_Tick;
+                    _blinkTimer = null;
+                }
+            }
+        }
+
         private void TextBoxName_TextChanged(object sender, TextChangedEventArgs e)
         {
             try
             {
-                if (TextBoxName.Text.Length > 20)
+                if (TextBoxName.Text.Length > 50)
                 {
-                    TextBoxName.Text = TextBoxName.Text.Substring(0, 20);
+                    TextBoxName.Text = TextBoxName.Text.Substring(0, 50);
                 }
             }
             catch
@@ -205,6 +221,16 @@ namespace OsEngine.Robots
                 _botsIncluded = null;
                 _botsFromScript = null;
                 _lastLoadDescriptions = null;
+                _names = null;
+
+                if (_blinkTimer != null)
+                {
+                    _blinkTimer.Stop();
+                    _blinkTimer.Tick -= _blinkTimer_Tick;
+                    _blinkTimer = null;
+                }
+
+                ComboBoxLocation.SelectionChanged -= ComboBoxLocation_SelectionChanged;
 
                 if (HostBots != null)
                 {
@@ -215,8 +241,11 @@ namespace OsEngine.Robots
                 {
                     _grid.CellClick -= _grid_CellClick;
                     _grid.DataError -= _grid_DataError;
-                    _grid.Rows.Clear();
                     DataGridFactory.ClearLinks(_grid);
+                    _grid.Rows.Clear();
+                    _grid.Columns.Clear();
+                    _grid.DataSource = null;
+                    _grid.Dispose();
                     _grid = null;
                 }
 
@@ -227,6 +256,14 @@ namespace OsEngine.Robots
                 ButtonRightInSearchResults.Click -= ButtonRightInSearchResults_Click;
                 ButtonLeftInSearchResults.Click -= ButtonLeftInSearchResults_Click;
                 TextBoxName.TextChanged -= TextBoxName_TextChanged;
+
+                _searchResults?.Clear();
+                _searchResults = null;
+
+                _awaitUiBotsInfoLoading = null;
+                _descriptionsFromBotFactoryLast = null;
+
+                Closed -= BotCreateUi2_Closed;
             }
             catch (Exception ex)
             {
@@ -254,8 +291,8 @@ namespace OsEngine.Robots
             _grid.ScrollBars = ScrollBars.Vertical;
 
             DataGridViewTextBoxCell cell0 = new DataGridViewTextBoxCell();
-            _grid.DefaultCellStyle.SelectionBackColor = System.Drawing.Color.Black;
-            _grid.DefaultCellStyle.SelectionForeColor = System.Drawing.Color.FromArgb(255, 85, 0);
+            _grid.DefaultCellStyle.SelectionBackColor = Themes.ThemeManager.GetColorWinForms("GridSelectionBackColor");
+            _grid.DefaultCellStyle.SelectionForeColor = Themes.ThemeManager.GetColorWinForms("ColorForeground");
 
             cell0.Style = _grid.DefaultCellStyle;
 
@@ -264,6 +301,7 @@ namespace OsEngine.Robots
             colum1.HeaderText = "#";
             colum1.ReadOnly = true;
             colum1.Width = 30;
+            colum1.SortMode = DataGridViewColumnSortMode.NotSortable;
             _grid.Columns.Add(colum1);
 
             DataGridViewColumn colum2 = new DataGridViewColumn();
@@ -271,6 +309,7 @@ namespace OsEngine.Robots
             colum2.HeaderText = OsLocalization.Trader.Label60;
             colum2.ReadOnly = true;
             colum2.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+            colum2.SortMode = DataGridViewColumnSortMode.NotSortable;
 
             _grid.Columns.Add(colum2);
 
@@ -278,6 +317,7 @@ namespace OsEngine.Robots
             colum3.CellTemplate = cell0;
             colum3.HeaderText = OsLocalization.Trader.Label295;
             colum3.Width = 110;
+            colum3.SortMode = DataGridViewColumnSortMode.NotSortable;
 
             _grid.Columns.Add(colum3);
 
@@ -286,6 +326,7 @@ namespace OsEngine.Robots
             colum4.HeaderText = OsLocalization.Trader.Label296;
             colum4.ReadOnly = true;
             colum4.Width = 90;
+            colum4.SortMode = DataGridViewColumnSortMode.NotSortable;
 
             _grid.Columns.Add(colum4);
 
@@ -294,6 +335,7 @@ namespace OsEngine.Robots
             colum5.HeaderText = OsLocalization.Trader.Label298;
             colum5.ReadOnly = true;
             colum5.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+            colum5.SortMode = DataGridViewColumnSortMode.NotSortable;
 
             _grid.Columns.Add(colum5);
 
@@ -302,6 +344,7 @@ namespace OsEngine.Robots
             colum6.HeaderText = OsLocalization.Trader.Label297;
             colum6.ReadOnly = true;
             colum6.Width = 90;
+            colum6.SortMode = DataGridViewColumnSortMode.NotSortable;
 
             _grid.Columns.Add(colum6);
 
@@ -579,24 +622,24 @@ namespace OsEngine.Robots
         {
             try
             {
-                System.Drawing.Color baseColor = System.Drawing.Color.FromArgb(154, 156, 158);
+                System.Drawing.Color baseColor = Themes.ThemeManager.GetColorWinForms("GridTextColor");
 
                 for (int i = 0; i < _grid.Rows.Count; i++)
                 {
                     if (_grid.Rows[i].Selected)
                     {
-                        _grid.Rows[i].Cells[0].Style.ForeColor = System.Drawing.Color.FromArgb(255, 85, 0);
-                        _grid.Rows[i].Cells[0].Style.SelectionForeColor = System.Drawing.Color.FromArgb(255, 85, 0);
-                        _grid.Rows[i].Cells[1].Style.ForeColor = System.Drawing.Color.FromArgb(255, 85, 0);
-                        _grid.Rows[i].Cells[1].Style.SelectionForeColor = System.Drawing.Color.FromArgb(255, 85, 0);
-                        _grid.Rows[i].Cells[2].Style.ForeColor = System.Drawing.Color.FromArgb(255, 85, 0);
-                        _grid.Rows[i].Cells[2].Style.SelectionForeColor = System.Drawing.Color.FromArgb(255, 85, 0);
-                        _grid.Rows[i].Cells[3].Style.ForeColor = System.Drawing.Color.FromArgb(255, 85, 0);
-                        _grid.Rows[i].Cells[3].Style.SelectionForeColor = System.Drawing.Color.FromArgb(255, 85, 0);
-                        _grid.Rows[i].Cells[4].Style.ForeColor = System.Drawing.Color.FromArgb(255, 85, 0);
-                        _grid.Rows[i].Cells[4].Style.SelectionForeColor = System.Drawing.Color.FromArgb(255, 85, 0);
-                        _grid.Rows[i].Cells[5].Style.ForeColor = System.Drawing.Color.FromArgb(255, 85, 0);
-                        _grid.Rows[i].Cells[5].Style.SelectionForeColor = System.Drawing.Color.FromArgb(255, 85, 0);
+                        _grid.Rows[i].Cells[0].Style.ForeColor = Themes.ThemeManager.GetColorWinForms("ColorForeground");
+                        _grid.Rows[i].Cells[0].Style.SelectionForeColor = Themes.ThemeManager.GetColorWinForms("ColorForeground");
+                        _grid.Rows[i].Cells[1].Style.ForeColor = Themes.ThemeManager.GetColorWinForms("ColorForeground");
+                        _grid.Rows[i].Cells[1].Style.SelectionForeColor = Themes.ThemeManager.GetColorWinForms("ColorForeground");
+                        _grid.Rows[i].Cells[2].Style.ForeColor = Themes.ThemeManager.GetColorWinForms("ColorForeground");
+                        _grid.Rows[i].Cells[2].Style.SelectionForeColor = Themes.ThemeManager.GetColorWinForms("ColorForeground");
+                        _grid.Rows[i].Cells[3].Style.ForeColor = Themes.ThemeManager.GetColorWinForms("ColorForeground");
+                        _grid.Rows[i].Cells[3].Style.SelectionForeColor = Themes.ThemeManager.GetColorWinForms("ColorForeground");
+                        _grid.Rows[i].Cells[4].Style.ForeColor = Themes.ThemeManager.GetColorWinForms("ColorForeground");
+                        _grid.Rows[i].Cells[4].Style.SelectionForeColor = Themes.ThemeManager.GetColorWinForms("ColorForeground");
+                        _grid.Rows[i].Cells[5].Style.ForeColor = Themes.ThemeManager.GetColorWinForms("ColorForeground");
+                        _grid.Rows[i].Cells[5].Style.SelectionForeColor = Themes.ThemeManager.GetColorWinForms("ColorForeground");
                     }
                     else
                     {
@@ -724,6 +767,18 @@ namespace OsEngine.Robots
 
             }
 
+            sortDescription.Sort((a, b) =>
+            {
+                int locationComparison = a.Location.CompareTo(b.Location);
+
+                if (locationComparison != 0)
+                {
+                    return locationComparison;
+                }
+
+                return string.Compare(a.ClassName, b.ClassName, StringComparison.OrdinalIgnoreCase);
+            });
+
             return sortDescription;
         }
 
@@ -731,14 +786,14 @@ namespace OsEngine.Robots
         {
             List<BotDescription> descriptions = new List<BotDescription>();
 
-            if (!File.Exists(@"BotsDescriprion.txt"))
+            if (!File.Exists(@"BotsDescription.txt"))
             {
                 return descriptions;
             }
 
             try
             {
-                using (StreamReader reader = new StreamReader(@"BotsDescriprion.txt"))
+                using (StreamReader reader = new StreamReader(@"BotsDescription.txt"))
                 {
                     while (reader.EndOfStream == false)
                     {
@@ -772,7 +827,7 @@ namespace OsEngine.Robots
         {
             try
             {
-                using (StreamWriter writer = new StreamWriter(@"BotsDescriprion.txt", false)
+                using (StreamWriter writer = new StreamWriter(@"BotsDescription.txt", false)
                     )
                 {
                     for (int i = 0; i < descriptions.Count; i++)
@@ -826,9 +881,11 @@ namespace OsEngine.Robots
             if (bot.TabsScreener != null &&
                 bot.TabsScreener.Count > 0)
             {
+                HashSet<string> screenerIndicatorKeys = new HashSet<string>();
+
                 for (int i = 0; i < bot.TabsScreener.Count; i++)
                 {
-                    List<string> curInd = GetIndicatorsNamesFromScreenerSource(bot.TabsScreener[i]);
+                    List<string> curInd = GetIndicatorsNamesFromScreenerSource(bot.TabsScreener[i], screenerIndicatorKeys);
 
                     if (curInd != null
                         && curInd.Count > 0)
@@ -868,15 +925,29 @@ namespace OsEngine.Robots
             return indicators;
         }
 
-        private List<string> GetIndicatorsNamesFromScreenerSource(BotTabScreener tab)
+        private List<string> GetIndicatorsNamesFromScreenerSource(BotTabScreener tab, HashSet<string> alreadyAddedKeys)
         {
             List<string> indicators = new List<string>();
 
             for (int i = 0; i < tab._indicators.Count; i++)
             {
-                string curInd = tab._indicators[i].Type;
+                string key = tab._indicators[i].Type;
 
-                indicators.Add(curInd);
+                if (tab._indicators[i].Parameters != null)
+                {
+                    for (int p = 0; p < tab._indicators[i].Parameters.Count; p++)
+                    {
+                        key += "#" + tab._indicators[i].Parameters[p];
+                    }
+                }
+
+                if (alreadyAddedKeys.Contains(key))
+                {
+                    continue;
+                }
+
+                alreadyAddedKeys.Add(key);
+                indicators.Add(tab._indicators[i].Type);
             }
 
             return indicators;

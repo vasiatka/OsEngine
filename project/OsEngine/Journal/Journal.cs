@@ -446,9 +446,26 @@ namespace OsEngine.Journal
 
         public Order IsMyOrder(Order order, bool canChangeOrderNumber)
         {
-            // open positions. Look All
+            if (string.IsNullOrEmpty(order.ParentOrderNumberMarket) == false)
+            {
+                // snapshot copies, not the live lists: writers run in parallel (BUG-0291)
+                Order parent = FindOrderByNumberMarket(_positionController?.CreateOpenPositionsSnapshot(), order.ParentOrderNumberMarket);
 
-            List<Position> positionsOpen = this.OpenPositions;
+                if (parent == null)
+                {
+                    parent = FindOrderByNumberMarket(_positionController?.CreateAllPositionsSnapshot(), order.ParentOrderNumberMarket);
+                }
+
+                if (parent != null)
+                {
+                    return parent;
+                }
+            }
+
+            // open positions. Look All
+            // snapshot copy under lock(_dealsLocker): the scanner indexes the list without its own lock (BUG-0291)
+
+            List<Position> positionsOpen = _positionController?.CreateOpenPositionsSnapshot();
 
             if (positionsOpen != null)
             {
@@ -466,7 +483,9 @@ namespace OsEngine.Journal
                         continue;
                     }
 
-                    List<Order> openOrders = positionCurrent.OpenOrders;
+                    // snapshot copy under lock(_dealsLocker): Iceberg and Controller writers
+                    // mutate the live list during the scan (BUG-0291)
+                    List<Order> openOrders = _positionController?.CreateOrderListSnapshot(positionCurrent.OpenOrders);
 
                     for(int j = 0; openOrders != null && j < openOrders.Count; j++)
                     {
@@ -499,7 +518,7 @@ namespace OsEngine.Journal
                         }
                     }
 
-                    List<Order> closingOrders = positionCurrent.CloseOrders;
+                    List<Order> closingOrders = _positionController?.CreateOrderListSnapshot(positionCurrent.CloseOrders);
 
                     for (int j = 0; closingOrders != null && j < closingOrders.Count; j++)
                     {
@@ -535,8 +554,9 @@ namespace OsEngine.Journal
             }
 
             // historical positions. Look last 100
+            // snapshot copy under lock(_dealsLocker) (BUG-0291)
 
-            List<Position> positions = AllPosition;
+            List<Position> positions = _positionController?.CreateAllPositionsSnapshot();
 
             if (positions == null)
             {
@@ -557,7 +577,8 @@ namespace OsEngine.Journal
                     continue;
                 }
 
-                List<Order> openOrders = positionCurrent.OpenOrders;
+                // snapshot copy under lock(_dealsLocker) (BUG-0291)
+                List<Order> openOrders = _positionController?.CreateOrderListSnapshot(positionCurrent.OpenOrders);
 
                 for (int j = 0; openOrders != null && j < openOrders.Count; j++)
                 {
@@ -590,7 +611,7 @@ namespace OsEngine.Journal
                     }
                 }
 
-                List<Order> closingOrders = positionCurrent.CloseOrders;
+                List<Order> closingOrders = _positionController?.CreateOrderListSnapshot(positionCurrent.CloseOrders);
 
                 for (int j = 0; closingOrders != null && j < closingOrders.Count; j++)
                 {
@@ -627,9 +648,53 @@ namespace OsEngine.Journal
             return null;
         }
 
-        #endregion
+        private Order FindOrderByNumberMarket(List<Position> positions, string numberMarket)
+        {
+            if (positions == null)
+            {
+                return null;
+            }
 
-        #region Incoming data reception
+            for (int i = positions.Count - 1; i > -1; i--)
+            {
+                Position position = positions[i];
+
+                if (position == null)
+                {
+                    continue;
+                }
+
+                // snapshot copies under lock(_dealsLocker): the scanner indexes the live
+                // list without its own lock (BUG-0291)
+                List<Order> openOrders = _positionController?.CreateOrderListSnapshot(position.OpenOrders);
+
+                for (int j = 0; openOrders != null && j < openOrders.Count; j++)
+                {
+                    Order openOrder = openOrders[j];
+
+                    if (openOrder != null
+                        && openOrder.NumberMarket == numberMarket)
+                    {
+                        return openOrder;
+                    }
+                }
+
+                List<Order> closeOrders = _positionController?.CreateOrderListSnapshot(position.CloseOrders);
+
+                for (int j = 0; closeOrders != null && j < closeOrders.Count; j++)
+                {
+                    Order closeOrder = closeOrders[j];
+
+                    if (closeOrder != null
+                        && closeOrder.NumberMarket == numberMarket)
+                    {
+                        return closeOrder;
+                    }
+                }
+            }
+
+            return null;
+        }
 
         public void SetNewOrder(Order newOrder, bool canChangeOrderNumber)
         {
@@ -643,7 +708,35 @@ namespace OsEngine.Journal
             }
             catch (Exception error)
             {
+                // context in the log: SetUpdateOrderInPositions indexes live lists and UI
+                // paths shrink them without the lock, throwing right here (BUG-0291)
+                SendNewLogMessage("Error in SetNewOrder. NumberUser "
+                    + (newOrder == null ? "null" : newOrder.NumberUser.ToString())
+                    + ", Sec name " + (newOrder == null ? "null" : newOrder.SecurityNameCode)
+                    + ". " + error.ToString(), LogMessageType.Error);
+            }
+        }
+
+        /// <summary>
+        /// Adds an order made by an iceberg worker to the position under the journal lock.
+        /// Returns false when the order was not added (Error log, no exception), BUG-0291.
+        /// </summary>
+        public bool AddIcebergOrderToPosition(Position position, Order order, bool isCloseOrder)
+        {
+            try
+            {
+                if (_positionController == null)
+                {
+                    SendNewLogMessage("Iceberg order add refused: journal is deleted. Order "
+                        + (order == null ? "null" : order.NumberUser.ToString()), LogMessageType.Error);
+                    return false;
+                }
+                return _positionController.AddIcebergOrderToPosition(position, order, isCloseOrder);
+            }
+            catch (Exception error)
+            {
                 SendNewLogMessage(error.ToString(), LogMessageType.Error);
+                return false;
             }
         }
 
@@ -816,7 +909,7 @@ namespace OsEngine.Journal
             }
             else if (type == LogMessageType.Error)
             {
-                System.Windows.MessageBox.Show(message);
+                Market.ServerMaster.SendNewLogMessage(message, LogMessageType.Error);
             }
         }
 

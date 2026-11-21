@@ -1,4 +1,4 @@
-﻿/*
+/*
  *Your rights to use the code are governed by this license https://github.com/AlexWan/OsEngine/blob/master/LICENSE
  *Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
 */
@@ -102,9 +102,18 @@ namespace OsEngine.OsTrader.Panels.Tab
 
                 if (connectorBot.ServerType != ServerType.None)
                 {
-                    ComboBoxTypeServer.SelectedItem = connectorBot.ServerName;
-                    _selectedServerType = connectorBot.ServerType;
-                    _selectedServerName = connectorBot.ServerName;
+                    if (string.IsNullOrEmpty(connectorBot.ServerName) == false)
+                    {
+                        ComboBoxTypeServer.SelectedItem = connectorBot.ServerName;
+                        _selectedServerType = connectorBot.ServerType;
+                        _selectedServerName = connectorBot.ServerName;
+                    }
+                    else
+                    {
+                        ComboBoxTypeServer.SelectedItem = connectorBot.ServerType.ToString();
+                        _selectedServerType = connectorBot.ServerType;
+                        _selectedServerName = connectorBot.ServerType.ToString();
+                    }
                 }
                 else
                 {
@@ -115,9 +124,9 @@ namespace OsEngine.OsTrader.Panels.Tab
 
                 CreateGrid();
 
-                LoadClassOnBox();
+                //LoadClassOnBox();
 
-                LoadSecurityOnBox(loadExpirationStrikeComboBox: true);
+                //LoadSecurityOnBox(loadExpirationStrikeComboBox: true);
 
                 LoadPortfolioOnBox(true);
 
@@ -172,7 +181,6 @@ namespace OsEngine.OsTrader.Panels.Tab
                 LabelExpiration.Content = OsLocalization.Market.Label316;
                 LabelStrike.Content = OsLocalization.Market.Label317;
 
-                CheckBoxSelectAllCheckBox.Click += CheckBoxSelectAllCheckBox_Click;
                 ButtonRightInSearchResults.Click += ButtonRightInSearchResults_Click;
                 ButtonLeftInSearchResults.Click += ButtonLeftInSearchResults_Click;
                 TextBoxSearchSecurity.MouseEnter += TextBoxSearchSecurity_MouseEnter;
@@ -213,45 +221,10 @@ namespace OsEngine.OsTrader.Panels.Tab
         {
             try
             {
-                DispatcherTimer timer = new DispatcherTimer();
-                int blinkCount = 0;
-                bool isGreenVisible = true;
-
-                timer.Interval = TimeSpan.FromMilliseconds(300);
-                timer.Tick += (s, e) =>
-                {
-                    try
-                    {
-                        if (blinkCount >= 20)
-                        {
-                            timer.Stop();
-                            GreenCollectionTabScreener.Opacity = 1;
-                            WhiteCollectionTabScreener.Opacity = 0;
-                            return;
-                        }
-
-                        if (isGreenVisible)
-                        {
-                            GreenCollectionTabScreener.Opacity = 0;
-                            WhiteCollectionTabScreener.Opacity = 1;
-                        }
-                        else
-                        {
-                            GreenCollectionTabScreener.Opacity = 1;
-                            WhiteCollectionTabScreener.Opacity = 0;
-                        }
-
-                        isGreenVisible = !isGreenVisible;
-                        blinkCount++;
-                    }
-                    catch (Exception error)
-                    {
-                        SendNewLogMessage(error.ToString(), LogMessageType.Error);
-                        timer.Stop();
-                    }
-                };
-
-                timer.Start();
+                _blinkTimer = new DispatcherTimer();
+                _blinkTimer.Interval = TimeSpan.FromMilliseconds(300);
+                _blinkTimer.Tick += _blinkTimer_Tick;
+                _blinkTimer.Start();
             }
             catch (Exception error)
             {
@@ -259,12 +232,68 @@ namespace OsEngine.OsTrader.Panels.Tab
             }
         }
 
+        private void _blinkTimer_Tick(object sender, EventArgs e)
+        {
+            if (_blinkTimer == null)
+            {
+                return;
+            }
+
+            try
+            {
+                if (_blinkCount >= 20)
+                {
+                    _blinkTimer.Stop();
+                    _blinkTimer.Tick -= _blinkTimer_Tick;
+                    _blinkTimer = null;
+                    GreenCollectionTabScreener.Opacity = 1;
+                    WhiteCollectionTabScreener.Opacity = 0;
+                    return;
+                }
+
+                if (_isGreenVisible)
+                {
+                    GreenCollectionTabScreener.Opacity = 0;
+                    WhiteCollectionTabScreener.Opacity = 1;
+                }
+                else
+                {
+                    GreenCollectionTabScreener.Opacity = 1;
+                    WhiteCollectionTabScreener.Opacity = 0;
+                }
+
+                _isGreenVisible = !_isGreenVisible;
+                _blinkCount++;
+            }
+            catch (Exception error)
+            {
+                SendNewLogMessage(error.ToString(), LogMessageType.Error);
+                if (_blinkTimer != null)
+                {
+                    _blinkTimer.Stop();
+                    _blinkTimer.Tick -= _blinkTimer_Tick;
+                    _blinkTimer = null;
+                }
+            }
+        }
+
         private BotTabScreener _screener;
+
+        private DispatcherTimer _blinkTimer;
+        private int _blinkCount;
+        private bool _isGreenVisible = true;
 
         private void BotTabScreenerUi_Closed(object sender, EventArgs e)
         {
             try
             {
+                if (_blinkTimer != null)
+                {
+                    _blinkTimer.Stop();
+                    _blinkTimer.Tick -= _blinkTimer_Tick;
+                    _blinkTimer = null;
+                }
+
                 List<IServer> serversAll = ServerMaster.GetServers();
 
                 for (int i = 0; serversAll != null && i < serversAll.Count; i++)
@@ -276,48 +305,52 @@ namespace OsEngine.OsTrader.Panels.Tab
                     serversAll[i].SecuritiesChangeEvent -= server_SecuritiesChangeEvent;
                     serversAll[i].PortfoliosChangeEvent -= server_PortfoliosChangeEvent;
                 }
-            }
-            catch
-            {
-                // ignore
-            }
 
-            try
-            {
                 TextBoxSearchSecurity.MouseEnter -= TextBoxSearchSecurity_MouseEnter;
                 TextBoxSearchSecurity.TextChanged -= TextBoxSearchSecurity_TextChanged;
                 TextBoxSearchSecurity.MouseLeave -= TextBoxSearchSecurity_MouseLeave;
                 TextBoxSearchSecurity.LostKeyboardFocus -= TextBoxSearchSecurity_LostKeyboardFocus;
+                TextBoxSearchSecurity.KeyDown -= TextBoxSearchSecurity_KeyDown;
                 ComboBoxClass.SelectionChanged -= ComboBoxClass_SelectionChanged;
+                ComboBoxExpiration.SelectionChanged -= ComboBoxExpirationAndStrike_SelectionChanged;
+                ComboBoxStrike.SelectionChanged -= ComboBoxExpirationAndStrike_SelectionChanged;
                 ComboBoxTypeServer.SelectionChanged -= ComboBoxTypeServer_SelectionChanged;
+                ComboBoxCommissionType.SelectionChanged -= ComboBoxCommissionType_SelectionChanged;
+                ComboBoxCandleMarketDataType.SelectionChanged -= ComboBoxCandleMarketDataType_SelectionChanged;
                 ComboBoxCandleCreateMethodType.SelectionChanged -= ComboBoxCandleCreateMethodType_SelectionChanged;
+                CheckBoxSaveTradeArrayInCandle.Click -= CheckBoxSaveTradeArrayInCandle_Click;
                 CheckBoxSelectAllCheckBox.Click -= CheckBoxSelectAllCheckBox_Click;
+                ButtonAccept.Click -= ButtonAccept_Click;
+                ButtonLoadSet.Click -= ButtonLoadSet_Click;
+                ButtonSaveSet.Click -= ButtonSaveSet_Click;
                 ButtonRightInSearchResults.Click -= ButtonRightInSearchResults_Click;
                 ButtonLeftInSearchResults.Click -= ButtonLeftInSearchResults_Click;
-                TextBoxSearchSecurity.KeyDown -= TextBoxSearchSecurity_KeyDown;
-                ComboBoxCommissionType.SelectionChanged -= ComboBoxCommissionType_SelectionChanged;
-                Closed -= BotTabScreenerUi_Closed;
+                ButtonMarketDepthBuildMaxSpread.Click -= ButtonMarketDepthBuildMaxSpread_Click;
+                ButtonPostsTabScreener.Click -= ButtonPostsTabScreener_Click;
 
                 DeleteCandleRealizationGrid();
                 DeleteGridSecurities();
-            }
-            catch
-            {
-                // ignore
-            }
 
-            try
-            {
                 _screener = null;
                 _selectedSeries = null;
-                _series.Clear();
-                _series = null;
-                _searchResults.Clear();
-                _searchResults = null;
+                if (_series != null)
+                {
+                    _series.Clear();
+                    _series = null;
+                }
+                if (_searchResults != null)
+                {
+                    _searchResults.Clear();
+                    _searchResults = null;
+                }
+
+                _selectedServerName = null;
+
+                Closed -= BotTabScreenerUi_Closed;
             }
-            catch
+            catch (Exception error)
             {
-                // ignore
+                SendNewLogMessage(error.ToString(), LogMessageType.Error);
             }
         }
 
@@ -870,10 +903,13 @@ namespace OsEngine.OsTrader.Panels.Tab
                     return;
                 }
 
-                if(classSec == "All")
+                if (classSec == "All")
                 {
                     return;
                 }
+
+                ComboBoxExpiration.SelectionChanged -= ComboBoxExpirationAndStrike_SelectionChanged;
+                ComboBoxStrike.SelectionChanged -= ComboBoxExpirationAndStrike_SelectionChanged;
 
                 SortedSet<DateTime> sortedExpirations = new SortedSet<DateTime>();
                 SortedSet<decimal> sortedStrikes = new SortedSet<decimal>();
@@ -925,6 +961,9 @@ namespace OsEngine.OsTrader.Panels.Tab
                 {
                     ComboBoxStrike.Items.Add(strike.ToString());
                 }
+
+                ComboBoxExpiration.SelectionChanged += ComboBoxExpirationAndStrike_SelectionChanged;
+                ComboBoxStrike.SelectionChanged += ComboBoxExpirationAndStrike_SelectionChanged;
             }
             catch (Exception error)
             {
@@ -1169,21 +1208,26 @@ namespace OsEngine.OsTrader.Panels.Tab
         {
             try
             {
-                if (SecuritiesHost != null)
-                {
-                    SecuritiesHost.Child = null;
-                }
-
                 if (_gridSecurities != null)
                 {
                     DataGridFactory.ClearLinks(_gridSecurities);
                     _gridSecurities.CellClick -= _gridSecurities_CellClick;
                     _gridSecurities.DataError -= _gridSecurities_DataError;
+                    _gridSecurities.Rows.Clear();
+                    _gridSecurities.Columns.Clear();
+                    _gridSecurities.DataSource = null;
+                    _gridSecurities.Dispose();
+                    _gridSecurities = null;
+                }
+
+                if (SecuritiesHost != null)
+                {
+                    SecuritiesHost.Child = null;
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                // ignore
+                SendNewLogMessage(ex.ToString(), LogMessageType.Error);
             }
         }
 
@@ -1199,14 +1243,15 @@ namespace OsEngine.OsTrader.Panels.Tab
                     {
                         for (int y = 0; y < _gridSecurities.ColumnCount; y++)
                         {
-                            _gridSecurities.Rows[e.RowIndex].Cells[y].Style.ForeColor = System.Drawing.ColorTranslator.FromHtml("#ffffff");
+                            _gridSecurities.Rows[e.RowIndex].Cells[y].Style.ForeColor = Themes.ThemeManager.GetColorWinForms("GridSelectionForeColor");
                         }
                     }
                     else
                     {
+                        // в этом окне неактивные строки не затемняем — оставляем обычный цвет текста
                         for (int y = 0; y < _gridSecurities.ColumnCount; y++)
                         {
-                            _gridSecurities.Rows[i].Cells[y].Style.ForeColor = System.Drawing.ColorTranslator.FromHtml("#FFA1A1A1");
+                            _gridSecurities.Rows[i].Cells[y].Style.ForeColor = Themes.ThemeManager.GetColorWinForms("GridTextColor");
                         }
                     }
                 }
@@ -1347,7 +1392,9 @@ namespace OsEngine.OsTrader.Panels.Tab
 
                     TimeFrame currentTf;
 
-                    if (Enum.TryParse(row.Cells[1].Value.ToString(), out currentTf) == false)
+                    if (row.Cells == null
+                        || row.Cells.Count <= 2
+                        || Enum.TryParse(row.Cells[1].Value.ToString(), out currentTf) == false)
                     {
                         continue;
                     }
@@ -1460,8 +1507,8 @@ namespace OsEngine.OsTrader.Panels.Tab
                     else if (haveThisTf == false)
                     {
                         _gridSecurities.Rows[i].Cells[6].ReadOnly = true;
-                        _gridSecurities.Rows[i].Cells[6].Style.BackColor = Color.DarkGray;
-                        _gridSecurities.Rows[i].Cells[6].Style.SelectionBackColor = Color.DarkGray;
+                        _gridSecurities.Rows[i].Cells[6].Style.BackColor = Themes.ThemeManager.GetColorWinForms("GridCellDisabledColor");
+                        _gridSecurities.Rows[i].Cells[6].Style.SelectionBackColor = Themes.ThemeManager.GetColorWinForms("GridCellDisabledColor");
 
                         DataGridViewCheckBoxCell cellIsOn = (DataGridViewCheckBoxCell)_gridSecurities.Rows[i].Cells[6];
 
@@ -1952,7 +1999,7 @@ namespace OsEngine.OsTrader.Panels.Tab
                 }
 
                 CheckBoxIsEmulator.IsChecked = curCreator.EmulatorIsOn;
-               
+
                 ComboBoxCandleMarketDataType.Text = curCreator.CandleMarketDataType.ToString();
                 ComboBoxCandleCreateMethodType.Text = curCreator.CandleCreateMethodType.ToString();
                 ComboBoxCommissionType.Text = curCreator.CommissionType.ToString();
@@ -2134,6 +2181,17 @@ namespace OsEngine.OsTrader.Panels.Tab
             return row;
         }
 
+        private CandleMarketDataType GetCandleMarketDataType(TesterDataType type)
+        {
+            if (type == TesterDataType.MarketDepthAllCandleState
+                || type == TesterDataType.MarketDepthOnlyReadyCandle)
+            {
+                return CandleMarketDataType.MarketDepth;
+            }
+
+            return CandleMarketDataType.Tick;
+        }
+
         private void LoadTimeFrameBox(DataGridViewComboBoxCell box)
         {
             if (ComboBoxCandleCreateMethodType.SelectedItem == null)
@@ -2191,7 +2249,8 @@ namespace OsEngine.OsTrader.Panels.Tab
                     box.Items.Add(TimeFrame.Sec2.ToString());
                     box.Items.Add(TimeFrame.Sec1.ToString());
 
-                    ComboBoxCandleMarketDataType.SelectedItem = CandleMarketDataType.Tick;
+                    TesterDataType testerType = serverTester != null ? serverTester.TypeTesterData : serverOpt.TypeTesterData;
+                    ComboBoxCandleMarketDataType.SelectedItem = GetCandleMarketDataType(testerType).ToString();
                     ComboBoxCandleMarketDataType.IsEnabled = true;
                 }
                 else
@@ -2246,10 +2305,10 @@ namespace OsEngine.OsTrader.Panels.Tab
                         box.Items.Add(timeFramesArray[i]);
                     }
 
-                    ComboBoxCandleCreateMethodType.SelectedItem = CandleCreateMethodType.Simple;
+                    ComboBoxCandleCreateMethodType.SelectedItem = CandleCreateMethodType.Simple.ToString();
                     ComboBoxCandleCreateMethodType.IsEnabled = false;
 
-                    ComboBoxCandleMarketDataType.SelectedItem = CandleMarketDataType.Tick;
+                    ComboBoxCandleMarketDataType.SelectedItem = CandleMarketDataType.Tick.ToString();
                     ComboBoxCandleMarketDataType.IsEnabled = false;
                 }
             }
@@ -2405,22 +2464,26 @@ namespace OsEngine.OsTrader.Panels.Tab
         {
             try
             {
-                if (HostCandleSeriesParameters != null)
-                {
-                    HostCandleSeriesParameters.Child = null;
-                }
-
                 if (_candlesRealizationGrid != null)
                 {
                     DataGridFactory.ClearLinks(_candlesRealizationGrid);
                     _candlesRealizationGrid.CellEndEdit -= _candlesRealizationGrid_CellEndEdit;
                     _candlesRealizationGrid.DataError -= _candlesRealizationGrid_DataError;
+                    _candlesRealizationGrid.Rows.Clear();
+                    _candlesRealizationGrid.Columns.Clear();
+                    _candlesRealizationGrid.DataSource = null;
+                    _candlesRealizationGrid.Dispose();
                     _candlesRealizationGrid = null;
                 }
+
+                if (HostCandleSeriesParameters != null)
+                {
+                    HostCandleSeriesParameters.Child = null;
+                }
             }
-            catch
+            catch (Exception ex)
             {
-                // ignore
+                SendNewLogMessage(ex.ToString(), LogMessageType.Error);
             }
         }
 

@@ -56,7 +56,11 @@ namespace OsEngine.Market.Servers.BinanceData
                 }
                 else
                 {
-                    SendLogMessage($"Connect server error: {response.StatusCode}", LogMessageType.Error);
+                    string err = response.ErrorException == null
+                        ? response.ErrorMessage
+                        : response.ErrorException.GetType().Name + ": " + response.ErrorException.Message;
+
+                    SendLogMessage($"Connect server error: {response.StatusCode}. Error: {err}", LogMessageType.Error);
                 }
 
             }
@@ -140,6 +144,11 @@ namespace OsEngine.Market.Servers.BinanceData
             {
                 string response = GetStringRequest("https://api.binance.com", "/api/v3/exchangeInfo");
 
+                if (string.IsNullOrEmpty(response))
+                {
+                    return;
+                }
+
                 BinanceSecurityResponse securityInfo = JsonConvert.DeserializeAnonymousType(response, new BinanceSecurityResponse());
 
                 if (securityInfo.symbols != null && securityInfo.symbols.Count > 0)
@@ -173,6 +182,11 @@ namespace OsEngine.Market.Servers.BinanceData
             {
                 string response = GetStringRequest("https://fapi.binance.com", "/fapi/v1/exchangeInfo");
 
+                if (string.IsNullOrEmpty(response))
+                {
+                    return;
+                }
+
                 BinanceSecurityResponse securityInfo = JsonConvert.DeserializeAnonymousType(response, new BinanceSecurityResponse());
 
                 if (securityInfo.symbols != null && securityInfo.symbols.Count > 0)
@@ -205,6 +219,11 @@ namespace OsEngine.Market.Servers.BinanceData
             try
             {
                 string response = GetStringRequest("https://dapi.binance.com", "/dapi/v1/exchangeInfo");
+
+                if (string.IsNullOrEmpty(response))
+                {
+                    return;
+                }
 
                 BinanceSecurityResponse securityInfo = JsonConvert.DeserializeAnonymousType(response, new BinanceSecurityResponse());
 
@@ -737,6 +756,11 @@ namespace OsEngine.Market.Servers.BinanceData
 
                 response = GetStreamS3(baseS3Url, s3Url);
 
+                if (response == null)
+                {
+                    return null;
+                }
+
                 serializer = new XmlSerializer(typeof(ListBucketResult));
 
                 listBucket = (ListBucketResult)serializer.Deserialize(response);
@@ -758,6 +782,11 @@ namespace OsEngine.Market.Servers.BinanceData
                         string additionalListUrl = s3Url + "&marker=" + markerUrl;
 
                         response = GetStreamS3(baseS3Url, additionalListUrl);
+
+                        if (response == null)
+                        {
+                            return null;
+                        }
 
                         serializer = new XmlSerializer(typeof(ListBucketResult));
 
@@ -926,7 +955,12 @@ namespace OsEngine.Market.Servers.BinanceData
                 }
                 else
                 {
-                    SendLogMessage($"Error response: {response.StatusCode}-{response.Content}", LogMessageType.Error);
+                    // RestSharp.Execute не бросает сетевые сбои, а кладёт их в ErrorMessage/ErrorException — иначе в логе только «Error response: 0-»
+                    string err = response.ErrorException == null
+                        ? response.ErrorMessage
+                        : response.ErrorException.GetType().Name + ": " + response.ErrorException.Message;
+
+                    SendLogMessage($"Error response: {response.StatusCode}-{response.Content}. Error: {err}. Url: {baseUrl}{url}", LogMessageType.Error);
                     return null;
                 }
             }

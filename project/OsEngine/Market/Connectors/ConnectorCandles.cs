@@ -1,4 +1,4 @@
-﻿/*
+/*
  *Your rights to use the code are governed by this license https://github.com/AlexWan/OsEngine/blob/master/LICENSE
  *Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
 */
@@ -560,6 +560,31 @@ namespace OsEngine.Market.Connectors
         }
 
         /// <summary>
+        /// does the server support Stop type orders (StopLimit/StopMarket). Support = true
+        /// </summary>
+        public bool StopOrdersIsSupport
+        {
+            get
+            {
+                if (ServerType == ServerType.Tester ||
+                    ServerType == ServerType.Optimizer ||
+                    ServerType == ServerType.None)
+                {
+                    return false;
+                }
+
+                IServerPermission serverPermission = ServerMaster.GetServerPermission(ServerType);
+
+                if (serverPermission == null)
+                {
+                    return false;
+                }
+
+                return serverPermission.StopOrdersIsSupport;
+            }
+        }
+
+        /// <summary>
         /// does the server support order price change. Support = true
         /// </summary>
         public bool IsCanChangeOrderPrice
@@ -649,6 +674,11 @@ namespace OsEngine.Market.Connectors
                 }
                 _eventsIsOn = value;
                 Save();
+
+                if (value)
+                {
+                    Reconnect();
+                }
             }
         }
         private bool _eventsIsOn = true;
@@ -933,6 +963,16 @@ namespace OsEngine.Market.Connectors
                     }
                     else if (ServerType == ServerType.Tester)
                     {
+                        if(StartProgram == StartProgram.IsTester
+                            && this.EventsIsOn == false)
+                        {
+                            // Робот отключен пользователем. Не подписываемся в этот раз.
+                            // Ускоряет тесты кратно, если тестируется портфель роботов и часть отключена
+                            _taskIsDead = true;
+                            return;
+                        }
+
+
                         await Task.Delay(10);
                     }
                     else
@@ -1371,7 +1411,11 @@ namespace OsEngine.Market.Connectors
             }
             catch (Exception error)
             {
-                SendNewLogMessage(error.ToString(), LogMessageType.Error);
+                // context in the log: without it a lost order update was invisible (BUG-0291)
+                SendNewLogMessage("Error in ConnectorBot_NewOrderIncomeEvent. NumberUser "
+                    + (order == null ? "null" : order.NumberUser.ToString())
+                    + ", Sec name " + (order == null ? "null" : order.SecurityNameCode)
+                    + ". " + error.ToString(), LogMessageType.Error);
             }
         }
 
@@ -1394,7 +1438,10 @@ namespace OsEngine.Market.Connectors
             }
             catch (Exception error)
             {
-                SendNewLogMessage(error.ToString(), LogMessageType.Error);
+                SendNewLogMessage("Error in _myServer_CancelOrderFailEvent. NumberUser "
+                    + (order == null ? "null" : order.NumberUser.ToString())
+                    + ", Sec name " + (order == null ? "null" : order.SecurityNameCode)
+                    + ". " + error.ToString(), LogMessageType.Error);
             }
         }
 
@@ -1441,8 +1488,12 @@ namespace OsEngine.Market.Connectors
                     return;
                 }
 
-                _bestBid = bestBid;
-                _bestAsk = bestAsk;
+                // one-sided bid/ask is a partial observation (one-sided depth, auction): keep last complete best pair (bug-0023, T5b)
+                if (bestBid != 0 && bestAsk != 0)
+                {
+                    _bestBid = bestBid;
+                    _bestAsk = bestAsk;
+                }
 
                 if (StartProgram == StartProgram.IsOsTrader)
                 {
@@ -2222,7 +2273,7 @@ namespace OsEngine.Market.Connectors
             }
             else if (type == LogMessageType.Error)
             { // if nobody is subscribed to us and there is an error in the log / если на нас никто не подписан и в логе ошибка
-                System.Windows.MessageBox.Show(message);
+                ServerMaster.SendNewLogMessage(message, LogMessageType.Error);
             }
         }
 

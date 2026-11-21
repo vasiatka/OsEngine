@@ -164,22 +164,25 @@ namespace OsEngine.Entity
         {
             get
             {
-                if (CandlesAll == null)
-                {
-                    return null;
-                }
-
                 List<Candle> history = CandlesAll;
 
-                if (history == null ||
-                    history.Count == 0)
+                if (history == null)
                 {
                     return null;
                 }
 
-                if (history[history.Count - 1].State != CandleState.Finished)
+                // список может параллельно перестраиваться: Count снимаем один раз, живой индекс не перечитываем
+                int count = history.Count;
+
+                if (count == 0 ||
+                    history[count - 1] == null)
                 {
-                    return history.GetRange(0, history.Count - 1);
+                    return null;
+                }
+
+                if (history[count - 1].State != CandleState.Finished)
+                {
+                    return history.GetRange(0, count - 1);
                 }
 
                 return history;
@@ -209,6 +212,14 @@ namespace OsEngine.Entity
         public void Stop()
         {
             _isStoped = true;
+        }
+
+        /// <summary>
+        /// the series was stopped (unsubscribed). A stopped series is not started by the manager anymore
+        /// </summary>
+        public bool IsStopped
+        {
+            get { return _isStoped; }
         }
 
         /// <summary>
@@ -245,11 +256,20 @@ namespace OsEngine.Entity
                 }
                 UpDateCandle(trades[i].Time, trades[i].Price, trades[i].Volume, false, trades[i].Side);
 
-                List<Trade> tradesInCandle = CandlesAll[CandlesAll.Count - 1].Trades;
+                // snapshot. If the realization was destroyed mid-load, CandlesAll is null.
+                // abort without _isStarted. The manager logs the abort and does not activate the series (bug-0077)
+                List<Candle> candles = CandlesAll;
+
+                if (candles == null || candles.Count == 0)
+                {
+                    return;
+                }
+
+                List<Trade> tradesInCandle = candles[candles.Count - 1].Trades;
 
                 tradesInCandle.Add(trades[i]);
 
-                CandlesAll[CandlesAll.Count - 1].Trades = tradesInCandle;
+                candles[candles.Count - 1].Trades = tradesInCandle;
             }
             UpdateChangeCandle();
 
@@ -504,6 +524,11 @@ namespace OsEngine.Entity
 
         private void UpDateCandle(DateTime time, decimal price, decimal volume, bool canPushUp, Side side)
         {
+            if (TimeFrameBuilder == null || TimeFrameBuilder.CandleSeriesRealization == null)
+            {
+                return;
+            }
+
             TimeFrameBuilder.CandleSeriesRealization.UpDateCandle(time, price, volume, canPushUp, side);
         }
 
@@ -580,6 +605,8 @@ namespace OsEngine.Entity
             if (CandlesAll.Count == 0)
             {
                 CandlesAll.Add(candle);
+
+                UpdateFinishCandle();
                 return;
             }
 

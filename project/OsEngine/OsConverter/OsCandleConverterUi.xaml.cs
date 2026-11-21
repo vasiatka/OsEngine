@@ -45,52 +45,23 @@ namespace OsEngine.OsConverter
                 ButtonCandleConverter.Visibility = Visibility.Hidden;
             }
 
+            Closed += OsCandleConverterUi_Closed;
+
             StartButtonBlinkAnimation();
         }
+
+        private DispatcherTimer _blinkTimer;
+        private int _blinkCount;
+        private bool _isGreenVisible = true;
 
         private void StartButtonBlinkAnimation()
         {
             try
             {
-                DispatcherTimer timer = new DispatcherTimer();
-                int blinkCount = 0;
-                bool isGreenVisible = true;
-
-                timer.Interval = TimeSpan.FromMilliseconds(300);
-                timer.Tick += (s, e) =>
-                {
-                    try
-                    {
-                        if (blinkCount >= 20)
-                        {
-                            timer.Stop();
-                            PostGreenCandleConverter.Opacity = 1;
-                            PostWhiteCandleConverter.Opacity = 0;
-                            return;
-                        }
-
-                        if (isGreenVisible)
-                        {
-                            PostGreenCandleConverter.Opacity = 0;
-                            PostWhiteCandleConverter.Opacity = 1;
-                        }
-                        else
-                        {
-                            PostGreenCandleConverter.Opacity = 1;
-                            PostWhiteCandleConverter.Opacity = 0;
-                        }
-
-                        isGreenVisible = !isGreenVisible;
-                        blinkCount++;
-                    }
-                    catch (Exception ex)
-                    {
-                        _candleConverter.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
-                        timer.Stop();
-                    }
-                };
-
-                timer.Start();
+                _blinkTimer = new DispatcherTimer();
+                _blinkTimer.Interval = TimeSpan.FromMilliseconds(300);
+                _blinkTimer.Tick += _blinkTimer_Tick;
+                _blinkTimer.Start();
             }
             catch (Exception ex)
             {
@@ -98,20 +69,80 @@ namespace OsEngine.OsConverter
             }
         }
 
+        private void _blinkTimer_Tick(object sender, EventArgs e)
+        {
+            if (_blinkTimer == null)
+            {
+                return;
+            }
+
+            try
+            {
+                if (_blinkCount >= 20)
+                {
+                    _blinkTimer.Stop();
+                    PostGreenCandleConverter.Opacity = 1;
+                    PostWhiteCandleConverter.Opacity = 0;
+                    return;
+                }
+
+                if (_isGreenVisible)
+                {
+                    PostGreenCandleConverter.Opacity = 0;
+                    PostWhiteCandleConverter.Opacity = 1;
+                }
+                else
+                {
+                    PostGreenCandleConverter.Opacity = 1;
+                    PostWhiteCandleConverter.Opacity = 0;
+                }
+
+                _isGreenVisible = !_isGreenVisible;
+                _blinkCount++;
+            }
+            catch (Exception ex)
+            {
+                _candleConverter.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+                if (_blinkTimer != null)
+                {
+                    _blinkTimer.Stop();
+                }
+            }
+        }
+
+        private void OsCandleConverterUi_Closed(object sender, EventArgs e)
+        {
+            try
+            {
+                if (_blinkTimer != null)
+                {
+                    _blinkTimer.Stop();
+                    _blinkTimer.Tick -= _blinkTimer_Tick;
+                    _blinkTimer = null;
+                }
+
+                ButtonStart.Click -= ButtonStart_Click;
+                ButtonSetSource.Click -= ButtonSetSource_Click;
+                ButtonSetExitFile.Click -= ButtonSetExitFile_Click;
+                ButtonCandleConverter.Click -= ButtonCandleConverter_Click;
+
+                _candleConverter = null;
+
+                Closed -= OsCandleConverterUi_Closed;
+            }
+            catch (Exception ex)
+            {
+                _candleConverter?.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
         private void ButtonStart_Click(object sender, RoutedEventArgs e)
         {
             try
             {
-                decimal divider = 1;
-
-                if (ComboBoxTimeFrameInitial.SelectedItem.ToString() == TimeFrame.Min5.ToString())
-                {
-                    divider = 5;
-                }
-
                 List<Candle> candles = _candleConverter.ReadSourceFile();
-                List<Candle> mergedCandles = _candleConverter.Merge(candles,
-                    Convert.ToInt32(_candleConverter.ResultCandleTimeFrame / (double)divider));
+                List<Candle> mergedCandles = CandleConverter.Merge(candles,
+                    TimeSpan.FromMinutes(_candleConverter.ResultCandleTimeFrame));
 
                 _candleConverter.WriteExitFile(mergedCandles);
                 _candleConverter.SendNewLogMessage("The operation is complete", Logging.LogMessageType.System);

@@ -1,4 +1,4 @@
-﻿/*
+/*
  *Your rights to use the code are governed by this license https://github.com/AlexWan/OsEngine/blob/master/LICENSE
  *Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
 */
@@ -180,24 +180,35 @@ namespace OsEngine.OsTrader.Panels.Tab
 
             try
             {
+                ComboBoxOperationType.SelectionChanged -= ComboBoxOperationType_SelectionChanged;
                 ComboBoxClass.SelectionChanged -= ComboBoxClass_SelectionChanged;
                 ComboBoxTypeServer.SelectionChanged -= ComboBoxTypeServer_SelectionChanged;
                 TextBoxSearchSecurity.TextChanged -= TextBoxSearchSecurity_TextChanged;
                 TextBoxSearchSecurity.MouseLeave -= TextBoxSearchSecurity_MouseLeave;
                 TextBoxSearchSecurity.MouseEnter -= TextBoxSearchSecurity_MouseEnter;
                 TextBoxSearchSecurity.LostKeyboardFocus -= TextBoxSearchSecurity_LostKeyboardFocus;
+                TextBoxSearchSecurity.KeyDown -= TextBoxSearchSecurity_KeyDown;
                 ButtonRightInSearchResults.Click -= ButtonRightInSearchResults_Click;
                 ButtonLeftInSearchResults.Click -= ButtonLeftInSearchResults_Click;
-                TextBoxSearchSecurity.KeyDown -= TextBoxSearchSecurity_KeyDown;
-                Closing -= ConnectorCandlesUi_Closing;
+                ButtonAccept.Click -= ButtonAccept_Click;
+
+                if (_searchResults != null)
+                {
+                    _searchResults.Clear();
+                    _searchResults = null;
+                }
 
                 DeleteGridSecurities();
+
+                Closing -= ConnectorCandlesUi_Closing;
             }
             catch
             {
                 // ignore
             }
 
+            _baseSecurity = null;
+            _selectedServerName = null;
             _connectorBot = null;
         }
 
@@ -601,10 +612,18 @@ namespace OsEngine.OsTrader.Panels.Tab
 
         private void DeleteGridSecurities()
         {
-            DataGridFactory.ClearLinks(_gridSecurities);
-            _gridSecurities.CellClick -= _gridSecurities_CellClick;
-            _gridSecurities.DataError -= _gridSecurities_DataError;
-            SecurityTable.Child = null;
+            if (_gridSecurities != null)
+            {
+                DataGridFactory.ClearLinks(_gridSecurities);
+                _gridSecurities.CellClick -= _gridSecurities_CellClick;
+                _gridSecurities.DataError -= _gridSecurities_DataError;
+                _gridSecurities.Rows.Clear();
+                _gridSecurities.Columns.Clear();
+                _gridSecurities.DataSource = null;
+                _gridSecurities.Dispose();
+                SecurityTable.Child = null;
+                _gridSecurities = null;
+            }
         }
 
         private void CreateGridSecurities()
@@ -682,14 +701,14 @@ namespace OsEngine.OsTrader.Panels.Tab
                     {
                         for (int y = 0; y < _gridSecurities.ColumnCount; y++)
                         {
-                            _gridSecurities.Rows[rowInd].Cells[y].Style.ForeColor = System.Drawing.ColorTranslator.FromHtml("#ffffff");
+                            _gridSecurities.Rows[rowInd].Cells[y].Style.ForeColor = Themes.ThemeManager.GetColorWinForms("GridSelectionForeColor");
                         }
                     }
                     else
                     {
                         for (int y = 0; y < _gridSecurities.ColumnCount; y++)
                         {
-                            _gridSecurities.Rows[i].Cells[y].Style.ForeColor = System.Drawing.ColorTranslator.FromHtml("#FFA1A1A1");
+                            _gridSecurities.Rows[i].Cells[y].Style.ForeColor = Themes.ThemeManager.GetColorWinForms("GridTextInactiveColor");
                         }
                     }
                 }

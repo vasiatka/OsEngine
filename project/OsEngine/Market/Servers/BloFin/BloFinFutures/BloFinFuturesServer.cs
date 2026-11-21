@@ -37,12 +37,14 @@ namespace OsEngine.Market.Servers.BloFin
             CreateParameterBoolean("Hedge Mode", true);
             ServerParameters[3].ValueChange += BloFinFuturesServer_ValueChange;
             CreateParameterEnum("Margin Mode", "Cross", new List<string> { "Cross", "Isolated" });
+            CreateParameterBoolean("Use Shared RateGate", false);
 
             ServerParameters[0].Comment = OsLocalization.Market.Label246;
             ServerParameters[1].Comment = OsLocalization.Market.Label247;
             ServerParameters[2].Comment = OsLocalization.Market.Label271;
             ServerParameters[3].Comment = OsLocalization.Market.Label250;
             ServerParameters[4].Comment = OsLocalization.Market.Label249;
+            ServerParameters[5].Comment = OsLocalization.Market.Label324;
         }
 
         private void BloFinFuturesServer_ValueChange()
@@ -61,22 +63,27 @@ namespace OsEngine.Market.Servers.BloFin
 
             Thread threadCheckAliveWebSocket = new Thread(CheckAliveWebSocket);
             threadCheckAliveWebSocket.Name = "CheckAliveWebSocketBloFinFutures";
+            threadCheckAliveWebSocket.IsBackground = true;
             threadCheckAliveWebSocket.Start();
 
             Thread threadMessageReaderPublic = new Thread(MessageReaderPublic);
             threadMessageReaderPublic.Name = "MessageReaderPublic";
+            threadMessageReaderPublic.IsBackground = true;
             threadMessageReaderPublic.Start();
 
             Thread threadMessageReaderPrivate = new Thread(MessageReaderPrivate);
             threadMessageReaderPrivate.Name = "MessageReaderPrivate";
+            threadMessageReaderPrivate.IsBackground = true;
             threadMessageReaderPrivate.Start();
 
             Thread threadMessageReaderMarketDepth = new Thread(ThreadMessageReaderMarketDepth);
             threadMessageReaderMarketDepth.Name = "ThreadBlofinFuturesMessageReaderMarketDepth";
+            threadMessageReaderMarketDepth.IsBackground = true;
             threadMessageReaderMarketDepth.Start();
 
             Thread threadMessageReaderTrades = new Thread(ThreadMessageReaderTrades);
             threadMessageReaderTrades.Name = "ThreadBlofinFuturesMessageReaderTrades";
+            threadMessageReaderTrades.IsBackground = true;
             threadMessageReaderTrades.Start();
         }
 
@@ -160,7 +167,7 @@ namespace OsEngine.Market.Servers.BloFin
         {
             try
             {
-                _rateGate.WaitToProceed();
+                GetRateGate().WaitToProceed();
 
                 Dictionary<string, string> mode = new Dictionary<string, string>();
                 mode["marginMode"] = _marginMode;
@@ -196,7 +203,7 @@ namespace OsEngine.Market.Servers.BloFin
 
         private void SetPositionMode()
         {
-            _rateGate.WaitToProceed();
+            GetRateGate().WaitToProceed();
 
             try
             {
@@ -298,7 +305,14 @@ namespace OsEngine.Market.Servers.BloFin
 
         private string _marginMode;
 
+        private static readonly RateGate _sharedRateGate = new RateGate(1, TimeSpan.FromMilliseconds(210));
+
         private RateGate _rateGate = new RateGate(1, TimeSpan.FromMilliseconds(210));
+
+        private RateGate GetRateGate()
+        {
+            return ((ServerParameterBool)ServerParameters[5]).Value ? _sharedRateGate : _rateGate;
+        }
 
         #endregion 2
 
@@ -315,7 +329,7 @@ namespace OsEngine.Market.Servers.BloFin
 
             try
             {
-                _rateGate.WaitToProceed();
+                GetRateGate().WaitToProceed();
 
                 string requestStr = $"/api/v1/market/instruments";
                 RestRequest requestRest = new RestRequest(requestStr, Method.GET);
@@ -520,7 +534,7 @@ namespace OsEngine.Market.Servers.BloFin
 
         private List<Candle> RequestCandleHistory(Security security, string interval, long startTime, long endTime, int limitCandles)
         {
-            _rateGate.WaitToProceed();
+            GetRateGate().WaitToProceed();
 
             try
             {
@@ -2424,7 +2438,7 @@ namespace OsEngine.Market.Servers.BloFin
         {
             try
             {
-                _rateGate.WaitToProceed();
+                GetRateGate().WaitToProceed();
 
                 string path = $"/api/v1/user/query-apikey";
 

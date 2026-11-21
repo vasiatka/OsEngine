@@ -35,10 +35,12 @@ namespace OsEngine.Market.Servers.Binance.Spot
             CreateParameterString(OsLocalization.Market.ServerParamPublicKey, "");
             CreateParameterPassword(OsLocalization.Market.ServerParameterSecretKey, "");
             CreateParameterBoolean("Extended Data", false);
+            CreateParameterBoolean("Use Shared RateGate", false);
 
             ServerParameters[0].Comment = OsLocalization.Market.Label246;
             ServerParameters[1].Comment = OsLocalization.Market.Label247;
             ServerParameters[2].Comment = OsLocalization.Market.Label269;
+            ServerParameters[3].Comment = OsLocalization.Market.Label324;
         }
     }
 
@@ -52,18 +54,22 @@ namespace OsEngine.Market.Servers.Binance.Spot
 
             Thread worker1 = new Thread(KeepaliveUserDataStream);
             worker1.Name = "BinanceSpotThread_KeepaliveUserDataStream";
+            worker1.IsBackground = true;
             worker1.Start();
 
             Thread worker2 = new Thread(ConverterPublicData);
             worker2.Name = "BinanceSpotThread_ConverterPublicData";
+            worker2.IsBackground = true;
             worker2.Start();
 
             Thread worker3 = new Thread(ConverterUserData);
             worker3.Name = "BinanceSpotThread_ConverterUserData";
+            worker3.IsBackground = true;
             worker3.Start();
 
             Thread worker4 = new Thread(ConverterPublicDataMarketDepth);
             worker4.Name = "BinanceSpotThread_ConverterUserDataMarketDepth";
+            worker4.IsBackground = true;
             worker4.Start();
         }
 
@@ -179,6 +185,8 @@ namespace OsEngine.Market.Servers.Binance.Spot
         private string _baseUrl = "https://api.binance.com/api";
 
         private bool _notMargineAccount;
+
+        private int _marginListenKeyFailures;
 
         private bool _extendedMarketData;
 
@@ -1098,15 +1106,24 @@ namespace OsEngine.Market.Servers.Binance.Spot
 
                 var res2 = CreateQuery(BinanceExchangeType.SpotExchange, Method.GET, endPoint, param, false);
 
+                if (string.IsNullOrEmpty(res2))
+                {
+                    // null/пустое тело = отказ REST, не «нет данных»: на null Newtonsoft кидает, на "" возвращает null без броска — без гейта отказ молчал бы через null-воронку (BUG-0396)
+
+                    SendLogMessage("Binance Spot: tick history request failed (see prior error). Symbol/" + security + ", from: " + startTime, LogMessageType.Error);
+
+                    return null;
+                }
+
                 AgregatedHistoryTrade[] tradeHistory = JsonConvert.DeserializeObject<AgregatedHistoryTrade[]>(res2);
 
                 var oldTrades = CreateTradesFromJson(security, tradeHistory);
 
                 return oldTrades;
             }
-            catch
+            catch (Exception error)
             {
-                SendLogMessage(OsLocalization.Market.Message95 + security, LogMessageType.Error);
+                SendLogMessage("Binance Spot: tick history parse error. Symbol/" + security + ", from: " + startTime + ". " + error.ToString(), LogMessageType.Error);
 
                 return null;
             }
@@ -1116,8 +1133,26 @@ namespace OsEngine.Market.Servers.Binance.Spot
         {
             List<Trade> trades = new List<Trade>();
 
+            int rejectedCount = 0;
+            string firstBadP = null;
+            string firstBadQ = null;
+
             foreach (var jtTrade in binTrades)
             {
+                // BUG-0412: тот же гейт, что и в UpdateTrades. q<=0 отбраковывается до Math.Abs —
+                // у исполненной сделки quantity > 0, нулевой/битый p/q = порча payload, не трейд.
+                if (!TryParsePositiveDecimal(jtTrade.p, out _) || !TryParsePositiveDecimal(jtTrade.q, out _))
+                {
+                    if (rejectedCount == 0)
+                    {
+                        firstBadP = jtTrade.p;
+                        firstBadQ = jtTrade.q;
+                    }
+
+                    rejectedCount++;
+                    continue;
+                }
+
                 var trade = new Trade();
 
                 trade.Time = new DateTime(1970, 1, 1).AddMilliseconds(Convert.ToDouble(jtTrade.T));
@@ -1146,6 +1181,14 @@ namespace OsEngine.Market.Servers.Binance.Spot
                 }
 
                 trades.Add(trade);
+            }
+
+            if (rejectedCount > 0)
+            {
+                SendLogMessage("Binance Spot. aggTrades response: rejected " + rejectedCount
+                    + " trade(s) with invalid price or quantity. Symbol: " + secName
+                    + ", first invalid p/q: " + TruncateRaw(firstBadP) + "/" + TruncateRaw(firstBadQ),
+                    LogMessageType.Error);
             }
 
             return trades;
@@ -1344,7 +1387,16 @@ namespace OsEngine.Market.Servers.Binance.Spot
 
             try
             {
-                long timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                // BUG-0496: timestamp подписи берётся из кэша серверного времени, как в REST-пути CreateQuery.
+                // Локальный UtcNow при скосе часов >= serverTime+1s отбрасывается до проверки подписи
+                // и логон не завершался никогда (docs web-socket-api.md: session.logon, General API Information).
+                // Замки синхронизации времени — под общим _queryHttpLocker (инвариант bug-0432).
+                string timestamp;
+                lock (_queryHttpLocker)
+                {
+                    timestamp = GetNonce();
+                }
+
                 string payload = $"apiKey={ApiKey}&timestamp={timestamp}";
                 string signature = SignEd25519(payload);
 
@@ -1367,7 +1419,9 @@ namespace OsEngine.Market.Servers.Binance.Spot
                 if (string.IsNullOrEmpty(res))
                 {
                     SendLogMessage("Margin Socket don`t ListenKey", LogMessageType.Connect);
-                    _notMargineAccount = true;
+                    // shortcut: лаг после 3 подряд отказов; при REST-off >=15 мин и живом WS OnOpen не срабатывает и сайт не вызывается — лаг держится до реконнекта WS; upgrade: троттлинг-повтор сайта при поднятом флаге, отдельной записью
+                    _marginListenKeyFailures++;
+                    _notMargineAccount = _marginListenKeyFailures >= 3;
                     return;
                 }
 
@@ -1376,11 +1430,14 @@ namespace OsEngine.Market.Servers.Binance.Spot
                 if (string.IsNullOrEmpty(marginKey))
                 {
                     SendLogMessage("Margin Socket don`t ListenKey", LogMessageType.Connect);
-                    _notMargineAccount = true;
+                    _marginListenKeyFailures++;
+                    _notMargineAccount = _marginListenKeyFailures >= 3;
                     return;
                 }
 
                 _marginSocketClient.SendAsync($"{{\"id\": \"2\",\"method\": \"userDataStream.subscribe.listenToken\",\"params\": {{\"listenToken\": \"{marginKey}\" }}}}");
+                _marginListenKeyFailures = 0;
+                _notMargineAccount = false;
             }
             catch (Exception ex)
             {
@@ -1570,6 +1627,9 @@ namespace OsEngine.Market.Servers.Binance.Spot
                 return;
             }
 
+            // BUG-0467: null/binary/пустая рамка — не данные. Тихий пропуск до Contains и enqueue
+            // (у обёртки binary-кадры приходят с Data=null); по образцу guard 0466/PR 2174
+            if (string.IsNullOrEmpty(e.Data)) { return; }
             if (e.Data.Contains("\"lastUpdateId\""))
             {
                 _newMessagePublicMarketDepth.Enqueue(e.Data);
@@ -1706,7 +1766,7 @@ namespace OsEngine.Market.Servers.Binance.Spot
 
                 string urlStr = null;
 
-                if (((ServerParameterBool)ServerParameters[10]).Value == false)
+                if (((ServerParameterBool)ServerParameters[11]).Value == false)
                 {
                     urlStr = "wss://stream.binance.com:9443/stream?streams="
                                                 + security.Name.ToLower()
@@ -1861,29 +1921,43 @@ namespace OsEngine.Market.Servers.Binance.Spot
                         {
                             string mes = messsage.MessageStr;
 
-                            if (mes.Contains("\"id\":\"1"))
+                            switch (ClassifyUserDataFrame(mes))
                             {
-                                SubscribeToTheUserDataStream(mes);
-                            }
-                            else if (mes.Contains("code"))
-                            {
-                                SendLogMessage(JsonConvert.DeserializeAnonymousType(mes, new ErrorMessage()).msg, LogMessageType.Error);
-                            }
-                            else if (mes.Contains("\"e\"" + ":" + "\"executionReport\""))
-                            {
-                                UpdateOrderAndMyTrade(mes);
-                            }
-                            else if (mes.Contains("\"e\"" + ":" + "\"outboundAccountPosition\""))
-                            {
-                                var portfolios = JsonConvert.DeserializeAnonymousType(mes, new OutboundAccountInfo());
-
-                                if (messsage.ExchangeType == BinanceExchangeType.SpotExchange)
+                                case BinanceUserDataFrame.LogonResponse:
                                 {
-                                    UpdatePortfolio(portfolios, BinanceExchangeType.SpotExchange);
+                                    SubscribeToTheUserDataStream(mes);
+                                    break;
                                 }
-                                if (messsage.ExchangeType == BinanceExchangeType.MarginExchange)
+                                case BinanceUserDataFrame.Error:
                                 {
-                                    UpdatePortfolio(portfolios, BinanceExchangeType.MarginExchange);
+                                    SendLogMessage($"ConverterUserData Error. {FormatWsApiError(mes)}", LogMessageType.Error);
+                                    break;
+                                }
+                                case BinanceUserDataFrame.ExecutionReport:
+                                {
+                                    UpdateOrderAndMyTrade(mes);
+                                    break;
+                                }
+                                case BinanceUserDataFrame.OutboundAccountPosition:
+                                {
+                                    var portfolios = JsonConvert.DeserializeAnonymousType(mes, new OutboundAccountInfo());
+
+                                    if (messsage.ExchangeType == BinanceExchangeType.SpotExchange)
+                                    {
+                                        UpdatePortfolio(portfolios, BinanceExchangeType.SpotExchange);
+                                    }
+                                    if (messsage.ExchangeType == BinanceExchangeType.MarginExchange)
+                                    {
+                                        UpdatePortfolio(portfolios, BinanceExchangeType.MarginExchange);
+                                    }
+                                    break;
+                                }
+                                default:
+                                {
+                                    // BUG-0422: unknown frames (subscribe ack id=2/3, control pings) drop
+                                    // silently, as before: routing them to Error would log 12-24 false
+                                    // errors per hour of normal re-logon life (review-20261115-018 p.6)
+                                    break;
                                 }
                             }
                         }
@@ -1895,6 +1969,45 @@ namespace OsEngine.Market.Servers.Binance.Spot
                     Thread.Sleep(5000);
                 }
             }
+        }
+
+        internal enum BinanceUserDataFrame
+        {
+            LogonResponse,
+            Error,
+            ExecutionReport,
+            OutboundAccountPosition,
+            Unknown
+        }
+
+        // BUG-0422: user-data frames are routed by key position, not by bare substring:
+        // a "code" inside a value (clientOrderId) used to hijack good frames into the error
+        // branch. In valid JSON quotes inside values are escaped, so a "\"key\":" literal
+        // matches only at real key position. Test seam: internal, called via reflection.
+        internal static BinanceUserDataFrame ClassifyUserDataFrame(string mes)
+        {
+            if (mes == null)
+            {
+                return BinanceUserDataFrame.Unknown;
+            }
+
+            if (mes.Contains("\"id\":\"1\""))
+            {
+                return BinanceUserDataFrame.LogonResponse;
+            }
+            if (mes.Contains("\"code\":"))
+            {
+                return BinanceUserDataFrame.Error;
+            }
+            if (mes.Contains("\"e\":\"executionReport\""))
+            {
+                return BinanceUserDataFrame.ExecutionReport;
+            }
+            if (mes.Contains("\"e\":\"outboundAccountPosition\""))
+            {
+                return BinanceUserDataFrame.OutboundAccountPosition;
+            }
+            return BinanceUserDataFrame.Unknown;
         }
 
         private void SubscribeToTheUserDataStream(string messsage)
@@ -1909,13 +2022,33 @@ namespace OsEngine.Market.Servers.Binance.Spot
                 }
                 else
                 {
-
+                    // Пустой else молча гасил отказ logon (битый ключ/подпись) — сохраняем status и код биржи
+                    SendLogMessage($"SubscribeToTheUserDataStream rejected. Status: {auth.status}. {FormatWsApiError(messsage)}", LogMessageType.Error);
                 }
             }
             catch (Exception error)
             {
                 SendLogMessage(error.ToString(), LogMessageType.Error);
             }
+        }
+
+        private string FormatWsApiError(string mes)
+        {
+            // Отказ WS API вложенный: {status,error:{code,msg}} (web-socket-api.md «Response format»); legacy — верхнеуровневые code/msg; при пустом msg или не-JSON — сырая рамка целиком
+            try
+            {
+                ErrorMessage error = JsonConvert.DeserializeAnonymousType(mes, new { error = new ErrorMessage() })?.error
+                    ?? JsonConvert.DeserializeObject<ErrorMessage>(mes);
+                if (!string.IsNullOrEmpty(error?.msg))
+                {
+                    return $"Code: {error.code}, msg: {error.msg}";
+                }
+            }
+            catch (JsonException)
+            {
+                return $"Binance WS error frame (not parsed): {mes}";
+            }
+            return mes;
         }
 
         private void UpdatePortfolio(OutboundAccountInfo portfs, BinanceExchangeType source)
@@ -1989,6 +2122,24 @@ namespace OsEngine.Market.Servers.Binance.Spot
             }
         }
 
+        // класс бумаги из реестра по символу. try/catch: UpdatePairs мутирует словарь, TryGetValue кидает при конкурентной записи; исключение отсюда = потеря WS-события
+        private string GetSecurityClassCode(string symbol)
+        {
+            try
+            {
+                if (_securitiesDict.TryGetValue(symbol, out Security sec))
+                {
+                    return sec.NameClass;
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+
+            return null;
+        }
+
         private void UpdateOrderAndMyTrade(string mes)
         {
             try
@@ -2020,6 +2171,7 @@ namespace OsEngine.Market.Servers.Binance.Spot
                 {
                     Order newOrder = new Order();
                     newOrder.SecurityNameCode = order.s;
+                    newOrder.SecurityClassCode = GetSecurityClassCode(order.s);
                     newOrder.TimeCallBack = new DateTime(1970, 1, 1).AddMilliseconds(order.E.ToDouble());
                     newOrder.NumberUser = orderNumUser;
 
@@ -2051,6 +2203,7 @@ namespace OsEngine.Market.Servers.Binance.Spot
                 {
                     Order newOrder = new Order();
                     newOrder.SecurityNameCode = order.s;
+                    newOrder.SecurityClassCode = GetSecurityClassCode(order.s);
                     newOrder.TimeCallBack = new DateTime(1970, 1, 1).AddMilliseconds(order.E.ToDouble());
                     newOrder.TimeCancel = newOrder.TimeCallBack;
                     newOrder.NumberUser = orderNumUser;
@@ -2080,6 +2233,7 @@ namespace OsEngine.Market.Servers.Binance.Spot
                 {
                     Order newOrder = new Order();
                     newOrder.SecurityNameCode = order.s;
+                    newOrder.SecurityClassCode = GetSecurityClassCode(order.s);
                     newOrder.TimeCallBack = new DateTime(1970, 1, 1).AddMilliseconds(order.E.ToDouble());
                     newOrder.NumberUser = orderNumUser;
                     newOrder.NumberMarket = order.i.ToString();
@@ -2117,6 +2271,7 @@ namespace OsEngine.Market.Servers.Binance.Spot
                     {// Order Done
                         Order newOrder = new Order();
                         newOrder.SecurityNameCode = order.s;
+                        newOrder.SecurityClassCode = GetSecurityClassCode(order.s);
                         newOrder.TimeCallBack = new DateTime(1970, 1, 1).AddMilliseconds(order.E.ToDouble());
                         newOrder.NumberUser = orderNumUser;
 
@@ -2195,6 +2350,7 @@ namespace OsEngine.Market.Servers.Binance.Spot
                 {
                     Order newOrder = new Order();
                     newOrder.SecurityNameCode = order.s;
+                    newOrder.SecurityClassCode = GetSecurityClassCode(order.s);
                     newOrder.TimeCallBack = new DateTime(1970, 1, 1).AddMilliseconds(order.E.ToDouble());
                     newOrder.TimeCancel = newOrder.TimeCallBack;
                     newOrder.NumberUser = orderNumUser;
@@ -2224,6 +2380,7 @@ namespace OsEngine.Market.Servers.Binance.Spot
                 {
                     Order newOrder = new Order();
                     newOrder.SecurityNameCode = order.s;
+                    newOrder.SecurityClassCode = GetSecurityClassCode(order.s);
                     newOrder.TimeCallBack = new DateTime(1970, 1, 1).AddMilliseconds(order.E.ToDouble());
                     newOrder.NumberUser = orderNumUser;
                     newOrder.NumberMarket = order.i.ToString();
@@ -2295,6 +2452,18 @@ namespace OsEngine.Market.Servers.Binance.Spot
             {
                 return;
             }
+
+            // BUG-0412: ToDecimal глотает FormatException и даёт 0, неотличимый от честного нуля,
+            // поэтому сырой p/q проверяется строго до присвоений. Цена и объём исполненной
+            // сделки всегда > 0 (WS docs Trade/AggTrade, filters.md LOT_SIZE/MIN_NOTIONAL).
+            if (!TryParsePositiveDecimal(trades.data.p, out _) || !TryParsePositiveDecimal(trades.data.q, out _))
+            {
+                SendLogMessage("Binance Spot. Trade rejected: invalid price or quantity. Symbol: " + trades.data.s
+                    + ", p: " + TruncateRaw(trades.data.p) + ", q: " + TruncateRaw(trades.data.q),
+                    LogMessageType.Error);
+                return;
+            }
+
             Trade trade = new Trade();
             trade.SecurityNameCode = trades.data.s;
             trade.Price =
@@ -2306,6 +2475,41 @@ namespace OsEngine.Market.Servers.Binance.Spot
             trade.Side = trades.data.m == true ? Side.Sell : Side.Buy;
 
             NewTradesEvent?.Invoke(trade);
+        }
+
+        private static bool TryParsePositiveDecimal(string raw, out decimal value)
+        {
+            value = 0m;
+
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return false;
+            }
+
+            return decimal.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out value) && value > 0m;
+        }
+
+        // Сырое значение в Error-лог: не-печатаемые -> '?', длина > 32 -> префикс 32 + '~' (итог <= 35).
+        private static string TruncateRaw(string raw)
+        {
+            if (string.IsNullOrEmpty(raw))
+            {
+                return "";
+            }
+
+            StringBuilder builder = new StringBuilder(raw.Length > 32 ? 33 : raw.Length);
+
+            for (int i = 0; i < raw.Length && builder.Length < 32; i++)
+            {
+                builder.Append(char.IsControl(raw[i]) ? '?' : raw[i]);
+            }
+
+            if (raw.Length > 32)
+            {
+                builder.Append('~');
+            }
+
+            return builder.ToString();
         }
 
         private void UpdateMarketDepth(DepthResponse myDepth)
@@ -2692,6 +2896,9 @@ namespace OsEngine.Market.Servers.Binance.Spot
                 newOrder.NumberMarket = orderOnBoard.orderId;
                 newOrder.NumberUser = oldOrder.NumberUser;
                 newOrder.SecurityNameCode = oldOrder.SecurityNameCode;
+                newOrder.SecurityClassCode = string.IsNullOrEmpty(oldOrder.SecurityClassCode)
+                    ? GetSecurityClassCode(oldOrder.SecurityNameCode)
+                    : oldOrder.SecurityClassCode;
                 //newOrder.State = OrderStateType.Cancel;
 
                 newOrder.Volume = oldOrder.Volume;
@@ -2992,6 +3199,7 @@ namespace OsEngine.Market.Servers.Binance.Spot
                 }
 
                 newOrder.SecurityNameCode = myOrder.symbol;
+                newOrder.SecurityClassCode = GetSecurityClassCode(myOrder.symbol);
                 newOrder.Price = myOrder.price.ToDecimal();
                 newOrder.Volume = myOrder.origQty.ToDecimal();
                 newOrder.ServerType = ServerType.Binance;
@@ -3156,13 +3364,20 @@ namespace OsEngine.Market.Servers.Binance.Spot
 
         private RateGate _rateGate = new RateGate(1, TimeSpan.FromMilliseconds(100));
 
+        private static readonly RateGate _sharedRateGate = new RateGate(1, TimeSpan.FromMilliseconds(100));
+
+        private RateGate GetRateGate()
+        {
+            return ((ServerParameterBool)ServerParameters[3]).Value ? _sharedRateGate : _rateGate;
+        }
+
         public string CreateQuery(BinanceExchangeType startUri, Method method, string endpoint, Dictionary<string, string> param = null, bool auth = false)
         {
             try
             {
                 lock (_queryHttpLocker)
                 {
-                    _rateGate.WaitToProceed();
+                    GetRateGate().WaitToProceed();
                     string fullUrl = "";
 
                     if (param != null)
@@ -3215,12 +3430,27 @@ namespace OsEngine.Market.Servers.Binance.Spot
                         client.Proxy = _myProxy;
                     }
 
-                    var response = client.Execute(request).Content;
+                    IRestResponse restResponse = client.Execute(request);
 
-                    if (response.Contains("code"))
+                    // RestSharp не бросает при сетевом сбое: причина только в ErrorException, Content при этом "" — без проверки отказ уходит коллеру молчаливым пустым успехом
+
+                    if (restResponse.ErrorException != null)
+                    {
+                        throw new Exception($"{startUri}. {endpoint}. Network error: {restResponse.ErrorException.GetType().Name}: {restResponse.ErrorException.Message}", restResponse.ErrorException);
+                    }
+
+                    var response = restResponse.Content;
+
+                    // Гейт и формат — как PerformHttpRequest в BinanceServerFutures (:3604): успех {"code":200,...} не отказ; код биржи сохраняем в тексте
+                    if (response.Contains("code") && !response.StartsWith("{\"code\":200"))
                     {
                         var error = JsonConvert.DeserializeAnonymousType(response, new ErrorMessage());
-                        throw new Exception($"{startUri}. {error.msg}");
+                        if (error == null || string.IsNullOrEmpty(error.msg))
+                        {
+                            // Тело с подстрокой «code» без msg — в лог сырой ответ, иначе в Error-записи пустой текст
+                            throw new Exception($"{startUri}. {response}");
+                        }
+                        throw new Exception(error.code == 0 ? $"{startUri}. {error.msg}" : $"{startUri}. {error.code}: {error.msg}");
                     }
 
                     return response;
@@ -3230,6 +3460,8 @@ namespace OsEngine.Market.Servers.Binance.Spot
             {
                 if (ex.ToString().Contains("This listenKey does not exist"))
                 {
+                    // штатная потеря listenKey — не ошибка: молча null, как соседний гейт Unknown order sent
+                    return null;
 
                 }
                 if (ex.ToString().Contains("Unknown order sent"))
@@ -3243,24 +3475,75 @@ namespace OsEngine.Market.Servers.Binance.Spot
             }
         }
 
+        // Инвариант (bug-0432): поля синхронизации времени меняются только под lock(_queryHttpLocker) CreateQuery —
+        // единственный коллер GetNonce это signed-путь CreateQuery; реентранс Monitor, отдельный lock не вводить.
+        private TimeSpan _serverTimeOffset = TimeSpan.Zero;   // серверное время минус локальные часы
+        private DateTime _lastServerTimeSync = DateTime.MinValue;   // момент последнего успешного синка; при отказе TTL не освежаем — пробым на следующем signed
+        private DateTime _lastTimeSyncFailLog = DateTime.MinValue;   // троттлинг лога отказа: не чаще раза в минуту
+
         private string GetNonce()
         {
-            var resTime = CreateQuery(BinanceExchangeType.SpotExchange, Method.GET, "api/v1/time", null, false);
-            var result = JsonConvert.DeserializeAnonymousType(resTime, new BinanceTime());
-
-            if (result != null)
+            if (_lastServerTimeSync == DateTime.MinValue
+                || _lastServerTimeSync.AddMinutes(5) < DateTime.UtcNow)
             {
-                return (result.serverTime + 500).ToString();
+                SyncServerTime();
             }
-            else
-            {
-                DateTime yearBegin = new DateTime(1970, 1, 1);
-                var timeStamp = DateTime.UtcNow - yearBegin;
-                var r = timeStamp.TotalMilliseconds;
-                var re = Convert.ToInt64(r);
 
-                return re.ToString();
+            // timestamp считается локально из сохранённого offset (та же схема, что BinanceServerFutures) — без REST-раундтрипа на каждый signed
+            DateTime serverNow = DateTime.UtcNow + _serverTimeOffset;
+            long timeStamp = (long)(serverNow - new DateTime(1970, 1, 1)).TotalMilliseconds;
+
+            return (timeStamp + 500).ToString();
+        }
+
+        private void SyncServerTime()
+        {
+            // Check server time (rest-api.md): живой эндпоинт — api/v3/time, ответ разбирает ApplyTimeResponse, offset кэширует GetNonce
+            string resTime = CreateQuery(BinanceExchangeType.SpotExchange, Method.GET, "api/v3/time", null, false);
+            ApplyTimeResponse(resTime);
+        }
+
+        // true = offset обновлён. При отказе держим последний валидный offset (как Futures): при первом отказе offset=Zero — работа на локальных часах.
+        private bool ApplyTimeResponse(string resTime)
+        {
+            long serverTimeMs = 0;
+            bool ok = false;
+
+            if (!string.IsNullOrEmpty(resTime))
+            {
+                try
+                {
+                    // Анонимный тип: сущность BinanceTime не касаемся (её тип правит баг 0352). Битое тело = отказ ветки, наружу не кидаем: иначе ответ на /time ронял бы signed-запрос через catch CreateQuery.
+                    var result = JsonConvert.DeserializeAnonymousType(resTime, new { serverTime = 0L });
+                    ok = result != null && result.serverTime > 0;
+
+                    if (ok)
+                    {
+                        serverTimeMs = result.serverTime;
+                    }
+                }
+                catch (Exception)
+                {
+                    ok = false;
+                }
             }
+
+            if (ok)
+            {
+                _serverTimeOffset = new DateTime(1970, 1, 1).AddMilliseconds(serverTimeMs) - DateTime.UtcNow;
+                _lastServerTimeSync = DateTime.UtcNow;
+                SendLogMessage("Binance Spot: serverTime синхронизирован, offset " + Math.Round(_serverTimeOffset.TotalMilliseconds) + " мс", LogMessageType.System);
+                return true;
+            }
+
+            if (_lastTimeSyncFailLog.AddMinutes(1) < DateTime.UtcNow)
+            {
+                _lastTimeSyncFailLog = DateTime.UtcNow;
+                string snippet = resTime == null ? "" : (resTime.Length > 200 ? resTime.Substring(0, 200) : resTime);
+                SendLogMessage("Binance Spot: sync НЕ УДАЛСЯ, timestamp по локальным часам (offset " + Math.Round(_serverTimeOffset.TotalMilliseconds) + " мс). Ответ: [" + snippet + "]", LogMessageType.Error);
+            }
+
+            return false;
         }
 
         public string SignEd25519(string payload)

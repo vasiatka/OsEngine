@@ -7,6 +7,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
+using System.Text.RegularExpressions;
 using OsEngine.Market;
 using OsEngine.Market.Servers.Tester;
 
@@ -23,11 +24,18 @@ namespace OsEngine.Entity
             TimeCreate = DateTime.MinValue;
             TimeCallBack = DateTime.MinValue;
             TimeCancel = DateTime.MinValue;
-            TimeDone =  DateTime.MinValue;
+            TimeDone = DateTime.MinValue;
             NumberMarket = "";
             Side = Side.None;
             NumberPosition = 0;
+            PositionAddTime = DateTime.MinValue;
         }
+
+        /// <summary>
+        /// Local time when the order was added to a position (not saved to disk).
+        /// Used to age out unconfirmed orders (State=None) that never reached the exchange.
+        /// </summary>
+        public DateTime PositionAddTime;
 
         /// <summary>
         /// Order number in the robot
@@ -70,13 +78,29 @@ namespace OsEngine.Entity
         public decimal Price;
 
         /// <summary>
+        /// Trigger price of the stop order
+        /// </summary>
+        public decimal StopPrice;
+
+        /// <summary>
+        /// Market number of the parent order. Filled for child exchange orders
+        /// spawned by an activated stop order
+        /// </summary>
+        public string ParentOrderNumberMarket;
+
+        /// <summary>
+        /// Market number of the child exchange order spawned after the stop order activation
+        /// </summary>
+        public string ChildOrderNumberMarket;
+
+        /// <summary>
         /// Real price
         /// </summary>
         public decimal PriceReal
         {
             get
             {
-                if((State == OrderStateType.None 
+                if ((State == OrderStateType.None
                     || State == OrderStateType.Active
                     || State == OrderStateType.Cancel)
                     && _trades == null)
@@ -103,17 +127,17 @@ namespace OsEngine.Entity
                 if (_trades != null && (_volumeExecute == 0 || _volumeExecuteChange))
                 {
                     _volumeExecute = 0;
-                    
-                    for(int i = 0;i < _trades.Count;i++)
+
+                    for (int i = 0; i < _trades.Count; i++)
                     {
-                        if(_trades[i] == null)
+                        if (_trades[i] == null)
                         {
                             continue;
                         }
 
                         _volumeExecute += _trades[i].Volume;
                     }
-                    
+
                     _volumeExecuteChange = false;
                     return _volumeExecute;
                 }
@@ -127,17 +151,23 @@ namespace OsEngine.Entity
                 }
 
             }
-            set 
-            { 
-                _volumeExecute = value; 
+            set
+            {
+                _volumeExecute = value;
             }
         }
         private decimal _volumeExecute;
         private bool _volumeExecuteChange;
 
+        // кэш средней цены исполнения. В файл не сохраняется:
+        // после перезапуска терминала пересчитывается по загруженным трейдам
+        private decimal _middlePriceCache;
+        private bool _middlePriceChange = true;
+
         public void ReCalculateVolume()
         {
             _volumeExecuteChange = true;
+            _middlePriceChange = true;
         }
 
         /// <summary>
@@ -151,28 +181,28 @@ namespace OsEngine.Entity
         /// <summary>
         /// Order status: None, Pending, Done, Partial, Fail
         /// </summary>
-        public OrderStateType State 
+        public OrderStateType State
         {
             get { return _state; }
             set
             {
-                if(value == OrderStateType.Fail 
-                    && _trades != null 
+                if (value == OrderStateType.Fail
+                    && _trades != null
                     && _trades.Count > 1)
                 {
                     return;
                 }
 
                 if (value == OrderStateType.Fail
-                    && 
-                    (State == OrderStateType.Done 
+                    &&
+                    (State == OrderStateType.Done
                     || State == OrderStateType.Partial
                     || State == OrderStateType.Cancel))
                 {
                     return;
                 }
 
-                if((value == OrderStateType.Active
+                if ((value == OrderStateType.Active
                     || value == OrderStateType.Active)
                     &&
                     (_state == OrderStateType.Done
@@ -182,7 +212,7 @@ namespace OsEngine.Entity
                     return;
                 }
 
-                if(value == OrderStateType.Active
+                if (value == OrderStateType.Active
                     && (_state == OrderStateType.Done
                     || _state == OrderStateType.Cancel))
                 {
@@ -190,7 +220,7 @@ namespace OsEngine.Entity
                 }
 
                 _state = value;
-            } 
+            }
         }
 
         private OrderStateType _state;
@@ -240,7 +270,7 @@ namespace OsEngine.Entity
                 if (TimeCallBack == DateTime.MinValue ||
                     TimeCreate == DateTime.MinValue)
                 {
-                    return new TimeSpan(0,0,0,0);
+                    return new TimeSpan(0, 0, 0, 0);
                 }
 
                 return (TimeCallBack - TimeCreate);
@@ -354,13 +384,14 @@ namespace OsEngine.Entity
             _trades.Add(trade);
 
             _volumeExecuteChange = true;
+            _middlePriceChange = true;
 
             if (Volume == VolumeExecute)
             {
                 State = OrderStateType.Done;
             }
 
-            if(State == OrderStateType.Fail)
+            if (State == OrderStateType.Fail)
             {
                 State = OrderStateType.Partial;
             }
@@ -375,18 +406,24 @@ namespace OsEngine.Entity
             {
                 return Price;
             }
+
+            if (_middlePriceChange == false)
+            {
+                return _middlePriceCache;
+            }
+
             decimal price = 0;
 
             decimal volumeExecute = 0;
 
             for (int i = 0; i < _trades.Count; i++)
             {
-                if(_trades[i] == null)
+                if (_trades[i] == null)
                 {
                     continue;
                 }
 
-                price += _trades[i].Volume*_trades[i].Price;
+                price += _trades[i].Volume * _trades[i].Price;
                 volumeExecute += _trades[i].Volume;
             }
 
@@ -395,7 +432,10 @@ namespace OsEngine.Entity
                 return Price;
             }
 
-            price = price/volumeExecute;
+            price = price / volumeExecute;
+
+            _middlePriceCache = price;
+            _middlePriceChange = false;
 
             return price;
         }
@@ -427,7 +467,7 @@ namespace OsEngine.Entity
         {
             get
             {
-                if (_trades == null 
+                if (_trades == null
                     || _trades.Count == 0)
                 {
                     return false;
@@ -435,7 +475,7 @@ namespace OsEngine.Entity
                 else
                 {
                     return true;
-                }              
+                }
             }
         }
 
@@ -466,16 +506,10 @@ namespace OsEngine.Entity
             result.Append(State + "@");
             result.Append(TypeOrder + "@");
             result.Append(TimeCallBack.ToString(CultureInfo) + "@");
-            result.Append(SecurityNameCode.Replace('@', '%') + "@");
+            result.Append(EscapeField(SecurityNameCode) + "@");
 
-            if(PortfolioNumber != null)
-            {
-                result.Append(PortfolioNumber.Replace('@', '%') + "@");
-            }
-            else
-            {
-                result.Append("" + "@");
-            }
+            // null-safe through EscapeField — the old explicit null branch is not needed anymore
+            result.Append(EscapeField(PortfolioNumber) + "@");
 
             result.Append(TimeCreate.ToString(CultureInfo) + "@");
             result.Append(TimeCancel.ToString(CultureInfo) + "@");
@@ -493,7 +527,7 @@ namespace OsEngine.Entity
             {
                 for (int i = 0; i < _trades.Count; i++)
                 {
-                    if(_trades[i] == null)
+                    if (_trades[i] == null)
                     {
                         continue;
                     }
@@ -503,7 +537,7 @@ namespace OsEngine.Entity
             }
             result.Append("@");
 
-            result.Append(Comment + "@");
+            result.Append(EscapeField(Comment) + "@");
 
             result.Append(TimeDone.ToString(CultureInfo) + "@");
 
@@ -512,6 +546,11 @@ namespace OsEngine.Entity
             result.Append(ServerName + "@");
 
             result.Append(IsSendToCancel + "&" + CancellingTryCount + "&" + LastCancelTryLocalTime.ToString(CultureInfo.InvariantCulture));
+
+            result.Append("@" + StopPrice.ToString(CultureInfo));
+
+            result.Append("@" + (ParentOrderNumberMarket ?? ""));
+            result.Append("@" + (ChildOrderNumberMarket ?? ""));
 
             if (State == OrderStateType.Done && Volume == VolumeExecute &&
                 _trades != null && _trades.Count > 0)
@@ -545,8 +584,8 @@ namespace OsEngine.Entity
             Enum.TryParse(saveArray[9], true, out TypeOrder);
             TimeCallBack = Convert.ToDateTime(saveArray[10], CultureInfo);
 
-            SecurityNameCode = saveArray[11].Replace('%', '@');
-            PortfolioNumber = saveArray[12].Replace('%', '@');
+            SecurityNameCode = UnescapeFieldLegacy(saveArray[11]);
+            PortfolioNumber = UnescapeFieldLegacy(saveArray[12]);
 
             TimeCreate = Convert.ToDateTime(saveArray[13], CultureInfo);
             TimeCancel = Convert.ToDateTime(saveArray[14], CultureInfo);
@@ -572,10 +611,15 @@ namespace OsEngine.Entity
                     _trades[i].SetTradeFromString(tradesArray[i]);
                 }
             }
-            Comment = saveArray[18];
+
+            // трейды пересобраны из строки - кэши объёма и средней цены не валидны
+            _volumeExecuteChange = true;
+            _middlePriceChange = true;
+
+            Comment = UnescapeField(saveArray[18]);
             TimeDone = Convert.ToDateTime(saveArray[19], CultureInfo);
 
-            if(saveArray.Length > 21)
+            if (saveArray.Length > 21)
             {
                 Enum.TryParse(saveArray[20], true, out OrderTypeTime);
             }
@@ -585,17 +629,92 @@ namespace OsEngine.Entity
                 ServerName = saveArray[21];
             }
 
-            if(saveArray.Length >= 23)
+            if (saveArray.Length >= 23)
             {
                 string[] cancelling = saveArray[22].Split("&");
 
-                if(cancelling.Length == 3)
+                if (cancelling.Length == 3)
                 {
                     IsSendToCancel = Convert.ToBoolean(cancelling[0]);
                     CancellingTryCount = Convert.ToInt32(cancelling[1]);
-                    LastCancelTryLocalTime = Convert.ToDateTime(cancelling[2],CultureInfo.InvariantCulture);
+                    LastCancelTryLocalTime = Convert.ToDateTime(cancelling[2], CultureInfo.InvariantCulture);
                 }
             }
+
+            if (saveArray.Length > 23)
+            {
+                StopPrice = saveArray[23].ToDecimal();
+            }
+
+            if (saveArray.Length > 24
+                && string.IsNullOrEmpty(saveArray[24]) == false)
+            {
+                ParentOrderNumberMarket = saveArray[24];
+            }
+
+            if (saveArray.Length > 25
+                && string.IsNullOrEmpty(saveArray[25]) == false)
+            {
+                ChildOrderNumberMarket = saveArray[25];
+            }
+        }
+
+        /// <summary>
+        /// Broker text fields (Comment, SecurityNameCode, PortfolioNumber) are escaped reversibly.
+        /// The saved line is nested in delimiters of three levels ('@' fields, '#' and '^' in the
+        /// position line) and stored line-based, so these characters and CR/LF are escaped.
+        /// '%' escapes itself first.
+        /// </summary>
+        private static string EscapeField(string value)
+        {
+            if (value == null)
+            {
+                return "";
+            }
+
+            return value
+                .Replace("%", "%25")
+                .Replace("@", "%40")
+                .Replace("#", "%23")
+                .Replace("^", "%5E")
+                .Replace("\r", "%0D")
+                .Replace("\n", "%0A");
+        }
+
+        private static string UnescapeField(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return value;
+            }
+
+            return value
+                .Replace("%0D", "\r")
+                .Replace("%0A", "\n")
+                .Replace("%40", "@")
+                .Replace("%23", "#")
+                .Replace("%5E", "^")
+                .Replace("%25", "%");
+        }
+
+        // '%' not starting a canon escape sequence — the record of '@' in old journals
+        // written by the legacy @↔% hack (BUG-0457)
+        private static readonly Regex LegacyBarePercent =
+            new Regex("%(?!(?:25|40|23|5E|0D|0A))");
+
+        /// <summary>
+        /// Unescaping of SecurityNameCode/PortfolioNumber with back-compat for old journals: a bare
+        /// '%' that does not start an EscapeField sequence is read as '@' (legacy-hack records,
+        /// BUG-0457). A literal '%' inside an old record stays indistinguishable and reads as '@' —
+        /// same as the old loader, state is not worsened. New saves carry no bare '%'.
+        /// </summary>
+        private static string UnescapeFieldLegacy(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return value;
+            }
+            return UnescapeField(LegacyBarePercent.Replace(value, "@"));
         }
     }
 
@@ -617,7 +736,17 @@ namespace OsEngine.Entity
         /// <summary>
         /// Iceberg application. Those. An application whose volume is not fully visible in the glass.
         /// </summary>
-        Iceberg
+        Iceberg,
+
+        /// <summary>
+        /// Stop-limit order. Those. limit order placed on the server when the activation price (PriceCondition) is reached
+        /// </summary>
+        StopLimit,
+
+        /// <summary>
+        /// Stop-market order. Those. market order placed on the server when the activation price (PriceCondition) is reached
+        /// </summary>
+        StopMarket
     }
 
     /// <summary>

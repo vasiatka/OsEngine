@@ -27,7 +27,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                 return;
             }
 
-            if(CountOrders < 20)
+            if (CountOrders < 20)
             {
                 this.SetNewError("Error 1. Iteration Count < 20.");
                 TestEnded();
@@ -36,7 +36,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
             List<Security> securities = Server.Securities;
 
-            if (securities == null &&
+            if (securities == null ||
                 securities.Count == 0)
             {
                 SetNewError("Error 2. No securities found");
@@ -107,13 +107,13 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
             // ордер на покупку
 
-            decimal price = Math.Round((md.Asks[0].Price.ToDecimal() + md.Bids[0].Price.ToDecimal()) / 2, mySecurity.Decimals);
+            decimal price = AlignPriceToStep((md.Asks[0].Price.ToDecimal() + md.Bids[0].Price.ToDecimal()) / 2, mySecurity);
 
-            for (int i = 0;i < CountOrders; i ++)
+            for (int i = 0; i < CountOrders; i++)
             {
                 Order order = SendBuyOrder(mySecurity, price);
 
-                if(order != null)
+                if (order != null)
                 {
                     CancelOrder(order);
                 }
@@ -161,7 +161,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
         {
             decimal volume = VolumeToTrade;
 
-            price = Math.Round(price - price * 0.01m, mySec.Decimals); // проскальзывание 1%
+            price = AlignPriceToStep(price - price * 0.01m, mySec); // проскальзывание 1%
 
             Order newOrder = CreateOrder(mySec, price, volume, Side.Buy);
             _WaitSide = Side.Buy;
@@ -202,7 +202,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
         {
             decimal volume = VolumeToTrade;
 
-            price = Math.Round(price + price * 0.01m, mySec.Decimals); // проскальзывание 1%
+            price = AlignPriceToStep(price + price * 0.01m, mySec); // проскальзывание 1%
 
             Order newOrder = CreateOrder(mySec, price, volume, Side.Sell);
             _WaitSide = Side.Sell;
@@ -278,6 +278,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
             order.Volume = volume;
             order.Side = side;
             order.NumberUser = NumberGen.GetNumberOrder(StartProgram.IsOsTrader);
+            _myOrderNumbers.Add(order.NumberUser);
             order.ServerType = Server.ServerType;
             order.TypeOrder = OrderPriceType.Limit;
             order.SecurityNameCode = sec.Name;
@@ -288,6 +289,8 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
         }
 
         List<Order> _ordersActive = new List<Order>();
+
+        private HashSet<int> _myOrderNumbers = new HashSet<int>();
         List<Order> _ordersCancel = new List<Order>();
         List<Order> _ordersDone = new List<Order>();
         List<Order> _ordersFail = new List<Order>();
@@ -306,6 +309,11 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
         private void Server_NewOrderIncomeEvent(Order order)
         {
+            if (_myOrderNumbers.Contains(order.NumberUser) == false)
+            {
+                return;
+            }
+
             if (order.State == OrderStateType.None)
             {
                 this.SetNewError("Error 11. Order with state NONE");

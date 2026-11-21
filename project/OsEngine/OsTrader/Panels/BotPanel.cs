@@ -6,6 +6,7 @@
 using OsEngine.Alerts;
 using OsEngine.Attributes;
 using OsEngine.Entity;
+using OsEngine.Journal;
 using OsEngine.Journal.Internal;
 using OsEngine.Language;
 using OsEngine.Logging;
@@ -13,7 +14,6 @@ using OsEngine.Market;
 using OsEngine.Market.Servers;
 using OsEngine.Market.Servers.Tester;
 using OsEngine.OsTrader.Panels.Tab;
-using OsEngine.OsTrader.Panels.Tab.SyntheticBondTab;
 using OsEngine.OsTrader.RiskManager;
 using System;
 using System.Collections.Generic;
@@ -70,12 +70,7 @@ namespace OsEngine.OsTrader.Panels
         /// <summary>
         /// source for options trading
         /// </summary>
-        Options,
-
-        /// <summary>
-        /// source for trading synthetic bonds
-        /// </summary>
-        SyntheticBond
+        Options
     }
 
     /// <summary>
@@ -134,15 +129,16 @@ namespace OsEngine.OsTrader.Panels
         {
             try
             {
-                if (_botTabs == null
-                || _botTabs.Count == 0)
+                List<IIBotTab> tabsSnapshot = GetBotTabsSnapshot();
+
+                if (tabsSnapshot.Count == 0)
                 {
                     return;
                 }
 
-                for (int i = 0; i < _botTabs.Count; i++)
+                for (int i = 0; i < tabsSnapshot.Count; i++)
                 {
-                    _botTabs[i].Clear();
+                    tabsSnapshot[i].Clear();
                 }
 
                 Log?.Clear();
@@ -166,6 +162,15 @@ namespace OsEngine.OsTrader.Panels
                     // ignore
                 }
 
+                try
+                {
+                    _journalUi?.Close();
+                }
+                catch
+                {
+                    // ignore
+                }
+
                 OsTraderMaster.CriticalErrorEvent -= OsTraderMaster_CriticalErrorEvent;
 
                 if (_riskManager != null)
@@ -175,21 +180,30 @@ namespace OsEngine.OsTrader.Panels
                     _riskManager = null;
                 }
 
-                if (_botTabs != null)
-                {
-                    for (int i = 0; i < _botTabs.Count; i++)
-                    {
-                        _botTabs[i].StopPaint();
-                        _botTabs[i].Clear();
-                        _botTabs[i].Delete();
-                        _botTabs[i].LogMessageEvent -= SendNewLogMessage;
+                // Snapshot first, then teardown of each tab outside the locker,
+                // then the list reset under the locker (sequential, BUG-0359)
+                List<IIBotTab> tabsSnapshot = GetBotTabsSnapshot();
 
-                        if (_botTabs[i].TabType == BotTabType.Screener)
-                        {
-                            ((BotTabScreener)_botTabs[i]).NewTabCreateEvent -= BotPanel_NewTabCreateEvent;
-                        }
+                for (int i = 0; i < tabsSnapshot.Count; i++)
+                {
+                    tabsSnapshot[i].StopPaint();
+                    tabsSnapshot[i].Clear();
+                    tabsSnapshot[i].Delete();
+                    tabsSnapshot[i].LogMessageEvent -= SendNewLogMessage;
+
+                    if (tabsSnapshot[i].TabType == BotTabType.Screener)
+                    {
+                        ((BotTabScreener)tabsSnapshot[i]).NewTabCreateEvent -= BotPanel_NewTabCreateEvent;
                     }
-                    _botTabs.Clear();
+                }
+
+                lock (_botTabsLocker)
+                {
+                    if (_botTabs != null)
+                    {
+                        _botTabs.Clear();
+                    }
+
                     _botTabs = null;
                 }
 
@@ -280,6 +294,16 @@ namespace OsEngine.OsTrader.Panels
         public string PublicName;
 
         /// <summary>
+        /// internal key of the base robot group
+        /// </summary>
+        public const string BaseGroupName = "Base";
+
+        /// <summary>
+        /// the group to which the robot belongs in the bots list. Base group by default
+        /// </summary>
+        public string BotGroup = BaseGroupName;
+
+        /// <summary>
         /// the program that launched the robot. Tester  Robot  Optimizer
         /// </summary>
         public StartProgram StartProgram;
@@ -301,15 +325,19 @@ namespace OsEngine.OsTrader.Panels
         {
             List<Journal.Journal> journals = new List<Journal.Journal>();
 
-            for (int i = 0; _botTabs != null && i < _botTabs.Count; i++)
+            List<IIBotTab> tabsSnapshot = GetBotTabsSnapshot();
+
+            for (int i = 0; i < tabsSnapshot.Count; i++)
             {
-                if (_botTabs[i].TabType == BotTabType.Simple)
+                IIBotTab tab = tabsSnapshot[i];
+
+                if (tab.TabType == BotTabType.Simple)
                 {
-                    journals.Add(((BotTabSimple)_botTabs[i]).GetJournal());
+                    journals.Add(((BotTabSimple)tab).GetJournal());
                 }
-                else if (_botTabs[i].TabType == BotTabType.Screener)
+                else if (tab.TabType == BotTabType.Screener)
                 {
-                    List<Journal.Journal> journalsOnTab = ((BotTabScreener)_botTabs[i]).GetJournals();
+                    List<Journal.Journal> journalsOnTab = ((BotTabScreener)tab).GetJournals();
 
                     if (journalsOnTab == null ||
                         journalsOnTab.Count == 0)
@@ -319,9 +347,9 @@ namespace OsEngine.OsTrader.Panels
 
                     journals.AddRange(journalsOnTab);
                 }
-                else if (_botTabs[i].TabType == BotTabType.Pair)
+                else if (tab.TabType == BotTabType.Pair)
                 {
-                    List<Journal.Journal> journalsOnTab = ((BotTabPair)_botTabs[i]).GetJournals();
+                    List<Journal.Journal> journalsOnTab = ((BotTabPair)tab).GetJournals();
 
                     if (journalsOnTab == null ||
                         journalsOnTab.Count == 0)
@@ -331,21 +359,9 @@ namespace OsEngine.OsTrader.Panels
 
                     journals.AddRange(journalsOnTab);
                 }
-                else if (_botTabs[i].TabType == BotTabType.Polygon)
+                else if (tab.TabType == BotTabType.Polygon)
                 {
-                    List<Journal.Journal> journalsOnTab = ((BotTabPolygon)_botTabs[i]).GetJournals();
-
-                    if (journalsOnTab == null ||
-                        journalsOnTab.Count == 0)
-                    {
-                        continue;
-                    }
-
-                    journals.AddRange(journalsOnTab);
-                }
-                else if (_botTabs[i].TabType == BotTabType.SyntheticBond)
-                {
-                    List<Journal.Journal> journalsOnTab = ((BotTabSyntheticBond)_botTabs[i]).GetJournals();
+                    List<Journal.Journal> journalsOnTab = ((BotTabPolygon)tab).GetJournals();
 
                     if (journalsOnTab == null ||
                         journalsOnTab.Count == 0)
@@ -367,68 +383,74 @@ namespace OsEngine.OsTrader.Panels
         {
             get
             {
-                for (int i = 0; TabsSimple != null && i < TabsSimple.Count; i++)
+                // Getters return a NEW snapshot per call: re-invoking them on Count/[i]
+                // is a refetch race, so each one is fetched once (BUG-0359)
+                List<BotTabSimple> simpleTabs = TabsSimple;
+                List<BotTabScreener> screenerTabs = TabsScreener;
+                List<BotTabIndex> indexTabs = TabsIndex;
+
+                for (int i = 0; simpleTabs != null && i < simpleTabs.Count; i++)
                 {
                     if (StartProgram == StartProgram.IsOsTrader)
                     {
-                        if (TabsSimple[i].IsConnected == false)
+                        if (simpleTabs[i].IsConnected == false)
                         {
                             return false;
                         }
                     }
                     else
                     {
-                        if (string.IsNullOrEmpty(TabsSimple[i].Connector.SecurityName) == false
-                          && TabsSimple[i].IsConnected == false)
+                        if (string.IsNullOrEmpty(simpleTabs[i].Connector.SecurityName) == false
+                          && simpleTabs[i].IsConnected == false)
                         {
                             return false;
                         }
                     }
                 }
 
-                for (int i = 0; TabsScreener != null && i < TabsScreener.Count; i++)
+                for (int i = 0; screenerTabs != null && i < screenerTabs.Count; i++)
                 {
                     if (StartProgram == StartProgram.IsOsTrader)
                     {
-                        if (TabsScreener[i].IsConnected == false)
+                        if (screenerTabs[i].IsConnected == false)
                         {
                             return false;
                         }
                     }
                     else
                     {
-                        if (TabsScreener[i].SecuritiesNames != null
-                         && TabsScreener[i].SecuritiesNames.Count > 0
-                         && TabsScreener[i].IsConnected == false)
+                        if (screenerTabs[i].SecuritiesNames != null
+                         && screenerTabs[i].SecuritiesNames.Count > 0
+                         && screenerTabs[i].IsConnected == false)
                         {
                             return false;
                         }
                     }
                 }
 
-                for (int i = 0; TabsIndex != null && i < TabsIndex.Count; i++)
+                for (int i = 0; indexTabs != null && i < indexTabs.Count; i++)
                 {
                     if (StartProgram == StartProgram.IsOsTrader)
                     {
-                        if (TabsIndex[i].IsConnected == false)
+                        if (indexTabs[i].IsConnected == false)
                         {
                             return false;
                         }
                     }
                     else
                     {
-                        if (TabsIndex[i].Tabs != null
-                        && TabsIndex[i].Tabs.Count > 0
-                        && TabsIndex[i].IsConnected == false)
+                        if (indexTabs[i].Tabs != null
+                        && indexTabs[i].Tabs.Count > 0
+                        && indexTabs[i].IsConnected == false)
                         {
                             return false;
                         }
                     }
                 }
 
-                if (TabsSimple == null
-                    && TabsIndex == null
-                    && TabsScreener == null)
+                if (simpleTabs == null
+                    && indexTabs == null
+                    && screenerTabs == null)
                 {
                     return false;
                 }
@@ -441,30 +463,33 @@ namespace OsEngine.OsTrader.Panels
         {
             try
             {
-                if (_botTabs == null
-                   || _botTabs.Count == 0)
+                List<IIBotTab> tabsSnapshot = GetBotTabsSnapshot();
+
+                if (tabsSnapshot.Count == 0)
                 {
                     return null;
                 }
 
                 List<Security> securities = new List<Security>();
 
-                for (int i = 0; i < _botTabs.Count; i++)
+                for (int i = 0; i < tabsSnapshot.Count; i++)
                 {
-                    if (_botTabs[i].TabType == BotTabType.Simple)
+                    if (tabsSnapshot[i].TabType == BotTabType.Simple)
                     {
-                        BotTabSimple tab = (BotTabSimple)_botTabs[i];
+                        BotTabSimple tab = (BotTabSimple)tabsSnapshot[i];
 
                         if (tab.Security != null)
                         {
                             securities.Add(tab.Security);
                         }
                     }
-                    if (_botTabs[i].TabType == BotTabType.Screener)
+                    if (tabsSnapshot[i].TabType == BotTabType.Screener)
                     {
-                        BotTabScreener tab = (BotTabScreener)_botTabs[i];
+                        BotTabScreener tab = (BotTabScreener)tabsSnapshot[i];
 
-                        List<BotTabSimple> tabs = tab.Tabs;
+                        // .Tabs is mutated under _tabsLocker: snapshot via CopyTabsInto (2100 contract)
+                        List<BotTabSimple> tabs = new List<BotTabSimple>();
+                        tab.CopyTabsInto(tabs);
 
                         for (int j = 0; j < tabs.Count; j++)
                         {
@@ -518,9 +543,11 @@ namespace OsEngine.OsTrader.Panels
         {
             Portfolio portfolio = null;
 
-            for (int i = 0; _botTabs != null && i < _botTabs.Count; i++)
+            List<IIBotTab> tabsSnapshot = GetBotTabsSnapshot();
+
+            for (int i = 0; i < tabsSnapshot.Count; i++)
             {
-                IIBotTab tab = _botTabs[i];
+                IIBotTab tab = tabsSnapshot[i];
 
                 if (tab.TabType == BotTabType.Simple)
                 {
@@ -536,11 +563,15 @@ namespace OsEngine.OsTrader.Panels
                 {
                     BotTabScreener screener = (BotTabScreener)tab;
 
-                    for (int j = 0; j < screener.Tabs.Count; j++)
+                    // .Tabs is mutated under _tabsLocker: snapshot via CopyTabsInto (2100 contract)
+                    List<BotTabSimple> screenerTabs = new List<BotTabSimple>();
+                    screener.CopyTabsInto(screenerTabs);
+
+                    for (int j = 0; j < screenerTabs.Count; j++)
                     {
-                        if (screener.Tabs[j].Portfolio != null)
+                        if (screenerTabs[j].Portfolio != null)
                         {
-                            portfolio = screener.Tabs[j].Portfolio;
+                            portfolio = screenerTabs[j].Portfolio;
                             break;
                         }
                     }
@@ -683,9 +714,11 @@ namespace OsEngine.OsTrader.Panels
                     return;
                 }
 
-                for (int i = 0; _botTabs != null && i < _botTabs.Count; i++)
+                List<IIBotTab> tabsSnapshot = GetBotTabsSnapshot();
+
+                for (int i = 0; i < tabsSnapshot.Count; i++)
                 {
-                    _botTabs[i].StopPaint();
+                    tabsSnapshot[i].StopPaint();
                 }
 
                 try
@@ -759,9 +792,42 @@ namespace OsEngine.OsTrader.Panels
         {
             if (_chartUi == null)
             {
+                // 1 отключаем тестирование на время, если это тестер
+
+                bool testerIsStoped = false;
+
+                if (StartProgram == StartProgram.IsTester)
+                {
+                    List<IServer> servers = ServerMaster.GetServers();
+
+                    if (servers != null
+                        && servers.Count > 0
+                        && servers[0].ServerType == ServerType.Tester)
+                    {
+                        TesterServer tester = (TesterServer)servers[0];
+
+                        if(tester.TesterRegime == TesterRegime.Play)
+                        {
+                            tester.TesterRegime = TesterRegime.Pause;
+                            testerIsStoped = true;
+                        }
+                    }
+                }
+
+                // 2 создаём и открываем чарт
+
                 _chartUi = new BotPanelChartUi(this);
                 _chartUi.Show();
                 _chartUi.Closed += _chartUi_Closed;
+
+                // 3 запускаем тестер дальше
+
+                if (StartProgram == StartProgram.IsTester
+                    && testerIsStoped == true)
+                {
+                    Thread starter = new Thread(PlayTesterAfterPause);
+                    starter.Start();
+                }
             }
             else
             {
@@ -774,6 +840,29 @@ namespace OsEngine.OsTrader.Panels
             }
 
             return _chartUi;
+        }
+
+        private void PlayTesterAfterPause()
+        {
+            try
+            {
+                Thread.Sleep(1000);
+
+                List<IServer> servers = ServerMaster.GetServers();
+
+                if (servers != null
+                    && servers.Count > 0
+                    && servers[0].ServerType == ServerType.Tester)
+                {
+                    TesterServer tester = (TesterServer)servers[0];
+                    tester.TesterRegime = TesterRegime.Play;
+                }
+
+            }
+            catch (Exception ex)
+            {
+                SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+            }
         }
 
         public BotPanelChartUi _chartUi;
@@ -810,6 +899,85 @@ namespace OsEngine.OsTrader.Panels
         }
 
         public event Action<string> ChartClosedEvent;
+
+        #endregion
+
+        #region Journal by this bot
+
+        private JournalUi2 _journalUi;
+
+        public void ShowJournalDialog()
+        {
+            try
+            {
+                if (_journalUi != null)
+                {
+                    if (_journalUi.WindowState == System.Windows.WindowState.Minimized)
+                    {
+                        _journalUi.WindowState = System.Windows.WindowState.Normal;
+                    }
+
+                    _journalUi.Activate();
+                    return;
+                }
+
+                List<BotPanelJournal> panelsJournal = new List<BotPanelJournal>();
+
+                List<Journal.Journal> journals = this.GetJournals();
+
+                BotPanelJournal botPanel = new BotPanelJournal();
+                botPanel.BotName = this.NameStrategyUniq;
+                botPanel.BotClass = this.GetNameStrategyType();
+
+                botPanel._Tabs = new List<BotTabJournal>();
+
+                for (int i2 = 0; journals != null && i2 < journals.Count; i2++)
+                {
+                    BotTabJournal botTabJournal = new BotTabJournal();
+                    botTabJournal.TabNum = i2;
+                    botTabJournal.Journal = journals[i2];
+                    botPanel._Tabs.Add(botTabJournal);
+                }
+
+                panelsJournal.Add(botPanel);
+
+                _journalUi = new JournalUi2(panelsJournal, this.StartProgram);
+                _journalUi.Closed += _journalUi_Closed;
+                _journalUi.LogMessageEvent += _journalUi_LogMessageEvent;
+                _journalUi.Show();
+            }
+            catch (Exception error)
+            {
+                SendNewLogMessage(error.ToString(), LogMessageType.Error);
+            }
+        }
+
+        private void _journalUi_LogMessageEvent(string message, LogMessageType type)
+        {
+            try
+            {
+                SendNewLogMessage(message, type);
+            }
+            catch (Exception ex)
+            {
+                SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+            }
+        }
+
+        private void _journalUi_Closed(object sender, EventArgs e)
+        {
+            try
+            {
+                _journalUi.Closed -= _journalUi_Closed;
+                _journalUi.LogMessageEvent -= _journalUi_LogMessageEvent;
+                _journalUi.IsErase = true;
+                _journalUi = null;
+            }
+            catch (Exception ex)
+            {
+                SendNewLogMessage(ex.ToString(), LogMessageType.Error);
+            }
+        }
 
         #endregion
 
@@ -1666,9 +1834,12 @@ position => position.State != PositionStateType.OpeningFail
                 string message = OsLocalization.Trader.Label54 + NameStrategyUniq;
                 ShowMessageInNewThread(message);
 
-                for (int i = 0; i < _botTabs.Count; i++)
+                // snapshot is empty when tabs are gone: quiet no-op instead of NRE into the log
+                List<IIBotTab> tabsSnapshot = GetBotTabsSnapshot();
+
+                for (int i = 0; i < tabsSnapshot.Count; i++)
                 {
-                    if (_botTabs[i] is BotTabSimple bot)
+                    if (tabsSnapshot[i] is BotTabSimple bot)
                     {
                         bot.CloseAllAtMarket();
                         bot.EventsIsOn = false;
@@ -1696,9 +1867,12 @@ position => position.State != PositionStateType.OpeningFail
         {
             try
             {
-                for (int i = 0; i < _botTabs.Count; i++)
+                // empty snapshot after Delete(): quiet no-op instead of NRE into the log
+                List<IIBotTab> tabsSnapshot = GetBotTabsSnapshot();
+
+                for (int i = 0; i < tabsSnapshot.Count; i++)
                 {
-                    if (_botTabs[i] is BotTabSimple bot)
+                    if (tabsSnapshot[i] is BotTabSimple bot)
                     {
                         bot.CloseAllAtMarket();
                     }
@@ -1741,6 +1915,34 @@ position => position.State != PositionStateType.OpeningFail
         /// tabbed tabs
         /// </summary>
         private List<IIBotTab> _botTabs;
+
+        /// <summary>
+        /// Blocker of multi-threaded access to _botTabs: UI mutates it (TabCreate/TabDelete),
+        /// type-filtered getters are read from screener worker and MCP paths
+        /// </summary>
+        private readonly object _botTabsLocker = new object();
+
+        /// <summary>
+        /// Atomic snapshot of _botTabs for readers outside the locker: a lockless Count/[i]
+        /// walk tears against the cross-thread mutator (MCP calls TabCreate/TabDelete under
+        /// _botTabsLocker; the screener NewTabCreateEvent chain is a reader, not a mutator).
+        /// Not a full mutator barrier: GetTabs() hands out the live list and BotTabOptions :1389 /
+        /// BotTabScreener :1777 Clear/Add through it unlocked (synthetic CandleEngine bots,
+        /// confined to the UI thread today) - a hole in the invariant. Snapshot writes are
+        /// silent no-ops (bot.TabsSimple[0] = tab at :1391/:1779).
+        /// </summary>
+        private List<IIBotTab> GetBotTabsSnapshot()
+        {
+            lock (_botTabsLocker)
+            {
+                if (_botTabs == null)
+                {
+                    return new List<IIBotTab>();
+                }
+
+                return new List<IIBotTab>(_botTabs);
+            }
+        }
 
         /// <summary>
         /// get all tabs
@@ -1794,9 +1996,12 @@ position => position.State != PositionStateType.OpeningFail
         {
             get
             {
-                return _botTabs != null
-                    ? _botTabs.OfType<BotTabSimple>().ToList()
-                    : new();
+                lock (_botTabsLocker)
+                {
+                    return _botTabs != null
+                        ? _botTabs.OfType<BotTabSimple>().ToList()
+                        : new();
+                }
             }
         }
 
@@ -1807,9 +2012,12 @@ position => position.State != PositionStateType.OpeningFail
         {
             get
             {
-                return _botTabs != null
-                    ? _botTabs.OfType<BotTabIndex>().ToList()
-                    : new();
+                lock (_botTabsLocker)
+                {
+                    return _botTabs != null
+                        ? _botTabs.OfType<BotTabIndex>().ToList()
+                        : new();
+                }
             }
         }
 
@@ -1820,9 +2028,12 @@ position => position.State != PositionStateType.OpeningFail
         {
             get
             {
-                return _botTabs != null
-                    ? _botTabs.OfType<BotTabCluster>().ToList()
-                    : new();
+                lock (_botTabsLocker)
+                {
+                    return _botTabs != null
+                        ? _botTabs.OfType<BotTabCluster>().ToList()
+                        : new();
+                }
             }
         }
 
@@ -1833,9 +2044,12 @@ position => position.State != PositionStateType.OpeningFail
         {
             get
             {
-                return _botTabs != null
-                    ? _botTabs.OfType<BotTabPair>().ToList()
-                    : new();
+                lock (_botTabsLocker)
+                {
+                    return _botTabs != null
+                        ? _botTabs.OfType<BotTabPair>().ToList()
+                        : new();
+                }
             }
         }
 
@@ -1846,9 +2060,12 @@ position => position.State != PositionStateType.OpeningFail
         {
             get
             {
-                return _botTabs != null
-                    ? _botTabs.OfType<BotTabScreener>().ToList()
-                    : new();
+                lock (_botTabsLocker)
+                {
+                    return _botTabs != null
+                        ? _botTabs.OfType<BotTabScreener>().ToList()
+                        : new();
+                }
             }
         }
 
@@ -1859,9 +2076,12 @@ position => position.State != PositionStateType.OpeningFail
         {
             get
             {
-                return _botTabs != null
-                    ? _botTabs.OfType<BotTabPolygon>().ToList()
-                    : new();
+                lock (_botTabsLocker)
+                {
+                    return _botTabs != null
+                        ? _botTabs.OfType<BotTabPolygon>().ToList()
+                        : new();
+                }
             }
         }
 
@@ -1872,22 +2092,12 @@ position => position.State != PositionStateType.OpeningFail
         {
             get
             {
-                return _botTabs != null
-                    ? _botTabs.OfType<BotTabNews>().ToList()
-                    : new();
-            }
-        }
-
-        /// <summary>
-        /// synthetic bond tabs
-        /// </summary>
-        public List<BotTabSyntheticBond> TabsSyntheticBond
-        {
-            get
-            {
-                return _botTabs != null
-                    ? _botTabs.OfType<BotTabSyntheticBond>().ToList()
-                    : new List<BotTabSyntheticBond>();
+                lock (_botTabsLocker)
+                {
+                    return _botTabs != null
+                        ? _botTabs.OfType<BotTabNews>().ToList()
+                        : new();
+                }
             }
         }
 
@@ -1897,41 +2107,40 @@ position => position.State != PositionStateType.OpeningFail
             {
                 DateTime result = DateTime.MinValue;
 
-                if (TabsSimple != null
-                    && TabsSimple.Count > 0)
+                // snapshots only: this getter runs on bot/MCP threads while UI and screener
+                // workers mutate the tab lists
+                List<BotTabSimple> simpleTabs = TabsSimple;
+                for (int i = 0; i < simpleTabs.Count; i++)
                 {
-                    for (int i = 0; i < TabsSimple.Count; i++)
+                    if (simpleTabs[i].IsConnected == false)
                     {
-                        if (TabsSimple[i].IsConnected == false)
+                        continue;
+                    }
+
+                    if (simpleTabs[i].TimeServerCurrent > result)
+                    {
+                        result = simpleTabs[i].TimeServerCurrent;
+                    }
+                }
+
+                List<BotTabScreener> screenerTabs = TabsScreener;
+                for (int i = 0; i < screenerTabs.Count; i++)
+                {
+                    List<BotTabSimple> screenerTabsSnapshot = new List<BotTabSimple>();
+                    screenerTabs[i].CopyTabsInto(screenerTabsSnapshot);
+
+                    for (int j = 0; j < screenerTabsSnapshot.Count; j++)
+                    {
+                        BotTabSimple tab = screenerTabsSnapshot[j];
+
+                        if (tab.IsConnected == false)
                         {
                             continue;
                         }
 
-                        if (TabsSimple[i].TimeServerCurrent > result)
+                        if (tab.TimeServerCurrent > result)
                         {
-                            result = TabsSimple[i].TimeServerCurrent;
-                        }
-                    }
-                }
-
-                if (TabsScreener != null
-                    && TabsScreener.Count > 0)
-                {
-                    for (int i = 0; i < TabsScreener.Count; i++)
-                    {
-                        for (int j = 0; j < TabsScreener[i].Tabs.Count; j++)
-                        {
-                            BotTabSimple tab = TabsScreener[i].Tabs[j];
-
-                            if (tab.IsConnected == false)
-                            {
-                                continue;
-                            }
-
-                            if (tab.TimeServerCurrent > result)
-                            {
-                                result = tab.TimeServerCurrent;
-                            }
+                            result = tab.TimeServerCurrent;
                         }
                     }
                 }
@@ -2037,13 +2246,6 @@ position => position.State != PositionStateType.OpeningFail
                 {
                     newTab = new BotTabOptions(nameTab, StartProgram);
                 }
-                else if (tabType == BotTabType.SyntheticBond)
-                {
-                    newTab = new BotTabSyntheticBond(nameTab, StartProgram);
-
-                    ((BotTabSyntheticBond)newTab).UserSelectActionEvent += UserSetPositionAction;
-                    ((BotTabSyntheticBond)newTab).NewTabCreateEvent += (tab) => NewTabCreateEvent?.Invoke();
-                }
                 else
                 {
                     return null;
@@ -2095,12 +2297,19 @@ position => position.State != PositionStateType.OpeningFail
 
         private void ActivateTab(IIBotTab newTab)
         {
-            _botTabs.Add(newTab);
+            // Add and the resulting index must be atomic: TabNum/ChangeActiveTab below
+            // must not observe a list shrunk by a concurrent TabDelete
+            int tabIndex;
+            lock (_botTabsLocker)
+            {
+                _botTabs.Add(newTab);
+                tabIndex = _botTabs.Count - 1;
+            }
 
             newTab.LogMessageEvent += SendNewLogMessage;
-            newTab.TabNum = _botTabs.Count - 1;
+            newTab.TabNum = tabIndex;
 
-            ChangeActiveTab(_botTabs.Count - 1);
+            ChangeActiveTab(tabIndex);
             ReloadTab();
 
             NewTabCreateEvent?.Invoke();
@@ -2122,23 +2331,30 @@ position => position.State != PositionStateType.OpeningFail
         {
             number = 0;
 
-            if (_botTabs != null && _botTabs.Count != 0)
-            {
-                number = _botTabs.Count;
-            }
+            // One snapshot: Count and Find on the live list tear or silently go stale
+            // against concurrent Add/Remove (net10 List.Find: SILENT-loss, not IOE)
+            List<IIBotTab> tabsSnapshot = GetBotTabsSnapshot();
+
+            number = tabsSnapshot.Count;
 
             nameTab = $"{NameStrategyUniq}tab{number}";
 
             string name = nameTab;
 
-            if (_botTabs != null && _botTabs.Find(strategy => strategy.TabName == name) != null)
+            if (tabsSnapshot.Find(strategy => strategy.TabName == name) != null)
             {
                 return false;
             }
 
             if (_botTabs == null)
             {
-                _botTabs = new List<IIBotTab>();
+                lock (_botTabsLocker)
+                {
+                    if (_botTabs == null)
+                    {
+                        _botTabs = new List<IIBotTab>();
+                    }
+                }
             }
 
             return true;
@@ -2151,16 +2367,21 @@ position => position.State != PositionStateType.OpeningFail
         {
             try
             {
-                if (ActiveTab == null)
+                IIBotTab delTab = ActiveTab;
+
+                if (delTab == null)
                 {
                     return;
                 }
 
-                ActiveTab.Delete();
+                delTab.Delete();
 
-                _botTabs.Remove(ActiveTab);
+                lock (_botTabsLocker)
+                {
+                    _botTabs.Remove(delTab);
+                }
 
-                if (_botTabs != null && _botTabs.Count != 0)
+                if (GetBotTabsSnapshot().Count != 0)
                 {
                     ChangeActiveTab(0);
                 }
@@ -2187,15 +2408,24 @@ position => position.State != PositionStateType.OpeningFail
                     return;
                 }
 
-                if (index >= _botTabs.Count)
+                IIBotTab delTab;
+                lock (_botTabsLocker)
                 {
-                    return;
+                    if (_botTabs == null || index >= _botTabs.Count)
+                    {
+                        return;
+                    }
+
+                    delTab = _botTabs[index];
                 }
 
-                _botTabs[index].Delete();
+                delTab.Delete();
 
-                _botTabs.RemoveAt(index);
-                if (_botTabs != null && _botTabs.Count != 0)
+                lock (_botTabsLocker)
+                {
+                    _botTabs.RemoveAt(index);
+                }
+                if (GetBotTabsSnapshot().Count != 0)
                 {
                     ChangeActiveTab(0);
                 }
@@ -2233,13 +2463,14 @@ position => position.State != PositionStateType.OpeningFail
                     ActiveTab.StopPaint();
                 }
 
-                if (_botTabs == null ||
-                    _botTabs.Count <= tabNumber)
+                List<IIBotTab> tabsSnapshot = GetBotTabsSnapshot();
+
+                if (tabsSnapshot.Count <= tabNumber)
                 {
                     return;
                 }
 
-                ActiveTab = _botTabs[tabNumber];
+                ActiveTab = tabsSnapshot[tabNumber];
 
                 if (ActiveTab.TabType == BotTabType.Simple)
                 {
@@ -2293,10 +2524,6 @@ position => position.State != PositionStateType.OpeningFail
                     {
                         ((BotTabNews)ActiveTab).StartPaint(_hostChart);
                     }
-                    else if (ActiveTab.TabType == BotTabType.SyntheticBond)
-                    {
-                        ((BotTabSyntheticBond)ActiveTab).StartPaint(_hostChart, _hostOpenDeals, _hostCloseDeals);
-                    }
                 }
             }
             catch (Exception error)
@@ -2329,18 +2556,20 @@ position => position.State != PositionStateType.OpeningFail
 
                 if (_isPainting)
                 {
-                    if (_botTabs != null && _botTabs.Count != 0)
+                    List<IIBotTab> tabsSnapshot = GetBotTabsSnapshot();
+
+                    if (tabsSnapshot.Count != 0)
                     {
-                        for (int i = 0; i < _botTabs.Count; i++)
+                        for (int i = 0; i < tabsSnapshot.Count; i++)
                         {
                             _tabBotTab.Items.Add(" " + (i + 1));
 
                         }
                     }
 
-                    if (ActiveTab != null && _botTabs != null && _botTabs.Count != 0)
+                    if (ActiveTab != null && tabsSnapshot.Count != 0)
                     {
-                        int index = _botTabs.FindIndex(tab => tab.TabName == ActiveTab.TabName);
+                        int index = tabsSnapshot.FindIndex(tab => tab.TabName == ActiveTab.TabName);
 
                         if (index >= 0)
                         {
@@ -2348,7 +2577,7 @@ position => position.State != PositionStateType.OpeningFail
                         }
                     }
 
-                    if (_tabBotTab.SelectedIndex == -1 && _botTabs != null && _botTabs.Count != 0)
+                    if (_tabBotTab.SelectedIndex == -1 && tabsSnapshot.Count != 0)
                     {
                         _tabBotTab.SelectedIndex = 0;
                     }
@@ -2367,7 +2596,10 @@ position => position.State != PositionStateType.OpeningFail
         /// </summary>
         public void ClearTabs()
         {
-            _botTabs?.Clear();
+            lock (_botTabsLocker)
+            {
+                _botTabs?.Clear();
+            }
             ActiveTab = null;
             NewTabCreateEvent?.Invoke();
         }
@@ -2413,17 +2645,22 @@ position => position.State != PositionStateType.OpeningFail
             {
                 if (signal == SignalType.CloseAll)
                 {
-                    for (int i = 0; i < TabsSimple.Count; i++)
+                    // One snapshot per getter: re-fetched Count/[i] tears the loop into
+                    // the catch and aborts CloseAll halfway (BUG-0359 delta, review-20261121-018)
+                    List<BotTabSimple> simpleTabs = TabsSimple;
+                    for (int i = 0; i < simpleTabs.Count; i++)
                     {
-                        TabsSimple[i].CloseAllAtMarket();
+                        simpleTabs[i].CloseAllAtMarket();
                     }
-                    for (int i = 0; i < TabsScreener.Count; i++)
+                    List<BotTabScreener> screenerTabs = TabsScreener;
+                    for (int i = 0; i < screenerTabs.Count; i++)
                     {
-                        TabsScreener[i].CloseAllPositionAtMarket();
+                        screenerTabs[i].CloseAllPositionAtMarket();
                     }
-                    for (int i = 0; i < TabsPair.Count; i++)
+                    List<BotTabPair> pairTabs = TabsPair;
+                    for (int i = 0; i < pairTabs.Count; i++)
                     {
-                        TabsPair[i].CloseAllPositionAtMarket();
+                        pairTabs[i].CloseAllPositionAtMarket();
                     }
 
                     return;
@@ -2438,15 +2675,21 @@ position => position.State != PositionStateType.OpeningFail
 
                 BotTabSimple tabWithPosition = null;
 
-                for (int i = 0; i < TabsSimple.Count; i++)
+                // Same snapshot as the Checks below: a re-fetched [i] on the action line
+                // can hand out a different tab and misroute the command (BUG-0359 delta)
+                List<BotTabSimple> simpleTabs2 = TabsSimple;
+
+                for (int i = 0; i < simpleTabs2.Count; i++)
                 {
-                    List<Position> posOnThisTab = TabsSimple[i].PositionsAll;
+                    BotTabSimple tab = simpleTabs2[i];
+
+                    List<Position> posOnThisTab = tab.PositionsAll;
 
                     for (int i2 = 0; i2 < posOnThisTab.Count; i2++)
                     {
                         if (posOnThisTab[i2].Number == position.Number)
                         {
-                            tabWithPosition = TabsSimple[i];
+                            tabWithPosition = tab;
                         }
                     }
 
@@ -2458,9 +2701,11 @@ position => position.State != PositionStateType.OpeningFail
 
                 if (tabWithPosition == null)
                 {
-                    for (int i = 0; i < TabsScreener.Count; i++)
+                    List<BotTabScreener> screenerTabs2 = TabsScreener;
+
+                    for (int i = 0; i < screenerTabs2.Count; i++)
                     {
-                        tabWithPosition = TabsScreener[i].GetTabWithThisPosition(position.Number);
+                        tabWithPosition = screenerTabs2[i].GetTabWithThisPosition(position.Number);
 
                         if (tabWithPosition != null)
                         {
@@ -2471,9 +2716,11 @@ position => position.State != PositionStateType.OpeningFail
 
                 if (tabWithPosition == null)
                 {
-                    for (int i = 0; i < TabsPair.Count; i++)
+                    List<BotTabPair> pairTabs2 = TabsPair;
+
+                    for (int i = 0; i < pairTabs2.Count; i++)
                     {
-                        tabWithPosition = TabsPair[i].GetTabWithThisPosition(position.Number);
+                        tabWithPosition = pairTabs2[i].GetTabWithThisPosition(position.Number);
 
                         if (tabWithPosition != null)
                         {
@@ -2521,19 +2768,22 @@ position => position.State != PositionStateType.OpeningFail
         {
             get
             {
-                if (_botTabs == null
-                    || _botTabs.Count == 0)
+                List<IIBotTab> tabsSnapshot = GetBotTabsSnapshot();
+
+                if (tabsSnapshot.Count == 0)
                 {
                     return false;
                 }
 
-                return _botTabs[0].EventsIsOn;
+                return tabsSnapshot[0].EventsIsOn;
             }
             set
             {
-                for (int i = 0; _botTabs != null && i < _botTabs.Count; i++)
+                List<IIBotTab> tabsSnapshot = GetBotTabsSnapshot();
+
+                for (int i = 0; i < tabsSnapshot.Count; i++)
                 {
-                    _botTabs[i].EventsIsOn = value;
+                    tabsSnapshot[i].EventsIsOn = value;
                 }
             }
         }
@@ -2545,16 +2795,18 @@ position => position.State != PositionStateType.OpeningFail
         {
             get
             {
-                for (int i = 0; _botTabs != null && i < _botTabs.Count; i++)
+                List<IIBotTab> tabsSnapshot = GetBotTabsSnapshot();
+
+                for (int i = 0; i < tabsSnapshot.Count; i++)
                 {
 
-                    if (_botTabs[i].TabType == BotTabType.Index
-                        || _botTabs[i].TabType == BotTabType.Cluster)
+                    if (tabsSnapshot[i].TabType == BotTabType.Index
+                        || tabsSnapshot[i].TabType == BotTabType.Cluster)
                     {
                         continue;
                     }
 
-                    return _botTabs[i].EmulatorIsOn;
+                    return tabsSnapshot[i].EmulatorIsOn;
                 }
 
                 return false;
@@ -2566,9 +2818,11 @@ position => position.State != PositionStateType.OpeningFail
                     return;
                 }
 
-                for (int i = 0; _botTabs != null && i < _botTabs.Count; i++)
+                List<IIBotTab> tabsSnapshot = GetBotTabsSnapshot();
+
+                for (int i = 0; i < tabsSnapshot.Count; i++)
                 {
-                    _botTabs[i].EmulatorIsOn = value;
+                    tabsSnapshot[i].EmulatorIsOn = value;
                 }
             }
         }
@@ -2592,7 +2846,7 @@ position => position.State != PositionStateType.OpeningFail
             }
             else if (type == LogMessageType.Error)
             {
-                MessageBox.Show(message);
+                ServerMaster.SendNewLogMessage(message, LogMessageType.Error);
             }
         }
 
@@ -2670,7 +2924,7 @@ position => position.State != PositionStateType.OpeningFail
             }
             else if (type == LogMessageType.Error)
             {
-                MessageBox.Show(message);
+                ServerMaster.SendNewLogMessage(message, LogMessageType.Error);
             }
         }
 

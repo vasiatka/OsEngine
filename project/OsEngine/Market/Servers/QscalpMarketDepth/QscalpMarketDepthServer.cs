@@ -63,7 +63,12 @@ namespace OsEngine.Market.Servers.QscalpMarketDepth
             }
             else
             {
-                SendLogMessage($"Connect server error: {response.StatusCode}", LogMessageType.Error);
+                // RestSharp.Execute не бросает сетевые сбои, а кладёт их в ErrorMessage/ErrorException — иначе в логе только «Connect server error: 0»
+                string err = response.ErrorException == null
+                    ? response.ErrorMessage
+                    : response.ErrorException.GetType().Name + ": " + response.ErrorException.Message;
+
+                SendLogMessage($"Connect server error: {response.StatusCode}. Error: {err}", LogMessageType.Error);
             }
         }
 
@@ -366,17 +371,64 @@ namespace OsEngine.Market.Servers.QscalpMarketDepth
 
                     string secOnDate = GetStringRequest(_mainFtpUrl + dayStr + "/");
 
-                    if (secOnDate != null)
+                    if (secOnDate == null)
                     {
-                        string link = GetLinkQshFile(security.Name, secOnDate);
+                        continue;
+                    }
 
-                        if (link != null)
+                    string quotesFilePath = null;
+                    string quotesLink = GetLinkQshFile(security.Name, secOnDate, "Quotes");
+
+                    if (quotesLink != null)
+                    {
+                        quotesFilePath = DownloadQshFile(_mainFtpUrl + dayStr + "/" + quotesLink);
+                    }
+
+                    string dealsFilePath = null;
+                    string dealsLink = GetLinkQshFile(security.Name, secOnDate, "Deals");
+
+                    if (dealsLink != null)
+                    {
+                        dealsFilePath = DownloadQshFile(_mainFtpUrl + dayStr + "/" + dealsLink);
+                    }
+
+                    if (quotesFilePath != null && dealsFilePath != null)
+                    {
+                        string mergedFilePath = Path.Combine(_tempDirectory, security.Name + "." + dayStr + ".Both.qsh");
+
+                        try
                         {
-                            string qshFilePath = DownloadQshFile(_mainFtpUrl + dayStr + "/" + link);
+                            QshMerger.Merge(quotesFilePath, dealsFilePath, mergedFilePath);
 
-                            if (qshFilePath != null)
-                                qshFilesPaths.Add(qshFilePath);
+                            qshFilesPaths.Add(mergedFilePath);
+
+                            File.Delete(quotesFilePath);
+                            File.Delete(dealsFilePath);
                         }
+                        catch (Exception mergeError)
+                        {
+                            SendLogMessage($"QSH merge error ({dayStr}): {mergeError.Message}", LogMessageType.Error);
+
+                            qshFilesPaths.Add(quotesFilePath);
+
+                            if (File.Exists(dealsFilePath))
+                            {
+                                File.Delete(dealsFilePath);
+                            }
+
+                            if (File.Exists(mergedFilePath))
+                            {
+                                File.Delete(mergedFilePath);
+                            }
+                        }
+                    }
+                    else if (quotesFilePath != null)
+                    {
+                        qshFilesPaths.Add(quotesFilePath);
+                    }
+                    else if (dealsFilePath != null)
+                    {
+                        qshFilesPaths.Add(dealsFilePath);
                     }
                 }
 
@@ -402,7 +454,7 @@ namespace OsEngine.Market.Servers.QscalpMarketDepth
             return dates;
         }
 
-        private static string GetLinkQshFile(string instrumentName, string htmlContent)
+        private static string GetLinkQshFile(string instrumentName, string htmlContent, string streamType)
         {
             if (htmlContent.IndexOf(instrumentName, StringComparison.Ordinal) == -1)
             {
@@ -411,14 +463,15 @@ namespace OsEngine.Market.Servers.QscalpMarketDepth
 
             string[] parts = htmlContent.Split(new string[] { "<A HREF=" }, StringSplitOptions.RemoveEmptyEntries);
 
-            string quotesPattern = instrumentName + ".20";
+            string instrumentPattern = instrumentName + ".20";
+            string fileSuffix = "." + streamType + ".qsh";
 
             for (int i = 0; i < parts.Length; i++)
             {
                 string part = parts[i];
 
-                if (part.IndexOf(quotesPattern, StringComparison.Ordinal) != -1 &&
-                    part.Contains("Quotes.qsh"))
+                if (part.IndexOf(instrumentPattern, StringComparison.Ordinal) != -1 &&
+                    part.Contains(fileSuffix))
                 {
                     int startQuote = part.IndexOf('>');
                     int endQuote = part.IndexOf("</A>", startQuote);
@@ -460,7 +513,11 @@ namespace OsEngine.Market.Servers.QscalpMarketDepth
                 }
                 else
                 {
-                    SendLogMessage($"Error response: {response.StatusCode}-{response.Content}", LogMessageType.Error);
+                    string err = response.ErrorException == null
+                        ? response.ErrorMessage
+                        : response.ErrorException.GetType().Name + ": " + response.ErrorException.Message;
+
+                    SendLogMessage($"Error response: {response.StatusCode}-{response.Content}. Error: {err}. Url: {url}", LogMessageType.Error);
                     return null;
                 }
             }

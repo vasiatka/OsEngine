@@ -74,6 +74,21 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
             TestEnded();
         }
 
+        private const int DataTimeoutMs = 30000;
+
+        private static void WaitPortfolioAndSecurities(AServer myServer, int timeoutMs)
+        {
+            int waited = 0;
+            while (waited < timeoutMs &&
+                (myServer.Portfolios == null ||
+                 myServer.Portfolios.Count == 0 ||
+                 myServer.Securities.Count == 0))
+            {
+                Thread.Sleep(250);
+                waited += 250;
+            }
+        }
+
         private BotPanel _botToShowDialog;
 
         public void ShowDialog()
@@ -97,7 +112,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
         private void Test()
         {
-            Thread.Sleep(10000);
+            WaitPortfolioAndSecurities(_myServer, DataTimeoutMs);
 
             // 1 проверяем тайм-фрейм на доступность 
 
@@ -318,19 +333,16 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                 if (_awaitableSecurities[i].CandlesCount == 0)
                 {
                     SetNewError("Error 28. No candles");
-                    return;
                 }
 
                 if (_awaitableSecurities[i].MarketDepthsIncomeCount == 0)
                 {
                     SetNewError("Error 29. No marketDepths");
-                    return;
                 }
 
                 if (_awaitableSecurities[i].TradesIncomeCount == 0)
                 {
                     SetNewError("Error 30. No trades");
-                    return;
                 }
 
                 this.SetNewServiceInfo(_awaitableSecurities[i].GetReportString());
@@ -570,12 +582,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                 return;
             }
 
-            if (md.Bids.Count > 25 ||
-                md.Asks.Count > 25)
-            {
-                SetNewError("MD Error 40. Count in bids or asks more 25 lines");
-                return;
-            }
+            // проверка на 25 уровней убрана: коннекторы с полным стаканом (Finam и др.) отдают сотни уровней
 
             if (string.IsNullOrEmpty(md.SecurityNameCode))
             {

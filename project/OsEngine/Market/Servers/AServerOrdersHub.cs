@@ -47,6 +47,7 @@ namespace OsEngine.Market.Servers
 
             Thread worker = new Thread(ThreadWorkerArea);
             worker.Name = "AServerOrdersHubThreadWorker";
+            worker.IsBackground = true;
             worker.Start();
 
         }
@@ -58,6 +59,11 @@ namespace OsEngine.Market.Servers
         bool _canQueryOrderStatus;
 
         bool _fullLogIsOn = false;
+
+        // Invariant: SaveOrdersInFile is called only from the hub thread (ThreadWorkerArea). If a second caller appears, guard these two fields with a lock.
+        DateTime _lastSaveErrorMessageTime;
+
+        int _saveFailuresCount;
 
         #endregion
 
@@ -290,6 +296,12 @@ namespace OsEngine.Market.Servers
             {
                 Order order = _ordersActive[i].Order;
 
+                if (order.TypeOrder == OrderPriceType.StopLimit
+                    || order.TypeOrder == OrderPriceType.StopMarket)
+                {
+                    continue;
+                }
+
                 if(order.TimeCreate != DateTime.MinValue 
                     && order.TimeCreate.AddDays(1) < DateTime.Now)
                 {
@@ -438,6 +450,8 @@ namespace OsEngine.Market.Servers
 
         private void LoadOrdersFromFile()
         {
+            string dbPath = "";
+
             try
             {
                 string dir = Directory.GetCurrentDirectory();
@@ -449,6 +463,7 @@ namespace OsEngine.Market.Servers
                 }
 
                 dir += _server.ServerNameUnique + "_active_orders.db";
+                dbPath = dir;
 
                 using (LiteDatabase db = new LiteDatabase(dir))
                 {
@@ -460,39 +475,72 @@ namespace OsEngine.Market.Servers
                     {
                         OrderToSave curOrdInBd = col[i];
 
-                        string orderInString = curOrdInBd.SaveString;
-
-                        if (string.IsNullOrEmpty(orderInString) == false)
+                        // one damaged record must not drop the rest of the journal
+                        try
                         {
-                            Order newOrder = new Order();
-                            newOrder.SetOrderFromString(orderInString);
+                            string orderInString = curOrdInBd.SaveString;
 
-                            if (newOrder.State == OrderStateType.Fail
-                                || newOrder.State == OrderStateType.Cancel
-                                || newOrder.State == OrderStateType.Done)
+                            if (string.IsNullOrEmpty(orderInString) == false)
                             {
+                                Order newOrder = new Order();
+                                newOrder.SetOrderFromString(orderInString);
+
+                                if (newOrder.State == OrderStateType.Fail
+                                    || newOrder.State == OrderStateType.Cancel
+                                    || newOrder.State == OrderStateType.Done
+                                    || newOrder.State == OrderStateType.LostAfterActive)
+                                {
+                                    if (_fullLogIsOn)
+                                    {
+                                        SendLogMessage("Bad State order LOAD. Ignore. NumUser: " + newOrder.NumberUser
+                                            + " NumMarket: " + newOrder.NumberMarket
+                                            + " Status: " + newOrder.State, LogMessageType.System);
+                                    }
+                                    continue;
+                                }
+                                OrderToWatch orderToWatch = new OrderToWatch();
+                                orderToWatch.Order = newOrder;
+
+                                _ordersActive.Add(orderToWatch);
+
                                 if (_fullLogIsOn)
                                 {
-                                    SendLogMessage("Bad State order LOAD. Ignore. NumUser: " + newOrder.NumberUser
+                                    SendLogMessage("New alive order LOAD. NumUser: " + newOrder.NumberUser
                                         + " NumMarket: " + newOrder.NumberMarket
                                         + " Status: " + newOrder.State, LogMessageType.System);
                                 }
-                                continue;
                             }
-                            OrderToWatch orderToWatch = new OrderToWatch();
-                            orderToWatch.Order = newOrder;
-
-                            _ordersActive.Add(orderToWatch);
-
-                            if (_fullLogIsOn)
+                        }
+                        catch (Exception e)
+                        {
+                            string badData = "";
+                            int badNumUser = 0;
+                            if (curOrdInBd != null)
                             {
-                                SendLogMessage("New alive order LOAD. NumUser: " + newOrder.NumberUser
-                                    + " NumMarket: " + newOrder.NumberMarket
-                                    + " Status: " + newOrder.State, LogMessageType.System);
+                                badNumUser = curOrdInBd.NumberUser;
+                                badData = curOrdInBd.SaveString;
                             }
+                            if (badData == null)
+                            {
+                                badData = "";
+                            }
+                            else if (badData.Length > 200)
+                            {
+                                badData = badData.Substring(0, 200);
+                            }
+
+                            SendLogMessage("Bad order record in journal. Skip. Index: " + i
+                                + " NumUser: " + badNumUser
+                                + " Data: " + badData
+                                + " " + e.ToString(), LogMessageType.Error);
                         }
                     }
                 }
+            }
+            catch (LiteDB.LiteException liteEx)
+            {
+                SendLogMessage("Active orders DB corrupted. Recreating empty. " + liteEx.Message, LogMessageType.Error);
+                RecoverCorruptedOrdersDb(dbPath);
             }
             catch (Exception e)
             {
@@ -502,6 +550,8 @@ namespace OsEngine.Market.Servers
 
         private void SaveOrdersInFile()
         {
+            string dbPath = "";
+
             try
             {
                 string dir = Directory.GetCurrentDirectory();
@@ -513,6 +563,7 @@ namespace OsEngine.Market.Servers
                 }
 
                 dir += _server.ServerNameUnique + "_active_orders.db";
+                dbPath = dir;
 
                 using (LiteDatabase db = new LiteDatabase(dir))
                 {
@@ -610,10 +661,74 @@ namespace OsEngine.Market.Servers
 
                     db.Commit();
                 }
+
+                if (_saveFailuresCount > 0)
+                {
+                    SendLogMessage("SaveOrdersInFile restored. Saved after " + _saveFailuresCount + " failures", LogMessageType.System);
+                    _saveFailuresCount = 0;
+                    _lastSaveErrorMessageTime = DateTime.MinValue;
+                }
             }
-            catch //(Exception e)
+            catch (LiteDB.LiteException liteEx)
             {
-                //SendLogMessage(e.ToString(), LogMessageType.Error);
+                // throttled: вызывается из потока хаба каждый тик
+                if (_lastSaveErrorMessageTime == DateTime.MinValue
+                    || (DateTime.Now - _lastSaveErrorMessageTime).TotalSeconds >= 60)
+                {
+                    _lastSaveErrorMessageTime = DateTime.Now;
+                    SendLogMessage("Active orders DB corrupted. Recreating empty. " + liteEx.Message, LogMessageType.Error);
+                }
+
+                RecoverCorruptedOrdersDb(dbPath);
+            }
+            catch (Exception e)
+            {
+                _saveFailuresCount++;
+
+                // throttled: the method is called from the hub thread on every tick
+                if (_lastSaveErrorMessageTime == DateTime.MinValue
+                    || (DateTime.Now - _lastSaveErrorMessageTime).TotalSeconds >= 60)
+                {
+                    _lastSaveErrorMessageTime = DateTime.Now;
+                    SendLogMessage("SaveOrdersInFile error. Active orders are not saved. " + e, LogMessageType.Error);
+                }
+            }
+        }
+
+        // при повреждении базы активных ордеров (LiteDB) — отодвигаем файлы db и WAL в сторону,
+        // при следующем обращении LiteDatabase создаст чистую пару
+        private void RecoverCorruptedOrdersDb(string dbPath)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(dbPath)
+                    || File.Exists(dbPath) == false)
+                {
+                    return;
+                }
+
+                string corruptSuffix = ".corrupt-" + DateTime.Now.ToString("yyyyMMdd-HHmmss");
+                string corruptPath = dbPath + corruptSuffix;
+
+                File.Move(dbPath, corruptPath);
+
+                SendLogMessage("Corrupted active orders DB moved to: " + corruptPath, LogMessageType.System);
+
+                string logPath = Path.Combine(Path.GetDirectoryName(dbPath),
+                    Path.GetFileNameWithoutExtension(dbPath) + "-log.db");
+
+                if (File.Exists(logPath))
+                {
+                    string corruptLogPath = logPath + corruptSuffix;
+
+                    File.Move(logPath, corruptLogPath);
+
+                    SendLogMessage("Corrupted active orders DB log moved to: " + corruptLogPath, LogMessageType.System);
+                }
+            }
+            catch (Exception e)
+            {
+                SendLogMessage(e.ToString(), LogMessageType.Error);
             }
         }
 
@@ -644,6 +759,7 @@ namespace OsEngine.Market.Servers
             if(order.CountTriesToGetOrderStatus >= 5)
             {
                 order.IsFinallyLost = true;
+                order.Order.State = OrderStateType.LostAfterActive; // BUG-0123: робот не должен оставаться с залипшей Active
 
                 if(LostOrderEvent != null)
                 {
@@ -660,7 +776,9 @@ namespace OsEngine.Market.Servers
             {
                 CheckMarketOrder(order);
             }
-            else if (order.Order.TypeOrder == OrderPriceType.Limit)
+            else if (order.Order.TypeOrder == OrderPriceType.Limit
+                || order.Order.TypeOrder == OrderPriceType.StopLimit
+                || order.Order.TypeOrder == OrderPriceType.StopMarket)
             {
                 CheckLimitOrder(order);
             }

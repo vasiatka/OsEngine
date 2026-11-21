@@ -5,7 +5,7 @@ namespace OsEngine.Market.Servers.GateIoData
     {
         public ServerType ServerType
         {
-            get { return ServerType.BybitData; }
+            get { return ServerType.GateIoData; }
         }
 
         #region DataFeedPermissions
@@ -110,6 +110,11 @@ namespace OsEngine.Market.Servers.GateIoData
         #region Trade permission
 
         public bool MarketOrdersIsSupport
+        {
+            get { return false; }
+        }
+
+        public bool StopOrdersIsSupport
         {
             get { return false; }
         }

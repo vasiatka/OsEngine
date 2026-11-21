@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Your rights to use code governed by this license https://github.com/AlexWan/OsEngine/blob/master/LICENSE
  * Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
 */
@@ -17,10 +17,50 @@ namespace OsEngine.OsOptimizer.OptEntity
     {
         public static void PaintForwards(WindowsFormsHost host, List<OptimizerFaze> fazes)
         {
+            Chart oldChart = host.Child as Chart;
             Chart chart = CreateChart();
             host.Child = chart;
 
+            if (oldChart != null)
+            {
+                try
+                {
+                    oldChart.Series.Clear();
+                    oldChart.ChartAreas.Clear();
+                    oldChart.Dispose();
+                }
+                catch (Exception error)
+                {
+                    Market.ServerMaster.SendNewLogMessage(error.ToString(), Logging.LogMessageType.Error);
+                }
+            }
+
             PaintLines(fazes, chart);
+        }
+
+        public static void Clear(WindowsFormsHost host)
+        {
+            if (host == null)
+            {
+                return;
+            }
+
+            Chart oldChart = host.Child as Chart;
+            host.Child = null;
+
+            if (oldChart != null)
+            {
+                try
+                {
+                    oldChart.Series.Clear();
+                    oldChart.ChartAreas.Clear();
+                    oldChart.Dispose();
+                }
+                catch (Exception error)
+                {
+                    Market.ServerMaster.SendNewLogMessage(error.ToString(), Logging.LogMessageType.Error);
+                }
+            }
         }
 
         private static Chart CreateChart()
@@ -68,7 +108,7 @@ namespace OsEngine.OsOptimizer.OptEntity
                 clusterSeries.YAxisType = AxisType.Primary;
                 clusterSeries.XAxisType = AxisType.Secondary;
                 clusterSeries.ChartArea = "Prime";
-                clusterSeries.ShadowOffset = 2;
+                clusterSeries.ShadowOffset = Themes.ThemeManager.GetChartCandleShadow();
                 clusterSeries.YValuesPerPoint = 2;
 
                 _chart.Series.Add(clusterSeries);
@@ -76,7 +116,7 @@ namespace OsEngine.OsOptimizer.OptEntity
             }
             catch (Exception error)
             {
-                System.Windows.MessageBox.Show(error.ToString());
+                Market.ServerMaster.SendNewLogMessage(error.ToString(), Logging.LogMessageType.Error);
             }
 
             return _chart;
@@ -149,7 +189,7 @@ namespace OsEngine.OsOptimizer.OptEntity
             }
             catch (Exception error)
             {
-                System.Windows.MessageBox.Show(error.ToString());
+                Market.ServerMaster.SendNewLogMessage(error.ToString(), Logging.LogMessageType.Error);
             }
         }
 

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Your rights to use code governed by this license https://github.com/AlexWan/OsEngine/blob/master/LICENSE
  * Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
 */
@@ -27,25 +27,33 @@ namespace OsEngine.OsData
 
         private static void AddPainterInArray(OsDataSetPainter painter)
         {
-            _painters.Add(painter);
-
-            if (_worker == null)
+            lock (_locker)
             {
-                _worker = new Thread(PainterThreadArea);
-                _worker.Start();
+                _painters.Add(painter);
+
+                if (_worker == null)
+                {
+                    _worker = new Thread(PainterThreadArea);
+                    // OsEngine lives in libraries/hosts and headless harnesses too, a foreground
+                    // while(true) worker would block process exit (convention OsDataMaster.cs:610).
+                    _worker.IsBackground = true;
+                    _worker.Start();
+                }
             }
         }
 
         private static void DeletePainterFromArray(OsDataSetPainter painter)
         {
-            for (int i = 0; i < _painters.Count; i++)
+            lock (_locker)
             {
-                if (_painters[i].UID == painter.UID)
+                for (int i = 0; i < _painters.Count; i++)
                 {
-                    _painters.RemoveAt(i);
-                    break;
+                    if (_painters[i].UID == painter.UID)
+                    {
+                        _painters.RemoveAt(i);
+                        break;
+                    }
                 }
-
             }
         }
 
@@ -57,22 +65,33 @@ namespace OsEngine.OsData
 
                 try
                 {
+                    OsDataSetPainter[] snapshot;
+
                     lock (_locker)
                     {
-                        for (int i = 0; i < _painters.Count; i++)
+                        snapshot = _painters.ToArray();
+                    }
+
+                    // TryUpdateInterface marshals synchronously to UI (Dispatcher/Control.Invoke).
+                    // Paint strictly outside _locker: under the lock a stalled UI thread would
+                    // freeze the whole paint area and deadlock the mutators above (bug-0336).
+                    for (int i = 0; i < snapshot.Length; i++)
+                    {
+                        try
                         {
-                            _painters[i].TryUpdateInterface();
+                            snapshot[i].TryUpdateInterface();
+                        }
+                        catch (Exception ex)
+                        {
+                            Market.ServerMaster.SendNewLogMessage(ex.ToString(), LogMessageType.Error);
                         }
                     }
                 }
                 catch(Exception ex)
                 {
-                    if(_painters != null &&
-                        _painters.Count > 0)
-                    {
-                        _painters[0].SendNewLogMessage(ex.ToString(),LogMessageType.Error);
-                    }
-
+                    // Static channel only: the old _painters indexing here was unsynchronised
+                    // and could throw inside catch, killing the process (bug-0336).
+                    Market.ServerMaster.SendNewLogMessage(ex.ToString(), LogMessageType.Error);
                     Thread.Sleep(5000);
                 }
             }
@@ -347,10 +366,10 @@ namespace OsEngine.OsData
 
                 if (_previousActiveRow < _dataGrid.Rows.Count)
                 {
-                    _dataGrid.Rows[_previousActiveRow].DefaultCellStyle.ForeColor = System.Drawing.Color.FromArgb(154, 156, 158);
+                    _dataGrid.Rows[_previousActiveRow].DefaultCellStyle.ForeColor = Themes.ThemeManager.GetColorWinForms("GridTextColor");
                 }
 
-                _dataGrid.Rows[rowIndex].DefaultCellStyle.ForeColor = System.Drawing.Color.FromArgb(255, 255, 255);
+                _dataGrid.Rows[rowIndex].DefaultCellStyle.ForeColor = Themes.ThemeManager.GetColorWinForms("GridSelectionForeColor");
 
                 _previousActiveRow = rowIndex;
 
@@ -828,8 +847,8 @@ namespace OsEngine.OsData
                         buttonCell.Value = "+LQDT"; break;
                 }
 
-                buttonCell.Style.ForeColor = System.Drawing.Color.FromArgb(250, 250, 250);
-                buttonCell.Style.BackColor = System.Drawing.Color.FromArgb(17, 18, 23);
+                buttonCell.Style.ForeColor = Themes.ThemeManager.GetColorWinForms("GridSelectionForeColor");
+                buttonCell.Style.BackColor = Themes.ThemeManager.GetColorWinForms("GridButtonBackColor");
 
                 rows[1].Cells.Add(buttonCell);
             }
@@ -1123,7 +1142,7 @@ colum12.HeaderText = "Delete";
 
             for (int i = 0; i < row.Cells.Count; i++)
             {
-                row.Cells[i].Style.BackColor = System.Drawing.Color.FromArgb(9, 11, 13);
+                row.Cells[i].Style.BackColor = Themes.ThemeManager.GetColorWinForms("GridRowAltColor");
             }
 
             return row;
@@ -1146,7 +1165,7 @@ colum12.HeaderText = "Delete";
             }
             else
             {
-                System.Windows.MessageBox.Show(message);
+                Market.ServerMaster.SendNewLogMessage(message, type);
             }
         }
 

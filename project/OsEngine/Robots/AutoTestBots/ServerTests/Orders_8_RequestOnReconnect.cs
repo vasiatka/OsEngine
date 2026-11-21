@@ -37,14 +37,14 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
             if (serverPermission.CanQueryOrdersAfterReconnect == false)
             {
-                SetNewServiceInfo("No permission. CanQueryOrdersAfterReconnect == false. Test over");
+                SetTestSkipped("No permission. CanQueryOrdersAfterReconnect == false. Test over");
                 TestEnded();
                 return;
             }
 
             List<Security> securities = Server.Securities;
 
-            if (securities == null &&
+            if (securities == null ||
                 securities.Count == 0)
             {
                 SetNewError("Error 2. No securities found");
@@ -115,11 +115,11 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
             // 1 выставляем ордер на покупку. Далеко от края стакана
 
-            decimal price = Math.Round((md.Asks[0].Price.ToDecimal() + md.Bids[0].Price.ToDecimal()) / 2, mySecurity.Decimals);
+            decimal price = AlignPriceToStep((md.Asks[0].Price.ToDecimal() + md.Bids[0].Price.ToDecimal()) / 2, mySecurity);
 
             Order order = SendBuyOrder(mySecurity, price);
 
-            if(order == null)
+            if (order == null)
             {
                 TestEnded();
                 return;
@@ -128,7 +128,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
             // 2 делаем реконнект
 
             Server.StopServer();
-            Thread.Sleep(10000);
+            WaitStatusChange(Server, ServerConnectStatus.Connect, StatusChangeTimeoutMs);
 
             ClearOrders(); // очищаем все массивы с входящими статусами ордеров. Пусто
 
@@ -136,11 +136,11 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
             DateTime startAwait = DateTime.Now;
 
-            while(Server.ServerStatus != ServerConnectStatus.Connect)
+            while (Server.ServerStatus != ServerConnectStatus.Connect)
             {
                 Thread.Sleep(1000);
 
-                if(startAwait.AddMinutes(5) < DateTime.Now)
+                if (startAwait.AddMinutes(5) < DateTime.Now)
                 {
                     SetNewError("Error 8. Server status did not change in 5 minutes");
                     TestEnded();
@@ -151,9 +151,9 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
             // 3 дожидаемся прихода активного ордера от сервера
             // ждём 20 секунд. Больше смысла нет
 
-            Thread.Sleep(20000);
+            WaitForActiveOrders(OrderDataTimeoutMs);
 
-            if(_ordersActive.Count == 0)
+            if (_ordersActive.Count == 0)
             {
                 SetNewError("Error 9. No active order after 20 seconds");
                 TestEnded();
@@ -162,18 +162,42 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
             // 4 записываем активные ордера какие пришли после реконнекта
 
-            for(int i = 0;i < _ordersActive.Count;i++)
+            for (int i = 0; i < _ordersActive.Count; i++)
             {
-                SetNewServiceInfo("API sent Active order. NumUser: " + _ordersActive[i].NumberUser + 
-                     " NumMarket: "  + _ordersActive[i].NumberMarket + 
+                SetNewServiceInfo("API sent Active order. NumUser: " + _ordersActive[i].NumberUser +
+                     " NumMarket: " + _ordersActive[i].NumberMarket +
                      " Security: " + _ordersActive[i].SecurityNameCode);
             }
-           
+
             // 5 отзываем ордер
 
             CancelOrder(order);
 
             TestEnded();
+        }
+
+        private const int StatusChangeTimeoutMs = 30000;
+
+        private const int OrderDataTimeoutMs = 20000;
+
+        private static void WaitStatusChange(AServer myServer, ServerConnectStatus previousStatus, int timeoutMs)
+        {
+            int waited = 0;
+            while (myServer.ServerStatus == previousStatus && waited < timeoutMs)
+            {
+                Thread.Sleep(250);
+                waited += 250;
+            }
+        }
+
+        private void WaitForActiveOrders(int timeoutMs)
+        {
+            int waited = 0;
+            while (_ordersActive.Count == 0 && waited < timeoutMs)
+            {
+                Thread.Sleep(250);
+                waited += 250;
+            }
         }
 
         MarketDepth _md;
@@ -191,7 +215,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
         {
             decimal volume = VolumeToTrade;
 
-            price = Math.Round(price - price * 0.01m, mySec.Decimals); // проскальзывание 1%
+            price = AlignPriceToStep(price - price * 0.01m, mySec); // проскальзывание 1%
 
             Order newOrder = CreateOrder(mySec, price, volume, Side.Buy);
 
@@ -266,6 +290,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
             order.Volume = volume;
             order.Side = side;
             order.NumberUser = NumberGen.GetNumberOrder(StartProgram.IsOsTrader);
+            _myOrderNumbers.Add(order.NumberUser);
             order.ServerType = Server.ServerType;
             order.TypeOrder = OrderPriceType.Limit;
             order.SecurityNameCode = sec.Name;
@@ -276,6 +301,8 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
         }
 
         List<Order> _ordersActive = new List<Order>();
+
+        private HashSet<int> _myOrderNumbers = new HashSet<int>();
         List<Order> _ordersCancel = new List<Order>();
         List<Order> _ordersDone = new List<Order>();
         List<Order> _ordersFail = new List<Order>();
@@ -294,6 +321,11 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
         private void Server_NewOrderIncomeEvent(Order order)
         {
+            if (_myOrderNumbers.Contains(order.NumberUser) == false)
+            {
+                return;
+            }
+
             if (order.State == OrderStateType.None)
             {
                 this.SetNewError("Error 12. Order with state NONE");

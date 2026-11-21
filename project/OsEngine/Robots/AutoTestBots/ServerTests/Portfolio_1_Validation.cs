@@ -23,7 +23,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
             List<Portfolio> portfolious = Server.Portfolios;
 
-            if(portfolious == null ||
+            if (portfolious == null ||
                 portfolious.Count == 0)
             {
                 SetNewError("Error 1. No Portfolio found");
@@ -31,7 +31,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                 return;
             }
 
-            for(int i = 0;i < portfolious.Count; i++)
+            for (int i = 0; i < portfolious.Count; i++)
             {
                 if (portfolious[i].Number != PortfolioName)
                 {
@@ -45,7 +45,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
             List<Security> securities = Server.Securities;
 
-            if (securities == null &&
+            if (securities == null ||
                 securities.Count == 0)
             {
                 SetNewError("Error 2. No securities found");
@@ -75,6 +75,23 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
             if (VolumeToTrade <= 0)
             {
                 SetNewError("Error 4. Volume is zero");
+                TestEnded();
+                return;
+            }
+
+            // при ненулевом остатке невалидна любая нога: SHORT не даст шорт (Error 12), LONG сломается на Error 9; до гарда нет ни подписок, ни ордеров
+
+            decimal start;
+
+            if (!TryGetCurValueBySecurity(mySecurity, out start))
+            {
+                TestEnded();
+                return;
+            }
+
+            if (start != 0)
+            {
+                SetNewError("Error 57. Start position is not flat: " + start);
                 TestEnded();
                 return;
             }
@@ -118,17 +135,17 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
             }
 
 
-            if(OpenAndCloseLongPositionLogicTest(mySecurity,md) == false)
+            if (OpenAndCloseLongPositionLogicTest(mySecurity, md) == false)
             {
                 TestEnded();
                 return;
             }
-            
-            
-            if(OpenAndCloseShortPositionLogicTest(mySecurity,md) == false)
+
+
+            if (OpenAndCloseShortPositionLogicTest(mySecurity, md) == false)
             {
-               TestEnded();
-               return;
+                TestEnded();
+                return;
             }
 
             TestEnded();
@@ -138,7 +155,12 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
         {
             // 1 берём текущее состояние портфеля
 
-            decimal currentValue = GetCurValueBySecurity(mySecurity);
+            decimal currentValue;
+
+            if (!TryGetCurValueBySecurity(mySecurity, out currentValue))
+            {
+                return false;
+            }
 
             this.SetNewServiceInfo("LONG POS. Start asset value: " + currentValue.ToString());
 
@@ -164,7 +186,12 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                     return false;
                 }
 
-                decimal value = GetCurValueBySecurity(mySecurity);
+                decimal value;
+
+                if (!TryGetCurValueBySecurity(mySecurity, out value))
+                {
+                    return false;
+                }
 
                 if (value != currentValue)
                 {
@@ -173,7 +200,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                 }
             }
 
-            if(currentValue <= 0)
+            if (currentValue <= 0)
             {
                 SetNewError("Error 9. Current volume <= 0");
                 return false;
@@ -203,7 +230,12 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                     return false;
                 }
 
-                decimal value = GetCurValueBySecurity(mySecurity);
+                decimal value;
+
+                if (!TryGetCurValueBySecurity(mySecurity, out value))
+                {
+                    return false;
+                }
 
                 if (value != currentValue)
                 {
@@ -223,14 +255,19 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
         {
             // 1 берём текущее состояние портфеля
 
-            decimal currentValue = GetCurValueBySecurity(mySecurity);
-      
+            decimal currentValue;
+
+            if (!TryGetCurValueBySecurity(mySecurity, out currentValue))
+            {
+                return false;
+            }
+
             this.SetNewServiceInfo("SHORT POS. Start asset value: " + currentValue.ToString());
 
             // 2 ордер на покупку
 
             SendSellOrder(mySecurity, md.Bids[0].Price.ToDecimal());
-            
+
             if (this._errors != null &&
                 this._errors.Count > 0)
             {
@@ -249,7 +286,12 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                     return false;
                 }
 
-                decimal value = GetCurValueBySecurity(mySecurity);
+                decimal value;
+
+                if (!TryGetCurValueBySecurity(mySecurity, out value))
+                {
+                    return false;
+                }
 
                 if (value != currentValue)
                 {
@@ -258,14 +300,14 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                 }
             }
 
+            this.SetNewServiceInfo("Value asset after Sell order: " + currentValue.ToString());
+
             if (currentValue >= 0)
             {
                 SetNewError($"Error 12. Value in portfolio >= 0");
 
                 return false;
             }
-
-            this.SetNewServiceInfo("Value asset after Sell order: " + currentValue.ToString());
 
             // 4 ордер на продажу
 
@@ -289,7 +331,12 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                     return false;
                 }
 
-                decimal value = GetCurValueBySecurity(mySecurity);
+                decimal value;
+
+                if (!TryGetCurValueBySecurity(mySecurity, out value))
+                {
+                    return false;
+                }
 
                 if (value != currentValue)
                 {
@@ -305,7 +352,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
             return true;
         }
 
-        private decimal GetCurValueBySecurity(Security sec)
+        private bool TryGetCurValueBySecurity(Security sec, out decimal value)
         {
             List<Portfolio> portfolious = Server.Portfolios;
 
@@ -313,12 +360,13 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                 portfolious.Count == 0)
             {
                 SetNewError("Error 14. No Portfolio found");
-                TestEnded();
+                value = 0;
+                return false;
             }
 
             Portfolio myPorftolio = null;
 
-            for(int i = 0;i < portfolious.Count;i++)
+            for (int i = 0; i < portfolious.Count; i++)
             {
                 if (portfolious[i].Number == PortfolioName)
                 {
@@ -327,19 +375,27 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                 }
             }
 
-            if(myPorftolio == null)
+            if (myPorftolio == null)
             {
                 SetNewError("Error 15. Portfolio not found");
-                return 0;
+                value = 0;
+                return false;
             }
 
             List<PositionOnBoard> myPositions = myPorftolio.GetPositionOnBoard();
 
+            if (myPositions == null)
+            {
+                // коннектор ещё ни разу не прислал позицию. легальный плоский старт, не отказ чтения
+                value = 0;
+                return true;
+            }
+
             PositionOnBoard myPositionOnBoard = null;
 
-            for(int i = 0;i < myPositions.Count;i++)
+            for (int i = 0; i < myPositions.Count; i++)
             {
-                if (myPositions[i].SecurityNameCode.Equals(SecurityNameToTrade) 
+                if (myPositions[i].SecurityNameCode.Equals(SecurityNameToTrade)
                     || myPositions[i].SecurityNameCode == AssetInPortfolio)
                 {
                     myPositionOnBoard = myPositions[i];
@@ -347,22 +403,27 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                 }
             }
 
-            if(myPositionOnBoard == null)
+            if (myPositionOnBoard == null)
             {
-                return 0;
+                // нет строки позиции по инструменту/активу: легальное «плоско», ждём дальше (Error 8..13 по таймауту)
+                value = 0;
+                return true;
             }
 
-            return myPositionOnBoard.ValueCurrent;
+            value = myPositionOnBoard.ValueCurrent;
+            return true;
         }
 
         private void SendBuyOrder(Security mySec, decimal price)
         {
             decimal volume = VolumeToTrade;
 
-            price = Math.Round(price + price * 0.01m, mySec.Decimals); // Проскальзывание 1%
+            price = Math.Round(price + mySec.PriceStep * 2, mySec.Decimals); // смещение на 2 тика выше аска для гарантированного исполнения
 
             Order newOrder = CreateOrder(mySec, price, volume, Side.Buy);
             _waitSide = Side.Buy;
+            _waitOrderNumberUser = newOrder.NumberUser;
+            _waitOrderMarketNumber = null;
 
             Server.ExecuteOrder(newOrder);
 
@@ -456,10 +517,12 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
         {
             decimal volume = VolumeToTrade;
 
-            price = Math.Round(price - price * 0.01m, mySec.Decimals); // Проскальзывание 1%
+            price = Math.Round(price - mySec.PriceStep * 2, mySec.Decimals); // смещение на 2 тика ниже бида для гарантированного исполнения
 
             Order newOrder = CreateOrder(mySec, price, volume, Side.Sell);
             _waitSide = Side.Sell;
+            _waitOrderNumberUser = newOrder.NumberUser;
+            _waitOrderMarketNumber = null;
 
             Server.ExecuteOrder(newOrder);
 
@@ -572,7 +635,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
             5.List < PositionOnBoard > GetPositionOnBoard() – место хранения позиций.И активов, в случае если это не MOEX.
             */
 
-            if(string.IsNullOrEmpty(portfolio.Number))
+            if (string.IsNullOrEmpty(portfolio.Number))
             {
                 SetNewError("Error 26. Number portfolio is null");
                 return;
@@ -586,7 +649,13 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
             List<PositionOnBoard> positions = portfolio.GetPositionOnBoard();
 
-            for(int i = 0;i < positions.Count;i++)
+            if (positions == null)
+            {
+                SetNewServiceInfo("No positions in portfolio " + portfolio.Number + ". Positions validation skipped");
+                return;
+            }
+
+            for (int i = 0; i < positions.Count; i++)
             {
                 CheckPositionOnBoard(positions[i]);
             }
@@ -602,7 +671,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
             5.Когда по позиции открыты ордера – должен измениться VolumeBlock
             */
 
-            if(string.IsNullOrEmpty(position.SecurityNameCode) == true)
+            if (string.IsNullOrEmpty(position.SecurityNameCode) == true)
             {
                 SetNewError("Error 28. Name security position on board is null");
                 return;
@@ -635,6 +704,12 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
         Side _waitSide;
 
+        // привязка входящих событий к ордеру текущей ноги,
+        // чтобы хвосты событий от прошлой ноги и чужая активность не валили тест
+        private int _waitOrderNumberUser;
+        private string _waitOrderMarketNumber;
+        private readonly List<string> _ordersMarketNumbersAll = new List<string>();
+
         private void ClearOrders()
         {
             _ordersActive.Clear();
@@ -648,6 +723,15 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
         private void Server_NewOrderIncomeEvent(Order order)
         {
+            // пропускаем отклики по чужим ордерам: хвосты от прошлой ноги,
+            // переизлучения через запрос статуса и активность других роботов
+            if (order.NumberUser != _waitOrderNumberUser)
+            {
+                //SetNewServiceInfo($"Skip order income. Foreign order. NumberUser={order.NumberUser} " +
+                //    $"State={order.State} Side={order.Side} Sec={order.SecurityNameCode}");
+                return;
+            }
+
             if (order.State == OrderStateType.None)
             {
                 this.SetNewError("Error 29. Order with state NONE");
@@ -657,6 +741,19 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
             if (OrderIsNormal(order) == false)
             {
                 return;
+            }
+
+            if (string.IsNullOrEmpty(order.NumberMarket) == false)
+            {
+                if (_ordersMarketNumbersAll.Contains(order.NumberMarket) == false)
+                {
+                    _ordersMarketNumbersAll.Add(order.NumberMarket);
+                }
+
+                if (string.IsNullOrEmpty(_waitOrderMarketNumber))
+                {
+                    _waitOrderMarketNumber = order.NumberMarket;
+                }
             }
 
             if (order.State == OrderStateType.Active)
@@ -742,7 +839,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                 return false;
             }
 
-            if(order.State == OrderStateType.Done)
+            if (order.State == OrderStateType.Done)
             {
                 if (order.TimeDone == DateTime.MinValue)
                 {
@@ -762,7 +859,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                 }
             }
 
-            if(order.State == OrderStateType.Cancel)
+            if (order.State == OrderStateType.Cancel)
             {
                 if (order.TimeCancel == DateTime.MinValue)
                 {
@@ -835,6 +932,30 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
         private void Server_NewMyTradeEvent(MyTrade myTrade)
         {
+            // принимаем трейды только по текущей ноге, чтобы опоздавшие
+            // трейды от прошлой ноги и чужие трейды не давали ложных ошибок
+            if (myTrade.SecurityNameCode != SecurityNameToTrade)
+            {
+                //SetNewServiceInfo($"Skip myTrade. Foreign security. Sec={myTrade.SecurityNameCode} " +
+                //    $"Side={myTrade.Side} Parent={myTrade.NumberOrderParent}");
+                return;
+            }
+
+            if (string.IsNullOrEmpty(_waitOrderMarketNumber) == false)
+            {
+                if (myTrade.NumberOrderParent != _waitOrderMarketNumber)
+                {
+                    //SetNewServiceInfo($"Skip myTrade. Not current leg order. Parent={myTrade.NumberOrderParent} " +
+                    //    $"Wait={_waitOrderMarketNumber} Side={myTrade.Side}");
+                    return;
+                }
+            }
+            else if (_ordersMarketNumbersAll.Contains(myTrade.NumberOrderParent))
+            {
+                //SetNewServiceInfo($"Skip myTrade. Previous leg order. Parent={myTrade.NumberOrderParent} Side={myTrade.Side}");
+                return;
+            }
+
             if (MyTradeIsNormal(myTrade))
             {
                 _myTrades.Add(myTrade);

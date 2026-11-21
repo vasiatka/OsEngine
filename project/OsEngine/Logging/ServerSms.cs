@@ -165,7 +165,9 @@ namespace OsEngine.Logging
                 if (i == 2)
                     url = url.Replace("://smsc.ru/", "://www2.smsc.ru/");
 
+                #pragma warning disable SYSLIB0014
                 request = (HttpWebRequest)WebRequest.Create(url);
+                #pragma warning restore SYSLIB0014
 
                 if (SmscPost) {
                     request.Method = "POST";
@@ -318,7 +320,7 @@ namespace OsEngine.Logging
         // print debug information
         // вывод отладочной информации
         private void _print_debug(string str) {
-            System.Windows.Forms.MessageBox.Show(str);
+            Market.ServerMaster.SendNewLogMessage(str, LogMessageType.Error);
         }
     }
 }

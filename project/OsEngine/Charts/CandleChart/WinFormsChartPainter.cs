@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Your rights to use code governed by this license http://o-s-a.net/doc/license_simple_engine.pdf
  *Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
 */
@@ -54,7 +54,9 @@ namespace OsEngine.Charts.CandleChart
                 _chart.Text = name;
 
                 Task task = new Task(PainterThreadArea);
-                task.Start();               
+                task.Start();
+
+                
             }
             catch (Exception error)
             {
@@ -65,19 +67,26 @@ namespace OsEngine.Charts.CandleChart
 
         private void _chart_Click1(object sender, EventArgs e)
         {
-            if (((MouseEventArgs)e).Button == MouseButtons.Right)
+            try
             {
-                if (ChartClickEvent != null)
+                if (((MouseEventArgs)e).Button == MouseButtons.Right)
                 {
-                    ChartClickEvent(ChartClickType.RightButton);
+                    if (ChartClickEvent != null)
+                    {
+                        ChartClickEvent(ChartClickType.RightButton);
+                    }
+                }
+                if (((MouseEventArgs)e).Button == MouseButtons.Left)
+                {
+                    if (ChartClickEvent != null)
+                    {
+                        ChartClickEvent(ChartClickType.LeftButton);
+                    }
                 }
             }
-            if (((MouseEventArgs)e).Button == MouseButtons.Left)
+            catch(Exception error)
             {
-                if (ChartClickEvent != null)
-                {
-                    ChartClickEvent(ChartClickType.LeftButton);
-                }
+                SendLogMessage(error.ToString(), LogMessageType.Error);
             }
         }
 
@@ -206,6 +215,21 @@ namespace OsEngine.Charts.CandleChart
         {
             try
             {
+                RunOnUi(() =>
+                {
+                    if (_chart != null)
+                    {
+                        _chart.Paint -= _chart_Paint;
+                    }
+                    _paintPurgeSubscribed = false;
+                    // стоп: очередь гасим вместе с отпиской — отложенные серии вернутся в коллекцию навсегда;
+                    // переиспользование драйна только после CreateChart
+                    if (_pendingSeriesRemovals != null)
+                    {
+                        _pendingSeriesRemovals.Clear();
+                    }
+                });
+
                 if (_host != null)
                 {
                     _host.Child = null;
@@ -222,10 +246,40 @@ namespace OsEngine.Charts.CandleChart
             }
         }
 
+        /// <summary>
+        /// to execute action on UI thread of chart host. Inline if host is not set: chart is detached, live WmPaint is impossible
+        /// выполнить действие в UI-потоке хоста чарта. Inline если хост ещё не назначен: чарт откреплён, живого WmPaint нет
+        /// </summary>
+        private void RunOnUi(Action action)
+        {
+            WindowsFormsHost host = _host;
+            if (host == null || host.Dispatcher.CheckAccess())
+            {
+                // хоста ещё нет — чарт откреплён и _isPaint выключен, живого WmPaint нет; inline сохраняет семантику master
+                action();
+                return;
+            }
+            host.Dispatcher.Invoke(action);
+        }
+
+        /// <summary>
+        /// whether current thread must marshal the call to UI thread. False if host is not set: master mutated inline in that window too
+        /// нужно ли маршалировать вызов в UI-поток. False если хост ещё не назначен: в том окне master мутировал inline
+        /// </summary>
+        private bool MustMarshalToUiThread()
+        {
+            WindowsFormsHost host = _host;
+            if (host == null)
+            {
+                return false;
+            }
+            return !host.Dispatcher.CheckAccess();
+        }
+
         public void ShowContextMenu(// TODO ContextMenu больше не поддерживается. Взамен используйте ContextMenuStrip. Подробности см. в https://docs.microsoft.com/en-us/dotnet/core/compatibility/winforms#removed-controls
 ContextMenuStrip menu)
         {
-           _chart.ContextMenuStrip = menu;
+           RunOnUi(() => { _chart.ContextMenuStrip = menu; });
         }
 
         /// <summary>
@@ -249,9 +303,9 @@ ContextMenuStrip menu)
                     return;
                 }
 
-                if (_chart.InvokeRequired)
+                if (MustMarshalToUiThread())
                 {
-                    _chart.Invoke(new Action(ClearDataPointsAndSizeValue));
+                    RunOnUi(ClearDataPointsAndSizeValue);
                     return;
                 }
                 if (_areaSizes != null)
@@ -284,7 +338,7 @@ ContextMenuStrip menu)
 
                 if (FindSeriesByNameSafe("Deal_" + "BuySell") != null)
                 {
-                    _chart.Series.Remove(FindSeriesByNameSafe("Deal_" + "BuySell"));
+                    RemoveSeriesOnNextPaint(FindSeriesByNameSafe("Deal_" + "BuySell"));
                 }
 
                 for (int i = 0; _chart.Series != null && i < _chart.Series.Count; i++)
@@ -294,8 +348,8 @@ ContextMenuStrip menu)
                     if (_chart.Series[i].Name.Split('_')[0] == "Stop" ||
                         _chart.Series[i].Name.Split('_')[0] == "Profit")
                     {
-                        _chart.Series.Remove(_chart.Series[i]);
-                        i--;
+                        RemoveSeriesOnNextPaint(_chart.Series[i]);
+                        // отложенное удаление не укорачивает коллекцию: i-- вернул бы к той же серии и зациклил цикл
                     }
                 }
 
@@ -329,9 +383,9 @@ ContextMenuStrip menu)
             {
                 return;
             }
-            if (_chart.InvokeRequired)
+            if (MustMarshalToUiThread())
             {
-                _chart.Invoke(new Action(ClearSeries));
+                RunOnUi(ClearSeries);
                 return;
             }
             for (int i = 0; i < _chart.Series.Count; i++)
@@ -364,9 +418,9 @@ ContextMenuStrip menu)
                     return;
                 }
 
-                if (_chart.InvokeRequired)
+                if (MustMarshalToUiThread())
                 {
-                    _chart.Invoke(new Action(ClearDelete));
+                    RunOnUi(ClearDelete);
                     return;
                 }
 
@@ -391,8 +445,25 @@ ContextMenuStrip menu)
 
                     _chart.Series.Clear();
                     _chart.ChartAreas.Clear();
-                    _chart.Dispose();
-                    _chart = null;
+
+                    if (_host != null)
+                    {
+                        _host.Child = null;
+                        _host = null;
+                    }
+
+                    try
+                    {
+                        _chart.Dispose();
+                    }
+                    catch (Exception error)
+                    {
+                        SendLogMessage(error.ToString(), LogMessageType.Error);
+                    }
+                    finally
+                    {
+                        _chart = null;
+                    }
                 }
 
                 if (_colorKeeper != null)
@@ -446,7 +517,7 @@ ContextMenuStrip menu)
             {
                 // if no one's subscribed to us and there's a mistake
                 // если никто на нас не подписан и происходит ошибка
-                System.Windows.MessageBox.Show(message);
+                Market.ServerMaster.SendNewLogMessage(message, LogMessageType.Error);
             }
         }
 
@@ -520,9 +591,9 @@ ContextMenuStrip menu)
                 {
                     return;
                 }
-                if (_chart.InvokeRequired)
+                if (MustMarshalToUiThread())
                 {
-                    _chart.Invoke(new Action(RefreshChartColor));
+                    RunOnUi(RefreshChartColor);
                     return;
                 }
 
@@ -588,14 +659,21 @@ ContextMenuStrip menu)
         {
             try
             {
-                if (_chart != null && _chart.InvokeRequired)
+                if (_chart != null && MustMarshalToUiThread())
                 {
-                    _chart.Invoke(new Action(CreateChart));
+                    RunOnUi(CreateChart);
                     return;
                 }
 
                 _chart = new Chart();
                 _chart.SuppressExceptions = true;
+
+                // новый чарт: старая очередь указывает на прежнюю коллекцию, подписка — на прежний чарт
+                if (_pendingSeriesRemovals != null)
+                {
+                    _pendingSeriesRemovals.Clear();
+                }
+                _paintPurgeSubscribed = false;
 
                 _chart.Series.Clear();
                 _chart.ChartAreas.Clear();
@@ -638,12 +716,12 @@ ContextMenuStrip menu)
                 candleSeries.ChartType = SeriesChartType.Candlestick;
                 candleSeries.YAxisType = AxisType.Secondary;
                 candleSeries.ChartArea = "Prime";
-                candleSeries.ShadowOffset = 2;
+                candleSeries.ShadowOffset = Themes.ThemeManager.GetChartCandleShadow();
                 candleSeries.YValuesPerPoint = 4;
 
                 _chart.Series.Add(candleSeries);
+
                 _chart.AxisScrollBarClicked += _chart_AxisScrollBarClicked; // cursor event/событие передвижения курсора
-                
                 _chart.AxisViewChanged += _chart_AxisViewChanged; // scale event/событие изменения масштаба
                 _chart.MouseWheel += _chart_MouseWheel; // scroll and zoom chart using mouse wheel/прокрутка и зум чарта колесиком мышки
                 _chart.Click += _chart_Click;
@@ -660,6 +738,7 @@ ContextMenuStrip menu)
                 _chart.MouseUp += _chart_MouseUp;
                 _chart.ClientSizeChanged += _chart_ClientSizeChanged;
                 _chart.AxisViewChanging += _chart_AxisViewChanging;
+               
 
             }
             catch (Exception error)
@@ -691,6 +770,12 @@ ContextMenuStrip menu)
         {
             try
             {
+                if (MustMarshalToUiThread())
+                {
+                    string areaResult = null;
+                    RunOnUi(() => { areaResult = CreateArea(nameArea, height); });
+                    return areaResult;
+                }
                 ChartArea area = FindAreaByNameSafe(nameArea);
 
                 if (area != null)
@@ -790,6 +875,12 @@ ContextMenuStrip menu)
         {
             try
             {
+                if (MustMarshalToUiThread())
+                {
+                    string nameResult = null;
+                    RunOnUi(() => { nameResult = CreateSeries(areaName, indicatorType, name); });
+                    return nameResult;
+                }
                 ChartArea area = GetChartArea(areaName);
 
                 Series newSeries = new Series(name);
@@ -814,7 +905,7 @@ ContextMenuStrip menu)
                     newSeries.ChartType = SeriesChartType.Candlestick;
                 }
 
-                newSeries.ShadowOffset = 2;
+                newSeries.ShadowOffset = Themes.ThemeManager.GetChartCandleShadow();
                 _chart.Series.Add(newSeries);
                 return newSeries.Name;
             }
@@ -921,6 +1012,11 @@ ContextMenuStrip menu)
         {
             try
             {
+                if (MustMarshalToUiThread())
+                {
+                    RunOnUi(() => DeleteIndicator(indicator));
+                    return;
+                }
 
                 for (int i = 0; i < 30; i++)
                 {
@@ -933,7 +1029,7 @@ ContextMenuStrip menu)
                             ClearLabelOnY2(mySeries.Name + "Label", mySeries.ChartArea, mySeries.Points[0].Color);
                         }
                         mySeries.Points.ClearFast();
-                        _chart.Series.Remove(FindSeriesByNameSafe(indicator.Name + i));
+                        RemoveSeriesOnNextPaint(FindSeriesByNameSafe(indicator.Name + i));
 
                         if (_labelSeries != null)
                         {
@@ -1374,9 +1470,9 @@ ContextMenuStrip menu)
                     return;
                 }
 
-                if (_chart.InvokeRequired)
+                if (MustMarshalToUiThread())
                 {
-                    _chart.Invoke(new Action<List<Candle>>(PaintCandles), history);
+                    RunOnUi(() => PaintCandles(history));
                     return;
                 }
 
@@ -1519,9 +1615,9 @@ ContextMenuStrip menu)
             {
                 return;
             }
-            if (_chart.InvokeRequired)
+            if (MustMarshalToUiThread())
             {
-                _chart.Invoke(new Action<List<Candle>, int>(RePaintToIndex), history, index);
+                RunOnUi(() => RePaintToIndex(history, index));
                 return;
             }
             Series candleSeries = FindSeriesByNameSafe("SeriesCandle");
@@ -1651,7 +1747,7 @@ ContextMenuStrip menu)
             candleSeries.ChartType = SeriesChartType.Candlestick;
             candleSeries.YAxisType = AxisType.Secondary;
             candleSeries.ChartArea = "Prime";
-            candleSeries.ShadowOffset = 2;
+            candleSeries.ShadowOffset = Themes.ThemeManager.GetChartCandleShadow();
             candleSeries.YValuesPerPoint = 4;
 
             for (int i = 0; i < history.Count; i++)
@@ -1691,7 +1787,7 @@ ContextMenuStrip menu)
 
             if (FindSeriesByNameSafe("Cursor") != null)
             {
-                ReMoveSeriesSafe(FindSeriesByNameSafe("Cursor"));
+                RemoveSeriesOnNextPaint(FindSeriesByNameSafe("Cursor"));
             }
 
             PaintSeriesSafe(candleSeries);
@@ -1994,7 +2090,8 @@ ContextMenuStrip menu)
 
                     if ((position.State == PositionStateType.Closing
                         || position.State == PositionStateType.Opening
-                        || position.State == PositionStateType.Open)
+                        || position.State == PositionStateType.Open
+                        || position.State == PositionStateType.ClosingFail)
                         &&
                         position.OpenOrders != null 
                         && position.OpenOrders.Count > 0)
@@ -2013,16 +2110,24 @@ ContextMenuStrip menu)
                                 continue;
                             }
 
+                            if (curOrder.TypeOrder == OrderPriceType.StopLimit
+                                || curOrder.TypeOrder == OrderPriceType.StopMarket)
+                            {
+                                continue;
+                            }
+
                             Series lineSeries = new Series("Open_" + position.Number + j.ToString());
                             lineSeries.ChartType = SeriesChartType.Line;
                             lineSeries.YAxisType = AxisType.Secondary;
                             lineSeries.XAxisType = AxisType.Secondary;
                             lineSeries.ChartArea = "Prime";
-                            lineSeries.ShadowOffset = 1;
+                            lineSeries.ShadowOffset = Themes.ThemeManager.GetChartIndicatorShadow();
                             lineSeries.YValuesPerPoint = 1;
 
-                            lineSeries.Points.AddXY(0, curOrder.Price);
-                            lineSeries.Points.AddXY(_myCandles.Count + 500, curOrder.Price);
+                            decimal priceToPaint = GetOrderPriceToPaint(curOrder);
+
+                            lineSeries.Points.AddXY(0, priceToPaint);
+                            lineSeries.Points.AddXY(_myCandles.Count + 500, priceToPaint);
 
                             if (curOrder.Side == Side.Buy)
                             {
@@ -2063,7 +2168,8 @@ ContextMenuStrip menu)
 
                     if ((position.State == PositionStateType.Closing
                         || position.State == PositionStateType.Opening
-                        || position.State == PositionStateType.Open)
+                        || position.State == PositionStateType.Open
+                        || position.State == PositionStateType.ClosingFail)
                         &&
                         position.CloseOrders != null &&
                         position.CloseOrders.Count > 0)
@@ -2082,17 +2188,24 @@ ContextMenuStrip menu)
                                 continue;
                             }
 
+                            if (curOrder.TypeOrder == OrderPriceType.StopLimit
+                                || curOrder.TypeOrder == OrderPriceType.StopMarket)
+                            {
+                                continue;
+                            }
+
                             Series lineSeries = new Series("Close_" + position.Number + j.ToString());
                             lineSeries.ChartType = SeriesChartType.Line;
                             lineSeries.YAxisType = AxisType.Secondary;
                             lineSeries.XAxisType = AxisType.Secondary;
                             lineSeries.ChartArea = "Prime";
-                            lineSeries.ShadowOffset = 1;
+                            lineSeries.ShadowOffset = Themes.ThemeManager.GetChartIndicatorShadow();
                             lineSeries.YValuesPerPoint = 1;
 
+                            decimal closePriceToPaint = GetOrderPriceToPaint(curOrder);
 
-                            lineSeries.Points.AddXY(0, curOrder.Price);
-                            lineSeries.Points.AddXY(_myCandles.Count + 500, curOrder.Price);
+                            lineSeries.Points.AddXY(0, closePriceToPaint);
+                            lineSeries.Points.AddXY(_myCandles.Count + 500, closePriceToPaint);
 
                             if (curOrder.Side == Side.Buy)
                             {
@@ -2135,7 +2248,8 @@ ContextMenuStrip menu)
                     if (
                         (position.State == PositionStateType.Closing
                         || position.State == PositionStateType.Opening
-                        || position.State == PositionStateType.Open) 
+                        || position.State == PositionStateType.Open
+                        || position.State == PositionStateType.ClosingFail) 
                         &&
                         position.StopOrderIsActive)
                     {
@@ -2144,7 +2258,7 @@ ContextMenuStrip menu)
                         lineSeries.YAxisType = AxisType.Secondary;
                         lineSeries.XAxisType = AxisType.Secondary;
                         lineSeries.ChartArea = "Prime";
-                        lineSeries.ShadowOffset = 1;
+                        lineSeries.ShadowOffset = Themes.ThemeManager.GetChartIndicatorShadow();
                         lineSeries.YValuesPerPoint = 1;
 
 
@@ -2192,7 +2306,8 @@ ContextMenuStrip menu)
                     if (
                        (position.State == PositionStateType.Closing
                         || position.State == PositionStateType.Opening
-                        || position.State == PositionStateType.Open) 
+                        || position.State == PositionStateType.Open
+                        || position.State == PositionStateType.ClosingFail) 
                         &&
                         position.ProfitOrderIsActive)
                     {
@@ -2201,7 +2316,7 @@ ContextMenuStrip menu)
                         lineSeries.YAxisType = AxisType.Secondary;
                         lineSeries.XAxisType = AxisType.Secondary;
                         lineSeries.ChartArea = "Prime";
-                        lineSeries.ShadowOffset = 1;
+                        lineSeries.ShadowOffset = Themes.ThemeManager.GetChartIndicatorShadow();
                         lineSeries.YValuesPerPoint = 1;
 
                         lineSeries.Points.AddXY(0, position.ProfitOrderRedLine);
@@ -2233,12 +2348,173 @@ ContextMenuStrip menu)
                     }
                 }
 
+                for (int i = 0; i < deals.Count; i++)
+                {
+                    // server stop orders (StopLimit/StopMarket)
+                    // серверные СТОП ОРДЕРА
+
+                    Position position = deals[i];
+
+                    if (position == null)
+                    {
+                        continue;
+                    }
+
+                    if (position.State != PositionStateType.Closing
+                        && position.State != PositionStateType.Opening
+                        && position.State != PositionStateType.Open
+                        && position.State != PositionStateType.ClosingFail)
+                    {
+                        continue;
+                    }
+
+                    if (position.CloseOrders != null)
+                    {
+                        for (int j = 0; j < position.CloseOrders.Count; j++)
+                        {
+                            Order curOrder = position.CloseOrders[j];
+
+                            if (curOrder == null)
+                            {
+                                continue;
+                            }
+
+                            if (curOrder.TypeOrder != OrderPriceType.StopLimit
+                                && curOrder.TypeOrder != OrderPriceType.StopMarket)
+                            {
+                                continue;
+                            }
+
+                            if (curOrder.State != OrderStateType.Active
+                                && curOrder.State != OrderStateType.Pending
+                                && curOrder.State != OrderStateType.None
+                                && curOrder.State != OrderStateType.Partial)
+                            {
+                                continue;
+                            }
+
+                            Series lineSeries = new Series("StopServer_" + position.Number + "_" + j.ToString());
+                            lineSeries.ChartType = SeriesChartType.StepLine;
+                            lineSeries.YAxisType = AxisType.Secondary;
+                            lineSeries.XAxisType = AxisType.Secondary;
+                            lineSeries.ChartArea = "Prime";
+                            lineSeries.ShadowOffset = Themes.ThemeManager.GetChartIndicatorShadow();
+                            lineSeries.YValuesPerPoint = 1;
+
+                            lineSeries.Points.AddXY(0, curOrder.StopPrice);
+                            lineSeries.Points.AddXY(_myCandles.Count + 500, curOrder.StopPrice);
+
+                            if (position.Direction == Side.Sell)
+                            {
+                                lineSeries.Color = Color.Green;
+                            }
+                            else
+                            {
+                                lineSeries.Color = Color.Red;
+                            }
+
+                            if (stopProfitOrderSeries == null)
+                            {
+                                stopProfitOrderSeries = new[] { lineSeries };
+                            }
+                            else
+                            {
+                                Series[] newLineSeries = new Series[stopProfitOrderSeries.Length + 1];
+                                for (int i2 = 0; i2 < stopProfitOrderSeries.Length; i2++)
+                                {
+                                    newLineSeries[i2] = stopProfitOrderSeries[i2];
+                                }
+                                newLineSeries[newLineSeries.Length - 1] = lineSeries;
+                                stopProfitOrderSeries = newLineSeries;
+                            }
+                        }
+                    }
+
+                    if (position.OpenOrders != null)
+                    {
+                        for (int j = 0; j < position.OpenOrders.Count; j++)
+                        {
+                            Order curOrder = position.OpenOrders[j];
+
+                            if (curOrder == null)
+                            {
+                                continue;
+                            }
+
+                            if (curOrder.TypeOrder != OrderPriceType.StopLimit
+                                && curOrder.TypeOrder != OrderPriceType.StopMarket)
+                            {
+                                continue;
+                            }
+
+                            if (curOrder.State != OrderStateType.Active
+                                && curOrder.State != OrderStateType.Pending
+                                && curOrder.State != OrderStateType.None
+                                && curOrder.State != OrderStateType.Partial)
+                            {
+                                continue;
+                            }
+
+                            Series lineSeries = new Series("StopServer_" + position.Number + "_o" + j.ToString());
+                            lineSeries.ChartType = SeriesChartType.StepLine;
+                            lineSeries.YAxisType = AxisType.Secondary;
+                            lineSeries.XAxisType = AxisType.Secondary;
+                            lineSeries.ChartArea = "Prime";
+                            lineSeries.ShadowOffset = Themes.ThemeManager.GetChartIndicatorShadow();
+                            lineSeries.YValuesPerPoint = 1;
+
+                            lineSeries.Points.AddXY(0, curOrder.StopPrice);
+                            lineSeries.Points.AddXY(_myCandles.Count + 500, curOrder.StopPrice);
+
+                            if (position.Direction == Side.Sell)
+                            {
+                                lineSeries.Color = Color.Green;
+                            }
+                            else
+                            {
+                                lineSeries.Color = Color.Red;
+                            }
+
+                            if (stopProfitOrderSeries == null)
+                            {
+                                stopProfitOrderSeries = new[] { lineSeries };
+                            }
+                            else
+                            {
+                                Series[] newLineSeries = new Series[stopProfitOrderSeries.Length + 1];
+                                for (int i2 = 0; i2 < stopProfitOrderSeries.Length; i2++)
+                                {
+                                    newLineSeries[i2] = stopProfitOrderSeries[i2];
+                                }
+                                newLineSeries[newLineSeries.Length - 1] = lineSeries;
+                                stopProfitOrderSeries = newLineSeries;
+                            }
+                        }
+                    }
+                }
+
                 PaintDealSafe(buySellSeries, stopProfitOrderSeries);
             }
             catch (Exception error)
             {
                 SendLogMessage(error.ToString(), LogMessageType.Error);
             }
+        }
+
+        private decimal GetOrderPriceToPaint(Order order)
+        {
+            // стоп-ордер до активации не имеет биржевой заявки.
+            // Рисуем его по цене активации. После активации в позиции
+            // появляется дочерний ордер, который рисуется по своей цене
+
+            if ((order.TypeOrder == OrderPriceType.StopLimit
+                || order.TypeOrder == OrderPriceType.StopMarket)
+                && order.StopPrice != 0)
+            {
+                return order.StopPrice;
+            }
+
+            return order.Price;
         }
 
         /// <summary>
@@ -2255,10 +2531,9 @@ ContextMenuStrip menu)
                 {
                     return;
                 }
-                if (_chart.InvokeRequired)
+                if (MustMarshalToUiThread())
                 {
-                    _chart.Invoke(new Action<Series, Series[]>
-                        (PaintDealSafe), buySellSeries, profitStopOrderSeries);
+                    RunOnUi(() => PaintDealSafe(buySellSeries, profitStopOrderSeries));
                     return;
                 }
                 // 1 Drawing up deals
@@ -2344,7 +2619,8 @@ ContextMenuStrip menu)
                     if (name == "Stop" ||
                         name == "Profit" ||
                         name == "Open" ||
-                        name == "Close")
+                        name == "Close" ||
+                        name == "StopServer")
                     {
                         bool isInArray = false;
 
@@ -2360,8 +2636,8 @@ ContextMenuStrip menu)
                         if (isInArray == false)
                         {
                             ClearLabelOnY2(curSeries.Name + "Label", "Prime", curSeries.Color);
-                            ReMoveSeriesSafe(curSeries);
-                            j--;
+                            RemoveSeriesOnNextPaint(curSeries);
+                            // отложенное удаление не укорачивает коллекцию: j-- вернул бы к той же серии и зациклил цикл
                         }
                     }
                 }
@@ -2641,7 +2917,7 @@ ContextMenuStrip menu)
                 lineSeries.YAxisType = AxisType.Secondary;
                 lineSeries.XAxisType = AxisType.Secondary;
                 lineSeries.ChartArea = "Prime";
-                lineSeries.ShadowOffset = 1;
+                lineSeries.ShadowOffset = Themes.ThemeManager.GetChartIndicatorShadow();
                 lineSeries.YValuesPerPoint = 1;
 
                 lineSeries.Points.AddXY(0, curStop.PriceRedLine);
@@ -2668,10 +2944,9 @@ ContextMenuStrip menu)
             {
                 return;
             }
-            if (_chart.InvokeRequired)
+            if (MustMarshalToUiThread())
             {
-                _chart.Invoke(new Action<List<Series>>
-                    (PaintStopLimitsSafe), stopLimitsSeries);
+                RunOnUi(() => PaintStopLimitsSafe(stopLimitsSeries));
                 return;
             }
 
@@ -2792,9 +3067,9 @@ ContextMenuStrip menu)
                 {
                     return;
                 }
-                if (_chart.InvokeRequired)
+                if (MustMarshalToUiThread())
                 {
-                    _chart.Invoke(new Action<IChartElement>(ClearElem), element);
+                    RunOnUi(() => ClearElem(element));
                     return;
                 }
                 // If there is such a series on chart - delete
@@ -2881,9 +3156,9 @@ ContextMenuStrip menu)
             {
                 return;
             }
-            if (_chart.InvokeRequired)
+            if (MustMarshalToUiThread())
             {
-                _chart.Invoke(new Action<Elements.Line>(PaintLineElemOnArea), lineElement);
+                RunOnUi(() => PaintLineElemOnArea(lineElement));
                 return;
             }
 
@@ -2894,6 +3169,7 @@ ContextMenuStrip menu)
                 newSeries = new Series(lineElement.UniqName);
                 newSeries.ChartType = SeriesChartType.Line;
                 newSeries.BorderWidth = lineElement.LineWidth;
+                newSeries.BorderDashStyle = lineElement.LineDashStyle;
                 newSeries.Color = lineElement.Color;
                 newSeries.ChartArea = lineElement.Area;
                 newSeries.YAxisType = AxisType.Secondary;
@@ -2904,7 +3180,7 @@ ContextMenuStrip menu)
             {
                 newSeries.Label = lineElement.Label;
                 newSeries.LabelForeColor = lineElement.LabelTextColor.Name == "0" ? Color.White : lineElement.LabelTextColor;
-                newSeries.Font = lineElement.Font ?? new Font("Arial", 7);
+                newSeries.Font = lineElement.Font ?? Themes.ThemeManager.GetChartLabelFont();
                 newSeries.LabelBackColor = lineElement.LabelBackColor.Name == "0" ? Color.Transparent : lineElement.LabelBackColor;
             }
 
@@ -2992,9 +3268,9 @@ ContextMenuStrip menu)
             {
                 return;
             }
-            if (_chart.InvokeRequired)
+            if (MustMarshalToUiThread())
             {
-                _chart.Invoke(new Action<LineHorisontal>(PaintHorizontalLineOnArea), lineElement);
+                RunOnUi(() => PaintHorizontalLineOnArea(lineElement));
                 return;
             }
 
@@ -3005,6 +3281,7 @@ ContextMenuStrip menu)
                 newSeries = new Series(lineElement.UniqName);
                 newSeries.ChartType = SeriesChartType.Line;
                 newSeries.BorderWidth = lineElement.LineWidth;
+                newSeries.BorderDashStyle = lineElement.LineDashStyle;
                 newSeries.Color = lineElement.Color;
                 newSeries.ChartArea = lineElement.Area;
                 newSeries.YAxisType = AxisType.Secondary;
@@ -3015,7 +3292,7 @@ ContextMenuStrip menu)
             {
                 newSeries.Label = lineElement.Label;
                 newSeries.LabelForeColor = lineElement.LabelTextColor.Name == "0" ? Color.White : lineElement.LabelTextColor;
-                newSeries.Font = lineElement.Font ?? new Font("Arial", 7);
+                newSeries.Font = lineElement.Font ?? Themes.ThemeManager.GetChartLabelFont();
                 newSeries.LabelBackColor = lineElement.LabelBackColor.Name == "0" ? Color.Transparent : lineElement.LabelBackColor;
             }
 
@@ -3133,7 +3410,7 @@ ContextMenuStrip menu)
             newSeries.MarkerSize = point.Size;
             newSeries.Label = point.Label;
             newSeries.LabelForeColor = point.LabelTextColor.Name == "0" ? Color.White : point.LabelTextColor;
-            newSeries.Font = point.Font ?? new Font("Arial", 7);
+            newSeries.Font = point.Font ?? Themes.ThemeManager.GetChartLabelFont();
             newSeries.LabelBackColor = point.LabelBackColor.Name == "0" ? Color.Transparent : point.LabelBackColor;
 
             newSeries.Points.AddXY(index, point.Y);
@@ -3220,9 +3497,9 @@ ContextMenuStrip menu)
             {
                 return;
             }
-            if (_chart.InvokeRequired)
+            if (MustMarshalToUiThread())
             {
-                _chart.Invoke(new Action<RectangleElement>(PaintRectangleElement), rectangle);
+                RunOnUi(() => PaintRectangleElement(rectangle));
                 return;
             }
 
@@ -3243,7 +3520,7 @@ ContextMenuStrip menu)
             {
                 // устанавливаем шрифт для всей серии, но Label добавим позже только одной точке
                 newSeries.LabelForeColor = rectangle.LabelTextColor.Name == "0" ? Color.White : rectangle.LabelTextColor;
-                newSeries.Font = rectangle.Font ?? new Font("Arial", 7);
+                newSeries.Font = rectangle.Font ?? Themes.ThemeManager.GetChartLabelFont();
                 newSeries.LabelBackColor = rectangle.LabelBackColor.Name == "0" ? Color.Transparent : rectangle.LabelBackColor;
             }
 
@@ -3387,22 +3664,23 @@ ContextMenuStrip menu)
         /// </summary>
         void _chartForCandle_MouseMove2ChartElement(object sender, MouseEventArgs e)
         {
-            if (IsPatternChart)
-            {
-                return;
-            }
-
-            if (_chart.Cursor != Cursors.SizeAll)
-            {
-                // if user hasn't pinched the item
-                // если пользователь не зажал элемент
-                return;
-
-            }
-// Y
-// игрик
             try
             {
+                if (IsPatternChart)
+                {
+                    return;
+                }
+
+                if (_chart.Cursor != Cursors.SizeAll)
+                {
+                    // if user hasn't pinched the item
+                    // если пользователь не зажал элемент
+                    return;
+
+                }
+                // Y
+                // игрик
+
                 decimal lastY = e.Y;
 
                 _isMoving = true;
@@ -3493,22 +3771,23 @@ ContextMenuStrip menu)
         /// as been put on chart LCM.
         /// опустилась ЛКМ на чарт
         /// </summary>
-        private void _chartForCandle_MouseDown2ChartElement(object sender, MouseEventArgs e) 
+        private void _chartForCandle_MouseDown2ChartElement(object sender, MouseEventArgs e)
         {
-            if (IsPatternChart)
-            {
-                return;
-            }
-
-            if (_chartElements == null)
-            {
-                return;
-            }
-            // need to find X and Y we clicked on.
-            // надо найти икс и игрик по которому кликнули
-
             try
             {
+                if (IsPatternChart)
+                {
+                    return;
+                }
+
+                if (_chartElements == null)
+                {
+                    return;
+                }
+                // need to find X and Y we clicked on.
+                // надо найти икс и игрик по которому кликнули
+
+
                 MouseEventArgs mouse = (MouseEventArgs)e;
                 if (mouse.Button != MouseButtons.Left)
                 {
@@ -3553,7 +3832,7 @@ ContextMenuStrip menu)
 
                     decimal intsToPicselY = widthInIntsY / widthInPicselY;
 
-                    decimal yUp = centerY +  intsToPicselY * 8;
+                    decimal yUp = centerY + intsToPicselY * 8;
                     decimal yDown = centerY - intsToPicselY * 8;
 
 
@@ -3579,7 +3858,7 @@ ContextMenuStrip menu)
 
                         break;
                     }
-                }         
+                }
             }
             catch (Exception error)
             {
@@ -3593,13 +3872,13 @@ ContextMenuStrip menu)
         /// </summary>
         void _chartForCandle_MouseUp2ChartElement(object sender, MouseEventArgs e)
         {
-            if (IsPatternChart)
-            {
-                return;
-            }
-
             try
             {
+                if (IsPatternChart)
+                {
+                    return;
+                }
+
                 if (_clickElement == null)
                 {
                     return;
@@ -3607,7 +3886,7 @@ ContextMenuStrip menu)
 
                 if (_clickElement.TypeName() == "LineElement")
                 {
-                    LineHorisontal line = (LineHorisontal) _clickElement;
+                    LineHorisontal line = (LineHorisontal)_clickElement;
                     if (_isMoving == false)
                     {
                         line.ShowDialog(e.X + WindowCoordinate.X + 280, e.Y + WindowCoordinate.Y + 70);
@@ -3619,8 +3898,7 @@ ContextMenuStrip menu)
                     PointElement line = (PointElement)_clickElement;
                     if (_isMoving == false)
                     {
-                            line.ShowDialog();
-                        
+                        line.ShowDialog();
                     }
                 }
 
@@ -3642,9 +3920,9 @@ ContextMenuStrip menu)
             {
                 return;
             }
-            if (_chart.InvokeRequired)
+            if (MustMarshalToUiThread())
             {
-                _chart.Invoke(new Action<AlertToChart>(RemoveAlert), alertToChart);
+                RunOnUi(() => RemoveAlert(alertToChart));
                 return;
             }
 
@@ -3793,9 +4071,9 @@ ContextMenuStrip menu)
             {
                 return;
             }
-            if (_chart.InvokeRequired)
+            if (MustMarshalToUiThread())
             {
-                _chart.Invoke(new Action<AlertToChart>(PaintAlert), alert);
+                RunOnUi(() => PaintAlert(alert));
                 return;
             }
 
@@ -4008,9 +4286,9 @@ ContextMenuStrip menu)
                     return;
                 }
 
-                if (_chart.InvokeRequired)
+                if (MustMarshalToUiThread())
                 {
-                    _chart.Invoke(new Action<IIndicator>(PaintIndicator), indicator);
+                    RunOnUi(() => PaintIndicator(indicator));
                     return;
                 }
 
@@ -4101,7 +4379,8 @@ ContextMenuStrip menu)
                         if (series[i].ChartPaintType == IndicatorChartPaintType.Line)
                         {
                             PaintLikeLine(
-                                series[i].Values, series[i].Color, indicator.Name + i,series[i].CanReBuildHistoricalValues);
+                                series[i].Values, series[i].Color, indicator.Name + i,series[i].CanReBuildHistoricalValues,
+                                series[i].LineWidth, series[i].ZeroIsGap);
                         }
                         else if (series[i].ChartPaintType == IndicatorChartPaintType.Column)
                         {
@@ -4139,9 +4418,12 @@ ContextMenuStrip menu)
             &&
                 _host != null)
             {
-                PaintIndicator(indicator);
-                ReloadAreaSizes();
-                ResizeYAxisOnArea("Prime");
+                RunOnUi(() =>
+                {
+                    PaintIndicator(indicator);
+                    ReloadAreaSizes();
+                    ResizeYAxisOnArea("Prime");
+                });
             }
             else
             {
@@ -4182,9 +4464,9 @@ ContextMenuStrip menu)
                 return;
             }
 
-            if (_chart.InvokeRequired)
+            if (MustMarshalToUiThread())
             {
-                _chart.Invoke(new Action<IIndicator>(RePaintIndicator), indicatorCandle);
+                RunOnUi(() => RePaintIndicator(indicatorCandle));
                 return;
             }
 
@@ -4225,9 +4507,9 @@ ContextMenuStrip menu)
                 {
                     return;
                 }
-                if (_chart.InvokeRequired)
+                if (MustMarshalToUiThread())
                 {
-                    _chart.Invoke(new Action<Series>(ClearIndicatorSeries), series);
+                    RunOnUi(() => ClearIndicatorSeries(series));
                     return;
                 }
                 series.Points.ClearFast();
@@ -4273,7 +4555,8 @@ ContextMenuStrip menu)
             bool isMyValues = mySeries.Points.Count != 0 && Convert.ToDouble(values[0]) == mySeries.Points[0].YValues[0];
 
             if (mySeries.Points.Count != 0 &&
-               values.Count - 1 == mySeries.Points.Count
+               values.Count - 1 == mySeries.Points.Count &&
+                fullReloadOnNewCandle == false
                && isMyValues)
             {
                 // if draw only last point
@@ -4301,7 +4584,7 @@ ContextMenuStrip menu)
                 series.MarkerStyle = MarkerStyle.Circle;
                 series.YAxisType = AxisType.Secondary;
                 series.ChartArea = myArea.Name;
-                series.ShadowOffset = 1;
+                series.ShadowOffset = Themes.ThemeManager.GetChartIndicatorShadow();
                 series.YValuesPerPoint = 1;
                 series.Color = color;
 
@@ -4383,7 +4666,8 @@ ContextMenuStrip menu)
         /// draw indicator as a line
         /// прорисовать индикатор как линию
         /// </summary>
-        private void PaintLikeLine(List<decimal> values, Color color, string nameSeries,bool fullReloadOnNewCandle)
+        private void PaintLikeLine(List<decimal> values, Color color, string nameSeries,bool fullReloadOnNewCandle,
+            int lineWidth = 1, bool zeroIsGap = false)
         {
             if (values == null ||
                 values.Count == 0)
@@ -4416,7 +4700,7 @@ ContextMenuStrip menu)
             {
                 // if only draw last point
                 // если прорисовываем только последнюю точку
-                PaintLikeLineLast(values, nameSeries, color);
+                PaintLikeLineLast(values, nameSeries, color, lineWidth, zeroIsGap);
             }
             else if (mySeries.Points.Count != 0 &&
                 values.Count == mySeries.Points.Count &&
@@ -4424,7 +4708,7 @@ ContextMenuStrip menu)
             {
                 // redraw last point
                 // перерисовываем последнюю точку
-                RePaintLikeLineLast(values, nameSeries, color);
+                RePaintLikeLineLast(values, nameSeries, color, lineWidth, zeroIsGap);
             }
             else
             {
@@ -4442,9 +4726,15 @@ ContextMenuStrip menu)
                 series.ChartType = SeriesChartType.Line;
                 series.YAxisType = AxisType.Secondary;
                 series.ChartArea = myArea.Name;
-                series.ShadowOffset = 1;
+                series.ShadowOffset = Themes.ThemeManager.GetChartIndicatorShadow();
                 series.YValuesPerPoint = 1;
                 series.Color = color;
+                series.BorderWidth = lineWidth;
+
+                if (zeroIsGap)
+                {
+                    series.EmptyPointStyle.Color = Color.Transparent;
+                }
 
                 bool isStarted = false;
 
@@ -4453,7 +4743,7 @@ ContextMenuStrip menu)
                     // series.Points.AddXY(i, array[i]);
                     var point = new DataPoint(i, (double)array[i]);
 
-                    if (array[i] == 0 && isStarted == false) 
+                    if (array[i] == 0 && (isStarted == false || zeroIsGap))
                     {
                         point.IsEmpty = true;
                     }
@@ -4498,17 +4788,25 @@ ContextMenuStrip menu)
         /// draw indicator as a line, last element
         /// прорисовать индикатор как линию, последний элемент
         /// </summary>
-        private void PaintLikeLineLast(List<decimal> values, string nameSeries, Color color)
+        private void PaintLikeLineLast(List<decimal> values, string nameSeries, Color color,
+            int lineWidth = 1, bool zeroIsGap = false)
         {
             Series mySeries = FindSeriesByNameSafe(nameSeries);
             mySeries.Color = color;
+            mySeries.BorderWidth = lineWidth;
+
+            if (zeroIsGap)
+            {
+                mySeries.EmptyPointStyle.Color = Color.Transparent;
+            }
+
             decimal lastPoint = values[values.Count - 1];
 
             // mySeries.Points.AddXY(mySeries.Points.Count, lastPoint);
 
             var point = new DataPoint(mySeries.Points.Count, (double)lastPoint);
 
-            if (lastPoint == 0 && values.FindIndex(v => v != 0) == -1)
+            if (lastPoint == 0 && (zeroIsGap || values.FindIndex(v => v != 0) == -1))
             {
                 point.IsEmpty = true;
             }
@@ -4521,14 +4819,16 @@ ContextMenuStrip menu)
         /// redraw indicator as a line,last element
         /// перерисовать индикатор как линию, последний элемент
         /// </summary>
-        private void RePaintLikeLineLast(List<decimal> values, string nameSeries, Color color)
+        private void RePaintLikeLineLast(List<decimal> values, string nameSeries, Color color,
+            int lineWidth = 1, bool zeroIsGap = false)
         {
             Series mySeries = FindSeriesByNameSafe(nameSeries);
             mySeries.Color = color;
+            mySeries.BorderWidth = lineWidth;
             decimal lastPoint = Convert.ToDecimal(values[values.Count - 1]);
             mySeries.Points[mySeries.Points.Count - 1].YValues = new[] { Convert.ToDouble(lastPoint) };
 
-            if (lastPoint == 0 && values.FindIndex(v => v != 0) == -1)
+            if (lastPoint == 0 && (zeroIsGap || values.FindIndex(v => v != 0) == -1))
             {
                 mySeries.Points[mySeries.Points.Count - 1].IsEmpty = true;
             }
@@ -4598,7 +4898,7 @@ ContextMenuStrip menu)
                 series.ChartType = SeriesChartType.Column;
                 series.YAxisType = AxisType.Secondary;
                 series.ChartArea = myArea.Name;
-                series.ShadowOffset = 1;
+                series.ShadowOffset = Themes.ThemeManager.GetChartIndicatorShadow();
                 series.YValuesPerPoint = 1;
                 series.Color = colorUp;
 
@@ -4920,9 +5220,9 @@ ContextMenuStrip menu)
                 {
                     return;
                 }
-                if (_chart.InvokeRequired)
+                if (MustMarshalToUiThread())
                 {
-                    _chart.Invoke(new Action<Series>(PaintSeriesSafe), series);
+                    RunOnUi(() => PaintSeriesSafe(series));
                     return;
                 }
                 if (FindSeriesByNameSafe(series.Name) == null)
@@ -4968,9 +5268,9 @@ ContextMenuStrip menu)
                 {
                     return;
                 }
-                if (_chart.InvokeRequired)
+                if (MustMarshalToUiThread())
                 {
-                    _chart.Invoke(new Action<Series>(ReMoveSeriesSafe), series);
+                    RunOnUi(() => ReMoveSeriesSafe(series));
                     return;
                 }
                 if (FindSeriesByNameSafe(series.Name) == null)
@@ -4979,6 +5279,99 @@ ContextMenuStrip menu)
                 }
 
                 _chart.Series.Remove(series);
+            }
+            catch (Exception error)
+            {
+                SendLogMessage(error.ToString(), LogMessageType.Error);
+            }
+        }
+
+        /// <summary>
+        /// series marked for deferred removal. Physically removed inside Chart.Paint, right after the
+        /// library re-aligns and drops them from the area cache. UI-only: очередь и дренаж исполняются
+        /// только на UI-потоке (RunOnUi, событие Paint) — locker не нужен.
+        /// серии, помеченные к отложенному удалению; удаляются внутри Chart.Paint, после align библиотеки
+        /// </summary>
+        private List<Series> _pendingSeriesRemovals;
+
+        /// <summary>
+        /// whether Paint is subscribed for the current _chart. UI-only
+        /// подписан ли Paint для текущего _chart
+        /// </summary>
+        private bool _paintPurgeSubscribed;
+
+        /// <summary>
+        /// to mark a series for removal on the next Chart.Paint instead of an immediate Series.Remove.
+        /// Immediate removal leaves the stale name in ChartAreaAxes._series until the next align: a mouse
+        /// click or move before that reaches Cursor.RoundPosition -> GetXAxesSeries and throws ArgumentException
+        /// "A chart element with the name ... could not be found" (crash #341). Clearing points keeps the name
+        /// resolvable; the next align excludes the empty series from the cache; the purge inside Paint removes
+        /// the object afterwards.
+        /// пометить серию к удалению на следующем Chart.Paint вместо немедленного Series.Remove: немедленное
+        /// удаление оставляет stale-имя в кэше области до следующего align, и мышь бросает ArgumentException (#341)
+        /// </summary>
+        private void RemoveSeriesOnNextPaint(Series series)
+        {
+            if (_chart == null || series == null)
+            {
+                return;
+            }
+
+            RunOnUi(() =>
+            {
+                // стенды строят painter через GetUninitializedObject — инициализатор поля не отработал
+                if (_pendingSeriesRemovals == null)
+                {
+                    _pendingSeriesRemovals = new List<Series>();
+                }
+
+                if (_pendingSeriesRemovals.Contains(series))
+                {
+                    return;
+                }
+
+                series.Points.ClearFast();
+                _pendingSeriesRemovals.Add(series);
+
+                if (!_paintPurgeSubscribed)
+                {
+                    _chart.Paint += _chart_Paint;
+                    _paintPurgeSubscribed = true;
+                }
+            });
+        }
+
+        /// <summary>
+        /// removes series marked via RemoveSeriesOnNextPaint. Fires inside Paint, after the library align
+        /// rebuilt the area cache, so empty pending series are no longer referenced there.
+        /// удаляет серии, помеченные RemoveSeriesOnNextPaint. Исполляется внутри Paint, после align библиотеки
+        /// </summary>
+        private void _chart_Paint(object sender, PaintEventArgs e)
+        {
+            try
+            {
+                if (_chart == null || _pendingSeriesRemovals == null || _pendingSeriesRemovals.Count == 0)
+                {
+                    return;
+                }
+
+                List<Series> batch = new List<Series>(_pendingSeriesRemovals);
+                _pendingSeriesRemovals.Clear();
+
+                foreach (Series series in batch)
+                {
+                    if (series == null || series.Points.Count > 0)
+                    {
+                        // линия вернулась в обновлении данных — удаление отменено
+                        continue;
+                    }
+
+                    // дренаж строго по ссылке: одноимённая новая серия не должна попасть под удаление
+                    if (_chart.Series.Contains(series))
+                    {
+                        _chart.Series.Remove(series);
+                    }
+                }
             }
             catch (Exception error)
             {
@@ -5065,9 +5458,9 @@ ContextMenuStrip menu)
             {
                 return;
             }
-            if (_chart.InvokeRequired)
+            if (MustMarshalToUiThread())
             {
-                _chart.Invoke(new Action<List<Candle>>(PaintSingleVolumePattern), candles);
+                RunOnUi(() => PaintSingleVolumePattern(candles));
                 return;
             }
             if (candles == null)
@@ -5075,7 +5468,7 @@ ContextMenuStrip menu)
                 return;
             }
             _myCandles = candles;
-            Volume indicator = new Volume(false);
+            OsEngine.Charts.CandleChart.Indicators.Volume indicator = new OsEngine.Charts.CandleChart.Indicators.Volume(false);
             indicator.NameArea = "Prime";
             indicator.NameSeries = "VolumePattern";
             indicator.Values = new List<decimal>();
@@ -5102,9 +5495,9 @@ ContextMenuStrip menu)
             {
                 return;
             }
-            if (_chart.InvokeRequired)
+            if (MustMarshalToUiThread())
             {
-                _chart.Invoke(new Action<int, int, string> (PaintInDifColor), indexStart, indexEnd, seriesName);
+                RunOnUi(() => PaintInDifColor(indexStart, indexEnd, seriesName));
                 return;
             }
             if (indexStart < 0 || indexEnd < 0)
@@ -5159,10 +5552,17 @@ ContextMenuStrip menu)
 
         private void _chart_MouseLeave(object sender, EventArgs e)
         {
-            for (int i = 0; i < _chart.ChartAreas.Count; i++)
+            try
             {
-                _chart.ChartAreas[i].CursorX.Position = double.NaN;
-                _chart.ChartAreas[i].CursorY.Position = 0;
+                for (int i = 0; i < _chart.ChartAreas.Count; i++)
+                {
+                    _chart.ChartAreas[i].CursorX.Position = double.NaN;
+                    _chart.ChartAreas[i].CursorY.Position = 0;
+                }
+            }
+            catch(Exception ex)
+            {
+                SendLogMessage(ex.ToString(),LogMessageType.Error);
             }
         }
 
@@ -5177,6 +5577,12 @@ ContextMenuStrip menu)
         {
             try
             {
+                if (MustMarshalToUiThread())
+                {
+                    RunOnUi(() => GoChartToTime(time));
+                    return;
+                }
+
                 if (_myCandles == null ||
                 _myCandles.Count < 50)
                 {
@@ -5520,9 +5926,9 @@ ContextMenuStrip menu)
             {
                 return;
             }
-            if (_chart.InvokeRequired)
+            if (MustMarshalToUiThread())
             {
-                _chart.Invoke(new Action<string, string, string, decimal, Color, bool>(PaintLabelOnY2), name, nameArea, label, positionOnY, color, isPrime);
+                RunOnUi(() => PaintLabelOnY2(name, nameArea, label, positionOnY, color, isPrime));
                 return;
             }
 
@@ -5620,9 +6026,9 @@ ContextMenuStrip menu)
             {
                 return;
             }
-            if (_chart.InvokeRequired)
+            if (MustMarshalToUiThread())
             {
-                _chart.Invoke(new Action<string, string, Color>(ClearLabelOnY2), name, nameArea,color);
+                RunOnUi(() => ClearLabelOnY2(name, nameArea, color));
                 return;
             }
 
@@ -5688,9 +6094,9 @@ ContextMenuStrip menu)
             {
                 return;
             }
-            if (_chart.InvokeRequired)
+            if (MustMarshalToUiThread())
             {
-                _chart.Invoke(new Action<string>(RePaintPrimeLines), areaName);
+                RunOnUi(() => RePaintPrimeLines(areaName));
                 return;
             }
 
@@ -5848,185 +6254,200 @@ ContextMenuStrip menu)
         /// </summary>
         private void RePaintRightLebels()
         {
-            if (_chart.ChartAreas.Count == 0 ||
-                _chart.Series.Count == 0)
+            try
             {
-                return;
-            }
 
-            int index = 0;
-
-            if (_chart.ChartAreas[0].AxisX.ScrollBar.IsVisible == false)
-            {
-                for (int i = 0; i < _chart.Series.Count;i++)
+                if (_chart.ChartAreas.Count == 0 ||
+                    _chart.Series.Count == 0)
                 {
-                    if (_chart.Series[i].Points.Count > index)
+                    return;
+                }
+
+                int index = 0;
+
+                if (_chart.ChartAreas[0].AxisX.ScrollBar.IsVisible == false)
+                {
+                    for (int i = 0; i < _chart.Series.Count; i++)
                     {
-                        index = _chart.Series[i].Points.Count-1;
+                        if (_chart.Series[i].Points.Count > index)
+                        {
+                            index = _chart.Series[i].Points.Count - 1;
+                        }
                     }
                 }
-            }
-            else
-            {
-                index = (int)(_chart.ChartAreas[0].AxisX.ScaleView.Position +_chart.ChartAreas[0].AxisX.ScaleView.Size);
-            }
-
-            if(index < 0)
-            {
-                return;
-            }
-
-            for (int i = 0; i < _chart.ChartAreas.Count;i++)
-            {
-                ChartArea area = _chart.ChartAreas[i];
-
-                List<Series> mySeries = new List<Series>();
-
-                for (int i2 = 0; i2 < _chart.Series.Count; i2++)
+                else
                 {
-                    if (_chart.Series[i2].ChartArea == area.Name)
+                    index = (int)(_chart.ChartAreas[0].AxisX.ScaleView.Position + _chart.ChartAreas[0].AxisX.ScaleView.Size);
+                }
+
+                if (index < 0)
+                {
+                    return;
+                }
+
+                for (int i = 0; i < _chart.ChartAreas.Count; i++)
+                {
+                    ChartArea area = _chart.ChartAreas[i];
+
+                    List<Series> mySeries = new List<Series>();
+
+                    for (int i2 = 0; i2 < _chart.Series.Count; i2++)
                     {
-                        mySeries.Add(_chart.Series[i2]);
+                        if (_chart.Series[i2].ChartArea == area.Name)
+                        {
+                            mySeries.Add(_chart.Series[i2]);
+                        }
                     }
-                }
 
-                if (mySeries.Count == 0)
-                {
-                    continue;
-                }
-
-                for (int i2 = 0; i2 < mySeries.Count; i2++)
-                {
-                    Series series = mySeries[i2];
-
-                    if (series.Points.Count == 0 ||
-                        series.ChartType == SeriesChartType.Point)
+                    if (mySeries.Count == 0)
                     {
                         continue;
                     }
 
-                    int realIndex = index;
-
-                    if (index == series.Points.Count)
+                    for (int i2 = 0; i2 < mySeries.Count; i2++)
                     {
-                        realIndex = series.Points.Count - 1;
-                    }
-                    else
-                    {
-                        //realIndex = series.Points.Count - (series.Points.Count - 1 - index);
-                    }
+                        Series series = mySeries[i2];
 
-                    if(realIndex >= series.Points.Count)
-                    {
-                        realIndex = series.Points.Count - 1;
-                    }
-
-                    int rounder = 0;
-
-                    if (_areaSizes != null)
-                    {
-                        ChartAreaSizes size = _areaSizes.Find(sizes => sizes.Name == _chart.ChartAreas[i].Name);
-                        if (size != null)
+                        if (series.Points.Count == 0 ||
+                            series.ChartType == SeriesChartType.Point)
                         {
-                            rounder = size.Decimals;
+                            continue;
                         }
-                    }
 
-                    if (series.Name == "SeriesCandle")
-                    {
-                        PaintLabelOnY2(series.Name + "Label", series.ChartArea,
-                            (Math.Round(series.Points[realIndex].YValues[3], rounder)).ToString(_culture),
-                            (decimal)series.Points[realIndex].YValues[3], series.Points[realIndex].Color, true);
-                    }
-                    // RightLabel  Метки для Candle - High, Low, Close [справа] рисуем в цвете
-                    else if (series.ChartTypeName == "Candlestick")
-                    {
-                        double[] yVals = series.Points[realIndex].YValues;
-                        double selectedValue = yVals.FirstOrDefault(val => val != 0);
+                        int realIndex = index;
 
-                        decimal closeVal = Convert.ToDecimal(selectedValue);
-
-                        string closeText = closeVal.ToString(_culture);
-
-                        PaintLabelOnY2(series.Name + "Label", series.ChartArea, closeText, closeVal, series.Points[realIndex].BorderColor, true);
-                    }
-                    else
-                    {
-                        decimal value = Convert.ToDecimal(series.Points[realIndex].YValues[0]);
-
-                        value = (Math.Round(value, rounder));
-
-                        int valueDecimalsCount = value.ToString().DecimalsCount();
-                        string valueToPaint = value.ToString(CultureInfo.InvariantCulture);
-
-                        if (rounder > 0 &&
-                            valueDecimalsCount != 0)
+                        if (index == series.Points.Count)
                         {
-                            while (valueToPaint.Length != 0
-                                   && valueToPaint[valueToPaint.Length - 1] == '0')
+                            realIndex = series.Points.Count - 1;
+                        }
+                        else
+                        {
+                            //realIndex = series.Points.Count - (series.Points.Count - 1 - index);
+                        }
+
+                        if (realIndex >= series.Points.Count)
+                        {
+                            realIndex = series.Points.Count - 1;
+                        }
+
+                        int rounder = 0;
+
+                        if (_areaSizes != null)
+                        {
+                            ChartAreaSizes size = _areaSizes.Find(sizes => sizes.Name == _chart.ChartAreas[i].Name);
+                            if (size != null)
                             {
-                                valueToPaint = valueToPaint.Substring(0,valueToPaint.Length - 1);
+                                rounder = size.Decimals;
                             }
                         }
 
-                        decimal valueToPaintDecimal = value;
-
-                        while (rounder > 0 &&
-                            valueDecimalsCount < rounder)
+                        if (series.Name == "SeriesCandle")
                         {
-                            decimal newValue = 0;
-
-                            string stringToParse = value.ToString(CultureInfo.InvariantCulture);
-
-                            if (valueDecimalsCount == 0
-                                && stringToParse.Contains(".") == false)
-                            {
-                                stringToParse += ".1";
-                            }
-                            else
-                            {
-                                stringToParse += "1";
-                            }
-
-                            try
-                            {
-                                newValue = stringToParse.ToDecimal();
-                            }
-                            catch
-                            {
-
-                            }
-
-                            value = newValue;
-
-                            if (valueDecimalsCount == 0
-                                && stringToParse.Contains(".") == false)
-                            {
-                                valueToPaint += ",0";
-                            }
-                            else
-                            {
-                                valueToPaint += "0";
-                            }
-
-                            valueDecimalsCount = value.ToString().DecimalsCount();
-
-                            if(valueToPaint.Length > 30)
-                            {
-                                break;
-                            }
+                            PaintLabelOnY2(series.Name + "Label", series.ChartArea,
+                                (Math.Round(series.Points[realIndex].YValues[3], rounder)).ToString(_culture),
+                                (decimal)series.Points[realIndex].YValues[3], series.Points[realIndex].Color, true);
                         }
+                        // RightLabel  Метки для Candle - High, Low, Close [справа] рисуем в цвете
+                        else if (series.ChartTypeName == "Candlestick")
+                        {
+                            double[] yVals = series.Points[realIndex].YValues;
+                            double selectedValue = yVals.FirstOrDefault(val => val != 0);
 
-                        PaintLabelOnY2(series.Name + "Label", series.ChartArea,
-                            valueToPaint, valueToPaintDecimal, series.Points[realIndex].Color, true);
+                            decimal closeVal = Convert.ToDecimal(selectedValue);
+
+                            string closeText = closeVal.ToString(_culture);
+
+                            PaintLabelOnY2(series.Name + "Label", series.ChartArea, closeText, closeVal, series.Points[realIndex].BorderColor, true);
+                        }
+                        else
+                        {
+                            decimal value = Convert.ToDecimal(series.Points[realIndex].YValues[0]);
+
+                            value = (Math.Round(value, rounder));
+
+                            int valueDecimalsCount = value.ToString().DecimalsCount();
+                            string valueToPaint = value.ToString(CultureInfo.InvariantCulture);
+
+                            if (rounder > 0 &&
+                                valueDecimalsCount != 0)
+                            {
+                                while (valueToPaint.Length != 0
+                                       && valueToPaint[valueToPaint.Length - 1] == '0')
+                                {
+                                    valueToPaint = valueToPaint.Substring(0, valueToPaint.Length - 1);
+                                }
+                            }
+
+                            decimal valueToPaintDecimal = value;
+
+                            while (rounder > 0 &&
+                                valueDecimalsCount < rounder)
+                            {
+                                decimal newValue = 0;
+
+                                string stringToParse = value.ToString(CultureInfo.InvariantCulture);
+
+                                if (valueDecimalsCount == 0
+                                    && stringToParse.Contains(".") == false)
+                                {
+                                    stringToParse += ".1";
+                                }
+                                else
+                                {
+                                    stringToParse += "1";
+                                }
+
+                                try
+                                {
+                                    newValue = stringToParse.ToDecimal();
+                                }
+                                catch
+                                {
+
+                                }
+
+                                value = newValue;
+
+                                if (valueDecimalsCount == 0
+                                    && stringToParse.Contains(".") == false)
+                                {
+                                    valueToPaint += ",0";
+                                }
+                                else
+                                {
+                                    valueToPaint += "0";
+                                }
+
+                                valueDecimalsCount = value.ToString().DecimalsCount();
+
+                                if (valueToPaint.Length > 30)
+                                {
+                                    break;
+                                }
+                            }
+
+                            PaintLabelOnY2(series.Name + "Label", series.ChartArea,
+                                valueToPaint, valueToPaintDecimal, series.Points[realIndex].Color, true);
+                        }
                     }
                 }
+            }
+            catch (Exception ex)
+            {
+                SendLogMessage(ex.ToString(), LogMessageType.Error);
             }
         }
         
         void _chart_AxisViewChanging(object sender, ViewEventArgs e)
         {
-            RePaintRightLebels();
+            try
+            {
+                RePaintRightLebels();
+            }
+            catch(Exception ex)
+            {
+                SendLogMessage(ex.ToString(),LogMessageType.Error);
+            }
         }
 
         // management of collapsing areas управление схлопывание областей
@@ -6132,64 +6553,224 @@ ContextMenuStrip menu)
 
         private void _chart_MouseMove(object sender, MouseEventArgs e)
         {
-            if (IsPatternChart)
+            try
             {
-                return;
-            }
+                if (IsPatternChart)
+                {
+                    return;
+                }
 
-            if (_chart.Cursor == Cursors.SizeAll)
-            {
-                return;
-            }
+                if (_chart.Cursor == Cursors.SizeAll)
+                {
+                    return;
+                }
 
-            if (_chart.ChartAreas.Count < 2)
-            {
-                return;
-            }
+                if (_chart.ChartAreas.Count < 2)
+                {
+                    return;
+                }
 
-            if (e.Button == MouseButtons.Left &&
-                _chart.Cursor == Cursors.Arrow)
-            {
-                return;
-            }
+                if (e.Button == MouseButtons.Left &&
+                    _chart.Cursor == Cursors.Arrow)
+                {
+                    return;
+                }
 
-            if (_areaPositions.Count != _chart.ChartAreas.Count ||
-                _areaPositions.Find(pos => pos.RightPoint == 0) != null)
-            {
-                _areaPositions = new List<ChartAreaPosition>();
+                if (_areaPositions.Count != _chart.ChartAreas.Count ||
+                    _areaPositions.Find(pos => pos.RightPoint == 0) != null)
+                {
+                    _areaPositions = new List<ChartAreaPosition>();
+                    ReloadChartAreasSize();
+                }
+
+                if (_chart.Cursor == Cursors.Hand || _chart.Cursor == Cursors.SizeWE ||
+                    _areaPositions == null ||
+                    _areaPositions.Count < 2)
+                {
+                    return;
+                }
+
+                ChartAreaPosition myPosition = null;
+                ChartAreaPosition positionBeforeUs = null;
+
+                MouseEventArgs mouse = (MouseEventArgs)e;
+
+                for (int i = 1; i < _areaPositions.Count; i++)
+                {
+                    ChartAreaPosition pos = _areaPositions[i];
+
+                    if ((mouse.Button == MouseButtons.Left && _chart.Cursor == Cursors.SizeNS &&
+                         pos.LeftPoint < e.X &&
+                         pos.RightPoint > e.X &&
+                         pos.UpPoint + pos.UpPoint * 0.09 > e.Y &&
+                         pos.UpPoint - pos.UpPoint * 0.09 < e.Y) ||
+
+                        (pos.LeftPoint < e.X &&
+                         pos.RightPoint > e.X &&
+                         pos.UpPoint + pos.UpPoint * 0.02 > e.Y &&
+                         pos.UpPoint - pos.UpPoint * 0.02 < e.Y))
+                    {
+                        positionBeforeUs = _areaPositions[i - 1];
+                        myPosition = pos;
+                        _chart.Cursor = Cursors.SizeNS;
+                    }
+                    else
+                    {
+                        pos.ValueYMouseOnClickStart = 0;
+                        pos.HeightAreaOnClick = 0;
+                        pos.ValueYChartOnClick = 0;
+                    }
+                }
+
+                if (myPosition == null)
+                {
+                    if (_chart.Cursor != Cursors.Arrow)
+                    {
+                        _chart.Cursor = Cursors.Arrow;
+                    }
+
+                    return;
+                }
+
+                if (mouse.Button != MouseButtons.Left)
+                {
+                    myPosition.ValueYMouseOnClickStart = 0;
+                }
+                // dragging and dropping areas
+                // Here we have a left-hand button pressed
+                // перетаскивание областей
+                // Здесь у нас есть нажатая левая кнопка
+
+                if (myPosition.ValueYMouseOnClickStart == 0)
+                {
+                    myPosition.ValueYMouseOnClickStart = e.Y;
+                    myPosition.HeightAreaOnClick = myPosition.Area.Position.Height;
+                    myPosition.ValueYChartOnClick = myPosition.Area.Position.Y;
+                    myPosition.HeightAreaOnClickBeforeUs = positionBeforeUs.Area.Position.Height;
+
+                    return;
+                }
+
+                double percentMove = Math.Abs(myPosition.ValueYMouseOnClickStart - e.Y) / _host.Child.Height;
+
+                if (double.IsInfinity(percentMove) ||
+                    percentMove == 0)
+                {
+                    return;
+                }
+
+                double concateValue = 100 * percentMove;
+
+                if (myPosition.ValueYMouseOnClickStart < e.Y)
+                {
+                    if (myPosition.Area.Position.Height < 10)
+                    {
+                        return;
+                    }
+                    myPosition.Area.Position.Height = (float)(myPosition.HeightAreaOnClick - concateValue);
+                    myPosition.Area.Position.Y = (float)(myPosition.ValueYChartOnClick + concateValue);
+
+                    positionBeforeUs.Area.Position.Height = (float)(myPosition.HeightAreaOnClickBeforeUs + concateValue);
+                }
+                else if (myPosition.ValueYMouseOnClickStart > e.Y)
+                {
+                    if (positionBeforeUs.Area.Position.Height < 10)
+                    {
+                        return;
+                    }
+                    myPosition.Area.Position.Height = (float)(myPosition.HeightAreaOnClick + concateValue);
+                    myPosition.Area.Position.Y = (float)(myPosition.ValueYChartOnClick - concateValue);
+
+                    positionBeforeUs.Area.Position.Height = (float)(myPosition.HeightAreaOnClickBeforeUs - concateValue);
+                }
                 ReloadChartAreasSize();
             }
-
-            if (_chart.Cursor == Cursors.Hand || _chart.Cursor == Cursors.SizeWE ||
-                _areaPositions == null ||
-                _areaPositions.Count < 2)
+            catch (Exception ex)
             {
-                return;
+                SendLogMessage(ex.ToString(), LogMessageType.Error);
             }
+        }
 
-            ChartAreaPosition myPosition = null;
-            ChartAreaPosition positionBeforeUs = null;
-
-            MouseEventArgs mouse = (MouseEventArgs) e;
-
-            for (int i = 1; i < _areaPositions.Count; i++)
+        private void _chart_MouseUp(object sender, MouseEventArgs e)
+        {
+            try
             {
-                ChartAreaPosition pos = _areaPositions[i];
-
-                if ((mouse.Button == MouseButtons.Left && _chart.Cursor == Cursors.SizeNS &&
-                     pos.LeftPoint < e.X &&
-                     pos.RightPoint > e.X &&
-                     pos.UpPoint + pos.UpPoint*0.09 > e.Y &&
-                     pos.UpPoint - pos.UpPoint*0.09 < e.Y) ||
-
-                    (pos.LeftPoint < e.X &&
-                     pos.RightPoint > e.X &&
-                     pos.UpPoint + pos.UpPoint*0.02 > e.Y &&
-                     pos.UpPoint - pos.UpPoint*0.02 < e.Y))
+                for (int i = 0; i < _chart.ChartAreas.Count; i++)
                 {
-                    positionBeforeUs = _areaPositions[i - 1];
+                    ResizeYAxisOnArea(_chart.ChartAreas[i].Name);
+                }
+            }
+            catch(Exception ex)
+            {
+                SendLogMessage(ex.ToString(),LogMessageType.Error); 
+            }
+        }
+
+        private void _chart_MouseMove2(object sender, MouseEventArgs e)
+        {
+            try
+            {
+                if (IsPatternChart)
+                {
+                    return;
+                }
+
+                if (_chart.Cursor == Cursors.SizeAll)
+                {
+                    return;
+                }
+
+                if (_chart.ChartAreas.Count < 1)
+                {
+                    return;
+                }
+
+                if (e.Button == MouseButtons.Left &&
+                    _chart.Cursor == Cursors.Arrow)
+                {
+                    return;
+                }
+
+                if (_areaPositions == null)
+                {
+                    return;
+                }
+
+                if (_areaPositions.Count != _chart.ChartAreas.Count ||
+                    _areaPositions.Find(posi => posi.RightPoint == 0) != null)
+                {
+                    _areaPositions = new List<ChartAreaPosition>();
+                    ReloadChartAreasSize();
+                }
+
+                if (_chart.Cursor == Cursors.Hand ||
+                    _chart.Cursor == Cursors.SizeNS ||
+                    _areaPositions == null)
+                {
+                    return;
+                }
+
+                ChartAreaPosition myPosition = null;
+
+                MouseEventArgs mouse = (MouseEventArgs)e;
+
+                ChartAreaPosition pos = _areaPositions[0];
+
+                double mult = pos.DownPoint / 250000;
+
+                if ((pos.LeftPoint < e.X &&
+                     pos.RightPoint > e.X &&
+                     e.Y > pos.DownPoint - pos.DownPoint * 0.05 &&
+                     e.Y < pos.DownPoint - pos.DownPoint * (0.002 + mult))
+                     && e.X > 20    //AVP ChartRoulette 
+                    ||
+                    (mouse.Button == MouseButtons.Left && _chart.Cursor == Cursors.SizeWE && pos.LeftPoint < e.X &&
+                     pos.RightPoint > e.X &&
+                     pos.DownPoint - 50 < e.Y &&
+                     pos.DownPoint + 50 > e.Y))
+                {
                     myPosition = pos;
-                    _chart.Cursor = Cursors.SizeNS;
+                    _chart.Cursor = Cursors.SizeWE;
                 }
                 else
                 {
@@ -6197,202 +6778,57 @@ ContextMenuStrip menu)
                     pos.HeightAreaOnClick = 0;
                     pos.ValueYChartOnClick = 0;
                 }
-            }
 
-            if (myPosition == null)
-            {
-                if(_chart.Cursor != Cursors.Arrow)
+
+                if (myPosition == null)
                 {
-                    _chart.Cursor = Cursors.Arrow;
-                }
-               
-                return;
-            }
-
-            if (mouse.Button != MouseButtons.Left)
-            {
-                myPosition.ValueYMouseOnClickStart = 0;
-            }
-            // dragging and dropping areas
-            // Here we have a left-hand button pressed
-            // перетаскивание областей
-            // Здесь у нас есть нажатая левая кнопка
-
-            if (myPosition.ValueYMouseOnClickStart == 0)
-            {
-                myPosition.ValueYMouseOnClickStart = e.Y;
-                myPosition.HeightAreaOnClick = myPosition.Area.Position.Height;
-                myPosition.ValueYChartOnClick = myPosition.Area.Position.Y;
-                myPosition.HeightAreaOnClickBeforeUs = positionBeforeUs.Area.Position.Height;
-
-                return;
-            }
-
-            double percentMove = Math.Abs(myPosition.ValueYMouseOnClickStart - e.Y)/_host.Child.Height;
-
-            if (double.IsInfinity(percentMove) ||
-                percentMove == 0)
-            {
-                return;
-            }
-
-            double concateValue = 100*percentMove;
-
-            if (myPosition.ValueYMouseOnClickStart < e.Y)
-            {
-                if (myPosition.Area.Position.Height < 10)
-                {
-                    return;
-                }
-                myPosition.Area.Position.Height = (float) (myPosition.HeightAreaOnClick - concateValue);
-                myPosition.Area.Position.Y = (float) (myPosition.ValueYChartOnClick + concateValue);
-
-                positionBeforeUs.Area.Position.Height = (float) (myPosition.HeightAreaOnClickBeforeUs + concateValue);
-            }
-            else if (myPosition.ValueYMouseOnClickStart > e.Y)
-            {
-                if (positionBeforeUs.Area.Position.Height < 10)
-                {
-                    return;
-                }
-                myPosition.Area.Position.Height = (float) (myPosition.HeightAreaOnClick + concateValue);
-                myPosition.Area.Position.Y = (float) (myPosition.ValueYChartOnClick - concateValue);
-
-                positionBeforeUs.Area.Position.Height = (float) (myPosition.HeightAreaOnClickBeforeUs - concateValue);
-            }
-            ReloadChartAreasSize();
-
-        }
-
-        private void _chart_MouseUp(object sender, MouseEventArgs e)
-        {
-            for (int i = 0; i < _chart.ChartAreas.Count; i++)
-            {
-                ResizeYAxisOnArea(_chart.ChartAreas[i].Name);
-            }
-        }
-
-        private void _chart_MouseMove2(object sender, MouseEventArgs e)
-        {
-            if (IsPatternChart)
-            {
-                return;
-            }
-
-            if (_chart.Cursor == Cursors.SizeAll)
-            {
-                return;
-            }
-
-            if (_chart.ChartAreas.Count < 1)
-            {
-                return;
-            }
-
-            if (e.Button == MouseButtons.Left &&
-                _chart.Cursor == Cursors.Arrow)
-            {
-                return;
-            }
-
-            if (_areaPositions == null)
-            {
-                return;
-            }
-
-            if (_areaPositions.Count != _chart.ChartAreas.Count ||
-                _areaPositions.Find(posi => posi.RightPoint == 0) != null)
-            {
-                _areaPositions = new List<ChartAreaPosition>();
-                ReloadChartAreasSize();
-            }
-
-            if (_chart.Cursor == Cursors.Hand ||
-                _chart.Cursor == Cursors.SizeNS ||
-                _areaPositions == null)
-            {
-                return;
-            }
-
-            ChartAreaPosition myPosition = null;
-
-            MouseEventArgs mouse = (MouseEventArgs) e;
-
-            ChartAreaPosition pos = _areaPositions[0];
-
-            double mult = pos.DownPoint / 250000;
-
-            if ((pos.LeftPoint < e.X &&
-                 pos.RightPoint > e.X &&
-                 e.Y > pos.DownPoint - pos.DownPoint * 0.05 &&
-                 e.Y < pos.DownPoint - pos.DownPoint * (0.002 + mult))
-                 && e.X > 20    //AVP ChartRoulette 
-                ||
-                (mouse.Button == MouseButtons.Left && _chart.Cursor == Cursors.SizeWE && pos.LeftPoint < e.X &&
-                 pos.RightPoint > e.X &&
-                 pos.DownPoint - 50 < e.Y &&
-                 pos.DownPoint + 50 > e.Y))
-            {
-                myPosition = pos;
-                _chart.Cursor = Cursors.SizeWE;
-            }
-            else
-            {
-                pos.ValueYMouseOnClickStart = 0;
-                pos.HeightAreaOnClick = 0;
-                pos.ValueYChartOnClick = 0;
-            }
-
-
-            if (myPosition == null)
-            {
-                if (_chart.Cursor != Cursors.Arrow)
-                {
-                    _chart.Cursor = Cursors.Arrow;
-                }
-                return;
-            }
-
-            if (mouse.Button != MouseButtons.Left)
-            {
-                myPosition.ValueXMouseOnClickStart = 0;
-                myPosition.CountXValuesChartOnClickStart = 0;
-                return;
-            }
-
-            if (myPosition.ValueXMouseOnClickStart == 0)
-            {
-                myPosition.ValueXMouseOnClickStart = e.X;
-
-                if (double.IsNaN(_chart.ChartAreas[0].AxisX.ScaleView.Size))
-                {
-                    int max = 0;
-                    for (int i = 0; i < _chart.Series.Count; i++)
+                    if (_chart.Cursor != Cursors.Arrow)
                     {
-                        if (_chart.Series[0].Points.Count > max)
-                        {
-                            max = _chart.Series[0].Points.Count;
-                        }
+                        _chart.Cursor = Cursors.Arrow;
                     }
-                    myPosition.CountXValuesChartOnClickStart = max;
+                    return;
                 }
-                else
+
+                if (mouse.Button != MouseButtons.Left)
                 {
-                    myPosition.CountXValuesChartOnClickStart = (int) _chart.ChartAreas[0].AxisX.ScaleView.Size;
+                    myPosition.ValueXMouseOnClickStart = 0;
+                    myPosition.CountXValuesChartOnClickStart = 0;
+                    return;
                 }
-                return;
-            }
+
+                if (myPosition.ValueXMouseOnClickStart == 0)
+                {
+                    myPosition.ValueXMouseOnClickStart = e.X;
+
+                    if (double.IsNaN(_chart.ChartAreas[0].AxisX.ScaleView.Size))
+                    {
+                        int max = 0;
+                        for (int i = 0; i < _chart.Series.Count; i++)
+                        {
+                            if (_chart.Series[0].Points.Count > max)
+                            {
+                                max = _chart.Series[0].Points.Count;
+                            }
+                        }
+                        myPosition.CountXValuesChartOnClickStart = max;
+                    }
+                    else
+                    {
+                        myPosition.CountXValuesChartOnClickStart = (int)_chart.ChartAreas[0].AxisX.ScaleView.Size;
+                    }
+                    return;
+                }
 
 
-            double percentMove = Math.Abs(myPosition.ValueXMouseOnClickStart - e.X) / _host.Child.Width;
+                double percentMove = Math.Abs(myPosition.ValueXMouseOnClickStart - e.X) / _host.Child.Width;
 
-            if (double.IsInfinity(percentMove) ||
-                percentMove == 0)
-            {
-                return;
-            }
+                if (double.IsInfinity(percentMove) ||
+                    percentMove == 0)
+                {
+                    return;
+                }
 
-            //double concateValue = 100*percentMove*5;
+                //double concateValue = 100*percentMove*5;
 
 
                 int maxSize = 0;
@@ -6405,72 +6841,84 @@ ContextMenuStrip menu)
                 }
 
 
-            if (myPosition.ValueXMouseOnClickStart < e.X)
-            {
-                if (myPosition.Area.Position.Height < 10)
+                if (myPosition.ValueXMouseOnClickStart < e.X)
                 {
-                    return;
-                }
-
-                double newVal = myPosition.CountXValuesChartOnClickStart +
-                             myPosition.CountXValuesChartOnClickStart*percentMove*3;
-
-
-                if (newVal > maxSize)
-                {
-                    _chart.ChartAreas[0].AxisX.ScaleView.Size = Double.NaN;
-                }
-                else
-                {
-                   
-                    if (newVal + _chart.ChartAreas[0].AxisX.ScaleView.Position > maxSize)
+                    if (myPosition.Area.Position.Height < 10)
                     {
-                        _chart.ChartAreas[0].AxisX.ScaleView.Position = maxSize - newVal;
+                        return;
                     }
 
-                    _chart.ChartAreas[0].AxisX.ScaleView.Size = newVal;
-                    RePaintRightLebels();
+                    double newVal = myPosition.CountXValuesChartOnClickStart +
+                                 myPosition.CountXValuesChartOnClickStart * percentMove * 3;
 
-                    if (_chart.ChartAreas[0].AxisX.ScaleView.Position + newVal > maxSize)
+
+                    if (newVal > maxSize)
                     {
-                        _chart.ChartAreas[0].AxisX.ScaleView.Position = maxSize - newVal;
+                        _chart.ChartAreas[0].AxisX.ScaleView.Size = Double.NaN;
+                    }
+                    else
+                    {
+
+                        if (newVal + _chart.ChartAreas[0].AxisX.ScaleView.Position > maxSize)
+                        {
+                            _chart.ChartAreas[0].AxisX.ScaleView.Position = maxSize - newVal;
+                        }
+
+                        _chart.ChartAreas[0].AxisX.ScaleView.Size = newVal;
+                        RePaintRightLebels();
+
+                        if (_chart.ChartAreas[0].AxisX.ScaleView.Position + newVal > maxSize)
+                        {
+                            _chart.ChartAreas[0].AxisX.ScaleView.Position = maxSize - newVal;
+                        }
                     }
                 }
+                else if (myPosition.ValueXMouseOnClickStart > e.X)
+                {
+                    double newVal = myPosition.CountXValuesChartOnClickStart -
+                   myPosition.CountXValuesChartOnClickStart * percentMove * 3;
+
+
+                    if (newVal < 5)
+                    {
+                        _chart.ChartAreas[0].AxisX.ScaleView.Size = 5;
+                    }
+                    else
+                    {
+                        if (!double.IsNaN(_chart.ChartAreas[0].AxisX.ScaleView.Size))
+                        {
+                            _chart.ChartAreas[0].AxisX.ScaleView.Position = _chart.ChartAreas[0].AxisX.ScaleView.Position + _chart.ChartAreas[0].AxisX.ScaleView.Size - newVal;
+                        }
+
+                        _chart.ChartAreas[0].AxisX.ScaleView.Size = newVal;
+                        if (_chart.ChartAreas[0].AxisX.ScaleView.Position + newVal > maxSize)
+                        {
+                            _chart.ChartAreas[0].AxisX.ScaleView.Position = maxSize - newVal;
+                        }
+
+                    }
+                }
+
+                ResizeYAxisOnArea("Prime");
+                ResizeXAxis();
+                ResizeSeriesLabels();
             }
-            else if (myPosition.ValueXMouseOnClickStart > e.X)
+            catch (Exception ex)
             {
-                double newVal = myPosition.CountXValuesChartOnClickStart -
-               myPosition.CountXValuesChartOnClickStart * percentMove * 3;
-
-
-                if (newVal < 5)
-                {
-                    _chart.ChartAreas[0].AxisX.ScaleView.Size = 5;
-                }
-                else
-                {
-                    if (!double.IsNaN(_chart.ChartAreas[0].AxisX.ScaleView.Size))
-                    {
-                        _chart.ChartAreas[0].AxisX.ScaleView.Position = _chart.ChartAreas[0].AxisX.ScaleView.Position + _chart.ChartAreas[0].AxisX.ScaleView.Size - newVal;
-                    }
-                    
-                    _chart.ChartAreas[0].AxisX.ScaleView.Size = newVal;
-                    if (_chart.ChartAreas[0].AxisX.ScaleView.Position + newVal > maxSize)
-                    {
-                        _chart.ChartAreas[0].AxisX.ScaleView.Position = maxSize - newVal;
-                    }
-                   
-                }
+                SendLogMessage(ex.ToString(), LogMessageType.Error);
             }
-
-            ResizeYAxisOnArea("Prime");
-            ResizeXAxis();
-            ResizeSeriesLabels();
         }
 
-        void _chart_ClientSizeChanged(object sender, EventArgs e)
+        private void _chart_ClientSizeChanged(object sender, EventArgs e)
         {
-            ReloadChartAreasSize();
+            try
+            {
+                ReloadChartAreasSize();
+            }
+            catch (Exception ex)
+            {
+                SendLogMessage(ex.ToString(), LogMessageType.Error);
+            }
         }
 
         /// <summary>
@@ -6479,15 +6927,22 @@ ContextMenuStrip menu)
         /// </summary>
         private void ReloadChartAreasSize()
         {
-            if (_areaPositions == null)
+            try
             {
-                _areaPositions = new List<ChartAreaPosition>();
-            }
+                if (_areaPositions == null)
+                {
+                    _areaPositions = new List<ChartAreaPosition>();
+                }
 
-            for (int i = 0; _chart != null &&
-                i < _chart.ChartAreas.Count; i++)
+                for (int i = 0; _chart != null &&
+                    i < _chart.ChartAreas.Count; i++)
+                {
+                    GetAreaPosition(_chart.ChartAreas[i]);
+                }
+            }
+            catch(Exception ex)
             {
-                GetAreaPosition(_chart.ChartAreas[i]);
+                SendLogMessage(ex.ToString(),LogMessageType.Error);
             }
         }
 
@@ -7030,15 +7485,22 @@ ContextMenuStrip menu)
         /// LCM up
         /// поднялась ЛКМ
         /// </summary>
-        void _chartForCandle_MouseUp(object sender, MouseEventArgs e) 
+        void _chartForCandle_MouseUp(object sender, MouseEventArgs e)
         {
-            if (IsPatternChart)
+            try
             {
-                return;
-            }
+                if (IsPatternChart)
+                {
+                    return;
+                }
 
-            _mouseDown = false;
-            _chart.Cursor = Cursors.Default;
+                _mouseDown = false;
+                _chart.Cursor = Cursors.Default;
+            }
+            catch (Exception error)
+            {
+                SendLogMessage(error.ToString(), LogMessageType.Error);
+            }
         }
 
         /// <summary>
@@ -7047,61 +7509,68 @@ ContextMenuStrip menu)
         /// </summary>
         private void _chartForCandle_MouseDown(object sender, MouseEventArgs e)
         {
-            if (IsPatternChart)
+            try
             {
-                return;
-            }
-
-            if (e.Button != MouseButtons.Left)
-            {
-                return;
-            }
-
-            _mouseDown = true;
-            // accept event on the right side of host
-            // принимаем событие в правой части хоста
-            if (_areaPositions == null)
-            {
-                return;
-            }
-
-            _resizeArea = null;
-
-            ChartAreaPosition myPosition = null;
-
-            if (_areaPositions == null || 
-                _areaPositions.Count == 0 || 
-                _areaPositions[0].RightPoint == _chart.Width)
-            {
-                ReloadChartAreasSize();
-            }
-
-            if (_areaPositions == null)
-            {
-                return;
-            }
-
-            for (int i = 0; i < _areaPositions.Count; i++)
-            {
-                ChartAreaPosition pos = _areaPositions[i];
-
-                if (pos.RightPoint < e.X && pos.UpPoint < e.Y && pos.DownPoint > e.Y)
+                if (IsPatternChart)
                 {
-                    myPosition = pos;
-                    break;
+                    return;
                 }
-            }
 
-            if (myPosition == null)
+                if (e.Button != MouseButtons.Left)
+                {
+                    return;
+                }
+
+                _mouseDown = true;
+                // accept event on the right side of host
+                // принимаем событие в правой части хоста
+                if (_areaPositions == null)
+                {
+                    return;
+                }
+
+                _resizeArea = null;
+
+                ChartAreaPosition myPosition = null;
+
+                if (_areaPositions == null ||
+                    _areaPositions.Count == 0 ||
+                    _areaPositions[0].RightPoint == _chart.Width)
+                {
+                    ReloadChartAreasSize();
+                }
+
+                if (_areaPositions == null)
+                {
+                    return;
+                }
+
+                for (int i = 0; i < _areaPositions.Count; i++)
+                {
+                    ChartAreaPosition pos = _areaPositions[i];
+
+                    if (pos.RightPoint < e.X && pos.UpPoint < e.Y && pos.DownPoint > e.Y)
+                    {
+                        myPosition = pos;
+                        break;
+                    }
+                }
+
+                if (myPosition == null)
+                {
+                    return;
+                }
+
+                _resizeArea = myPosition.Area.Name;
+
+                _firstY = e.Y;
+                _chart.Cursor = Cursors.Hand;
+
+            }
+            catch (Exception error)
             {
-                return;
+                SendLogMessage(error.ToString(), LogMessageType.Error);
             }
-
-            _resizeArea = myPosition.Area.Name;
-
-            _firstY = e.Y;
-            _chart.Cursor = Cursors.Hand;
-
         }
 
         private bool _mouseDown;
@@ -7235,9 +7704,9 @@ ContextMenuStrip menu)
                 {
                     return;
                 }
-                if (_chart.InvokeRequired)
+                if (MustMarshalToUiThread())
                 {
-                    _chart.Invoke(new Action<string, bool>(ResizeYAxisOnArea), areaName,full);
+                    RunOnUi(() => ResizeYAxisOnArea(areaName, full));
                     return;
                 }
 
@@ -7674,9 +8143,9 @@ ContextMenuStrip menu)
             {
                 return;
             }
-            if (_chart.InvokeRequired)
+            if (MustMarshalToUiThread())
             {
-                _chart.Invoke(new Action(ResizeXAxis));
+                RunOnUi(ResizeXAxis);
 
                 return;
             }
@@ -7774,9 +8243,9 @@ ContextMenuStrip menu)
             {
                 return;
             }
-            if (_chart.InvokeRequired)
+            if (MustMarshalToUiThread())
             {
-                _chart.Invoke(new Action(ResizeTickArea));
+                RunOnUi(ResizeTickArea);
                 return;
             }
 
@@ -7861,9 +8330,9 @@ ContextMenuStrip menu)
                 {
                     return;
                 }
-                if (_chart.InvokeRequired)
+                if (MustMarshalToUiThread())
                 {
-                    _chart.Invoke(new Action(ClearZoom));
+                    RunOnUi(ClearZoom);
                     return;
                 }
 
@@ -7902,9 +8371,9 @@ ContextMenuStrip menu)
             {
                 return;
             }
-            if (_chart.InvokeRequired)
+            if (MustMarshalToUiThread())
             {
-                _chart.Invoke(new Action<int>(MoveChartToTheRightLogic), scaleSize);
+                RunOnUi(() => MoveChartToTheRightLogic(scaleSize));
 
                 return;
             }
@@ -7980,9 +8449,9 @@ ContextMenuStrip menu)
 
         private void ChangeOpenScaleSize(int value)
         {
-            if (_chart.InvokeRequired)
+            if (MustMarshalToUiThread())
             {
-                _chart.Invoke(new Action<int>(ChangeOpenScaleSize), value);
+                RunOnUi(() => ChangeOpenScaleSize(value));
                 return;
             }
 
@@ -8012,9 +8481,9 @@ ContextMenuStrip menu)
 
         public void SetAxisXPositionFromRight(int xPosition)
         {
-            if (_chart.InvokeRequired)
+            if (MustMarshalToUiThread())
             {
-                _chart.Invoke(new Action<int>(SetAxisXPositionFromRight), xPosition);
+                RunOnUi(() => SetAxisXPositionFromRight(xPosition));
                 return;
             }
 

@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Your rights to use code governed by this license https://github.com/AlexWan/OsEngine/blob/master/LICENSE
  * Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
 */
@@ -7,6 +7,7 @@ using OsEngine.Entity;
 using OsEngine.Language;
 using OsEngine.Layout;
 using OsEngine.Market;
+using System;
 using OsEngine.Market.SupportTable;
 using OsEngine.OsTrader.Gui.BlockInterface;
 using OsEngine.OsTrader.ServerAvailability;
@@ -21,6 +22,7 @@ namespace OsEngine.OsTrader.Gui
         {
             InitializeComponent();
             OsEngine.Layout.StickyBorders.Listen(this);
+            OsEngine.Layout.StartupLocation.Start_FitHeightToWorkArea(this);
             ServerMaster.SetHostTable(HostPortfolios, HostActiveOrders, HostHistoricalOrders, StartUiToPainter.IsOsTraderLight, 
                 ComboBoxQuantityPerPageActive, BackButtonActiveList, NextButtonActiveList, ComboBoxQuantityPerPageHistorical, 
                 BackButtonHistoricalList, NextButtonHistoricalList);
@@ -37,7 +39,8 @@ namespace OsEngine.OsTrader.Gui
 
             LabelOsa.Content = "V_" + System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
 
-            Closing += TesterUi_Closing;
+            Closing += RobotUiLite_Closing;
+            Closed += RobotUiLite_Closed;
             Local();
 
             _painter = new BotTabsPainter(_strategyKeeper, BotsHost);
@@ -86,13 +89,122 @@ namespace OsEngine.OsTrader.Gui
             Instance = this;            
         }
 
+        private void RobotUiLite_Closing(object sender, System.ComponentModel.CancelEventArgs e)
+        {
+            try
+            {
+                if (Application.Current.MainWindow is MainWindow mainWindow
+                    && mainWindow.IsProgrammaticClose)
+                {
+                    _painterServer.Dispose();
+                    _painterServer = null;
+                    _painter = null;
+                    _strategyKeeper.StopPaint();
+                    return;
+                }
+
+                AcceptDialogUi ui = new AcceptDialogUi(OsLocalization.Trader.Label48);
+                ui.ShowDialog();
+
+                if (ui.UserAcceptAction == false)
+                {
+                    e.Cancel = true;
+                    return;
+                }
+
+                _painterServer.Dispose();
+                _painterServer = null;
+                _painter = null;
+                _strategyKeeper.StopPaint();
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private void RobotUiLite_Closed(object sender, EventArgs e)
+        {
+            try
+            {
+                rectToMove.MouseEnter -= GreedChartPanel_MouseEnter;
+                rectToMove.MouseLeave -= GreedChartPanel_MouseLeave;
+                rectToMove.MouseDown -= GreedChartPanel_MouseDown;
+
+                ImagePadlock.MouseEnter -= ImagePadlock_MouseEnter;
+                ImagePadlock.MouseLeave -= ImagePadlock_MouseLeave;
+                ImagePadlock.MouseDown -= ImagePadlock_MouseDown;
+
+                ImagePadlockOpen.MouseEnter -= ImagePadlockOpen_MouseEnter;
+                ImagePadlockOpen.MouseLeave -= ImagePadlockOpen_MouseLeave;
+                ImagePadlockOpen.MouseDown -= ImagePadlockOpen_MouseDown;
+
+                if (HostPortfolios != null)
+                {
+                    HostPortfolios.Child = null;
+                }
+                if (HostActiveOrders != null)
+                {
+                    HostActiveOrders.Child = null;
+                }
+                if (HostHistoricalOrders != null)
+                {
+                    HostHistoricalOrders.Child = null;
+                }
+                if (HostBotLogPrime != null)
+                {
+                    HostBotLogPrime.Child = null;
+                }
+                if (HostActivePoses != null)
+                {
+                    HostActivePoses.Child = null;
+                }
+                if (HostHistoricalPoses != null)
+                {
+                    HostHistoricalPoses.Child = null;
+                }
+                if (HostStopLimitPoses != null)
+                {
+                    HostStopLimitPoses.Child = null;
+                }
+                if (HostServers != null)
+                {
+                    HostServers.Child = null;
+                }
+                if (HostServerLog != null)
+                {
+                    HostServerLog.Child = null;
+                }
+                if (BotsHost != null)
+                {
+                    BotsHost.Child = null;
+                }
+
+                _painter = null;
+                _painterServer = null;
+                _strategyKeeper = null;
+                _ordersPainter = null;
+
+                Instance = null;
+                IsRobotUiLightStart = false;
+
+                Closing -= RobotUiLite_Closing;
+                Closing -= RobotsUiLightUnblock_Closing;
+                Closed -= RobotUiLite_Closed;
+            }
+            catch (Exception ex)
+            {
+                ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
         public static RobotUiLite Instance;
 
         private ServerMasterOrdersPainter _ordersPainter;
 
-        ServerMasterSourcesPainter _painterServer;
+        private ServerMasterSourcesPainter _painterServer;
 
-        BotTabsPainter _painter;
+        private BotTabsPainter _painter;
 
         private void Local()
         {
@@ -118,21 +230,6 @@ namespace OsEngine.OsTrader.Gui
             LabelPageHistorical.Content = OsLocalization.Trader.Label576;
             LabelFromHistorical.Content = OsLocalization.Trader.Label577;
             LabelCountHistorical.Content = OsLocalization.Trader.Label578;
-        }
-
-        void TesterUi_Closing(object sender, System.ComponentModel.CancelEventArgs e)
-        {
-            AcceptDialogUi ui = new AcceptDialogUi(OsLocalization.Trader.Label48);
-            ui.ShowDialog();
-
-            if (ui.UserAcceptAction == false)
-            {
-                e.Cancel = true;
-                return;
-            }
-
-            _painterServer.Dispose();
-            _painter = null;
         }
 
         private OsTraderMaster _strategyKeeper;
@@ -269,6 +366,12 @@ namespace OsEngine.OsTrader.Gui
 
         private void RobotsUiLightUnblock_Closing(object sender, System.ComponentModel.CancelEventArgs e)
         {
+            if (Application.Current.MainWindow is MainWindow mainWindow
+                && mainWindow.IsProgrammaticClose)
+            {
+                return;
+            }
+
             if (BlockMaster.IsBlocked == true)
             {
                 ServerMaster.SendNewLogMessage("User block interface. Unblock it. ", Logging.LogMessageType.Error);

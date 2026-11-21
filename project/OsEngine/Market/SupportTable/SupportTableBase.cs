@@ -28,7 +28,15 @@ namespace OsEngine.Market.SupportTable
             };
             supportList.Add(alor);
 
-            // TODO Добавить Finam gRPC
+            SupportConnection finamGrpc = new SupportConnection()
+            {
+                ServerType = ServerType.FinamGrpc,
+                SupportType = SupportServerType.Prime,
+                LinqToLogo = "\\Images\\Connections\\Moex\\Finam.png",
+                LingSiteUrl = "",
+                Discount = 0
+            };
+            supportList.Add(finamGrpc);
 
             SupportConnection transaq = new SupportConnection()
             {
@@ -216,16 +224,6 @@ namespace OsEngine.Market.SupportTable
             };
             supportList.Add(binanceFutures);
 
-            SupportConnection bitGet = new SupportConnection()
-            {
-                ServerType = ServerType.BitGetSpot,
-                SupportType = SupportServerType.Prime,
-                LinqToLogo = "\\Images\\Connections\\Crypto\\Bitget.png",
-                LingSiteUrl = "https://partner.bitget.com/bg/txme90901684140842016",
-                Discount = 20
-            };
-            supportList.Add(bitGet);
-
             SupportConnection okx = new SupportConnection()
             {
                 ServerType = ServerType.OKX,
@@ -306,16 +304,6 @@ namespace OsEngine.Market.SupportTable
             };
             supportList.Add(xt);
 
-            SupportConnection askend = new SupportConnection()
-            {
-                ServerType = ServerType.AscendexSpot,
-                SupportType = SupportServerType.Standard,
-                LinqToLogo = "\\Images\\Connections\\Crypto\\Ascend.png",
-                LingSiteUrl = "https://ascendex.com/register?inviteCode=BPEFZZW8Q",
-                Discount = 25
-            };
-            supportList.Add(askend);
-
             SupportConnection pionex = new SupportConnection()
             {
                 ServerType = ServerType.PionexSpot,
@@ -336,36 +324,6 @@ namespace OsEngine.Market.SupportTable
             };
             supportList.Add(woo);
 
-            SupportConnection coinEx = new SupportConnection()
-            {
-                ServerType = ServerType.CoinExSpot,
-                SupportType = SupportServerType.Standard,
-                LinqToLogo = "\\Images\\Connections\\Crypto\\CoinEx.png",
-                LingSiteUrl = "https://www.coinex.com/register?rc=3hscg",
-                Discount = 5
-            };
-            supportList.Add(coinEx);
-
-            SupportConnection bitMart = new SupportConnection()
-            {
-                ServerType = ServerType.BitMartSpot,
-                SupportType = SupportServerType.Standard,
-                LinqToLogo = "\\Images\\Connections\\Crypto\\BitMartSpot.png",
-                LingSiteUrl = "https://www.bitmart.com/invite/cNtynY/en", 
-                Discount = 40
-            };
-            supportList.Add(bitMart);
-
-            SupportConnection bitMartFutures = new SupportConnection()
-            {
-                ServerType = ServerType.BitMartFutures,
-                SupportType = SupportServerType.Standard,
-                LinqToLogo = "\\Images\\Connections\\Crypto\\BitMartFutures.png",
-                LingSiteUrl = "https://www.bitmart.com/invite/cNtynY/en",
-                Discount = 30
-            };
-            supportList.Add(bitMartFutures);
-
             SupportConnection bingx = new SupportConnection()
             {
                 ServerType = ServerType.BingXSpot,
@@ -375,16 +333,6 @@ namespace OsEngine.Market.SupportTable
                 Discount = 30
             };
             supportList.Add(bingx);
-
-            SupportConnection exMo = new SupportConnection()
-            {
-                ServerType = ServerType.ExmoSpot,
-                SupportType = SupportServerType.No,
-                LinqToLogo = "\\Images\\Connections\\Crypto\\Exmo.png",
-                LingSiteUrl = "",
-                Discount = 0
-            };
-            supportList.Add(exMo);
 
             return supportList;
         }

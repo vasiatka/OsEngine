@@ -74,10 +74,18 @@ namespace OsEngine.OsTrader
             if (_startProgram == StartProgram.IsTester)
             {
                 _typeWorkKeeper = ConnectorWorkType.Tester;
-                ((TesterServer)ServerMaster.GetServers()[0]).TestingStartEvent += StrategyKeeper_TestingStartEvent;
-                ((TesterServer)ServerMaster.GetServers()[0]).TestingFastEvent += StrategyKeeper_TestingFastEvent;
-                ((TesterServer)ServerMaster.GetServers()[0]).TestingEndEvent += StrategyKeeper_TestingEndEvent;
-
+                // servers are kept in creation order, a live server can be created before the Tester server. So TesterServer is found by type, not by index 0
+                TesterServer testerServer = (TesterServer)ServerMaster.GetServers()?.Find(server => server.ServerType == ServerType.Tester);
+                if (testerServer != null)
+                {
+                    testerServer.TestingStartEvent += StrategyKeeper_TestingStartEvent;
+                    testerServer.TestingFastEvent += StrategyKeeper_TestingFastEvent;
+                    testerServer.TestingEndEvent += StrategyKeeper_TestingEndEvent;
+                }
+                else
+                {
+                    SendNewLogMessage("Tester server not found. Tester events are not subscribed.", LogMessageType.Error);
+                }
             }
 
             if (_startProgram == StartProgram.IsOsTrader)
@@ -185,9 +193,18 @@ namespace OsEngine.OsTrader
             if (_startProgram == StartProgram.IsTester)
             {
                 _typeWorkKeeper = ConnectorWorkType.Tester;
-                ((TesterServer)ServerMaster.GetServers()[0]).TestingStartEvent += StrategyKeeper_TestingStartEvent;
-                ((TesterServer)ServerMaster.GetServers()[0]).TestingFastEvent += StrategyKeeper_TestingFastEvent;
-                ((TesterServer)ServerMaster.GetServers()[0]).TestingEndEvent += StrategyKeeper_TestingEndEvent;
+                // servers are kept in creation order, a live server can be created before the Tester server. So TesterServer is found by type, not by index 0
+                TesterServer testerServer = (TesterServer)ServerMaster.GetServers()?.Find(server => server.ServerType == ServerType.Tester);
+                if (testerServer != null)
+                {
+                    testerServer.TestingStartEvent += StrategyKeeper_TestingStartEvent;
+                    testerServer.TestingFastEvent += StrategyKeeper_TestingFastEvent;
+                    testerServer.TestingEndEvent += StrategyKeeper_TestingEndEvent;
+                }
+                else
+                {
+                    SendNewLogMessage("Tester server not found. Tester events are not subscribed.", LogMessageType.Error);
+                }
             }
 
             if (_startProgram != StartProgram.IsTester)
@@ -230,7 +247,6 @@ namespace OsEngine.OsTrader
         private TabControl _tabBotTab;
         private ConnectorWorkType _typeWorkKeeper;
         private TextBox _textBoxLimitPrice;
-        private TextBox _textBoxVolume;
         private Grid _gridChartControlPanel;
         private TabControl _tabControlControl;
         private WindowsFormsHost _hostGrids;
@@ -243,7 +259,29 @@ namespace OsEngine.OsTrader
         /// <summary>
         /// Bots array
         /// </summary>
-        public List<BotPanel> PanelsArray;
+        public List<BotPanel> PanelsArray = new List<BotPanel>();
+
+        /// <summary>
+        /// Blocker of multi-threaded access to PanelsArray: UI mutates it,
+        /// ReloadRiskJournals and copy sites run on the screener worker
+        /// </summary>
+        private readonly object _panelsArrayLocker = new object();
+
+        /// <summary>
+        /// Atomic snapshot of PanelsArray for readers running off the UI thread
+        /// </summary>
+        private BotPanel[] GetPanelsArraySnapshot()
+        {
+            lock (_panelsArrayLocker)
+            {
+                if (PanelsArray == null)
+                {
+                    return new BotPanel[0];
+                }
+
+                return PanelsArray.ToArray();
+            }
+        }
 
         /// <summary>
         /// The bot to which the interface is currently connected
@@ -279,7 +317,10 @@ namespace OsEngine.OsTrader
                 return;
             }
 
-            PanelsArray = new List<BotPanel>();
+            lock (_panelsArrayLocker)
+            {
+                PanelsArray = new List<BotPanel>();
+            }
 
             int botIterator = 0;
             using (StreamReader reader = new StreamReader(@"Engine\Settings" + _typeWorkKeeper + "Keeper.txt"))
@@ -287,6 +328,13 @@ namespace OsEngine.OsTrader
                 while (!reader.EndOfStream)
                 {
                     string[] names = reader.ReadLine().Split('@');
+
+                    if (names.Length < 2
+                        || string.IsNullOrEmpty(names[0])
+                        || string.IsNullOrEmpty(names[1]))
+                    {
+                        continue;
+                    }
 
                     BotPanel bot = null;
 
@@ -298,13 +346,19 @@ namespace OsEngine.OsTrader
                         }
                         catch (Exception e)
                         {
-                            MessageBox.Show(" Error on bot creation. Bot Name: " + names[1] + " \n" + e.ToString());
+                            SendNewLogMessage(" Error on bot creation. Bot Name: " + names[1] + " \n" + e.ToString(), LogMessageType.Error);
                             continue;
                         }
                     }
                     else
                     {
                         bot = BotFactory.GetStrategyForName(names[1], names[0], _startProgram, false);
+                    }
+
+                    if (bot == null)
+                    {
+                        SendNewLogMessage(" Error on bot creation. Bot class not found: " + names[1] + " Bot Name: " + names[0], LogMessageType.Error);
+                        continue;
                     }
 
                     if(names.Length >= 4)
@@ -317,7 +371,10 @@ namespace OsEngine.OsTrader
 
                     if (bot != null)
                     {
-                        PanelsArray.Add(bot);
+                        lock (_panelsArrayLocker)
+                        {
+                            PanelsArray.Add(bot);
+                        }
 
                         if (BotCreateEvent != null)
                         {
@@ -333,10 +390,7 @@ namespace OsEngine.OsTrader
 
                         botIterator++;
 
-                        bot.NewTabCreateEvent += () =>
-                        {
-                            ReloadRiskJournals();
-                        };
+                        bot.NewTabCreateEvent += _bot_NewTabCreateEvent;
                     }
                 }
             }
@@ -344,6 +398,8 @@ namespace OsEngine.OsTrader
             {
                 ReloadActiveBot(PanelsArray[0]);
             }
+
+            LoadGroups();
         }
 
         /// <summary>
@@ -379,6 +435,642 @@ namespace OsEngine.OsTrader
             catch
             {
                 // ignored
+            }
+        }
+
+        #region Groups
+
+        /// <summary>
+        /// user created robot groups in creation order. Base group is not included
+        /// </summary>
+        private List<string> _botsGroups = new List<string>();
+
+        /// <summary>
+        /// collapsed state of groups by name, including the base group
+        /// </summary>
+        private Dictionary<string, bool> _groupsCollapsed = new Dictionary<string, bool>();
+
+        /// <summary>
+        /// User created robot groups in creation order
+        /// </summary>
+        public List<string> GetBotsGroups()
+        {
+            return new List<string>(_botsGroups);
+        }
+
+        /// <summary>
+        /// Add new robot group
+        /// </summary>
+        public void AddNewGroup(string name)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(name)
+                    || name == BotPanel.BaseGroupName
+                    || _botsGroups.Contains(name))
+                {
+                    return;
+                }
+
+                _botsGroups.Add(name);
+                SaveGroups();
+            }
+            catch (Exception error)
+            {
+                SendNewLogMessage(error.ToString(), LogMessageType.Error);
+            }
+        }
+
+        /// <summary>
+        /// Delete robot group. Robots from the group return to the base group
+        /// </summary>
+        public void DeleteGroup(string name)
+        {
+            try
+            {
+                if (_botsGroups.Contains(name) == false)
+                {
+                    return;
+                }
+
+                _botsGroups.Remove(name);
+                _groupsCollapsed.Remove(name);
+
+                for (int i = 0; PanelsArray != null && i < PanelsArray.Count; i++)
+                {
+                    if (PanelsArray[i].BotGroup == name)
+                    {
+                        PanelsArray[i].BotGroup = BotPanel.BaseGroupName;
+                    }
+                }
+
+                SaveGroups();
+            }
+            catch (Exception error)
+            {
+                SendNewLogMessage(error.ToString(), LogMessageType.Error);
+            }
+        }
+
+        /// <summary>
+        /// Move robot to group
+        /// </summary>
+        public void MoveBotToGroup(BotPanel bot, string groupName)
+        {
+            try
+            {
+                if (bot == null)
+                {
+                    return;
+                }
+
+                if (groupName != BotPanel.BaseGroupName
+                    && _botsGroups.Contains(groupName) == false)
+                {
+                    return;
+                }
+
+                bot.BotGroup = groupName;
+                SaveGroups();
+            }
+            catch (Exception error)
+            {
+                SendNewLogMessage(error.ToString(), LogMessageType.Error);
+            }
+        }
+
+        /// <summary>
+        /// Is the group collapsed in the bots list
+        /// </summary>
+        public bool IsGroupCollapsed(string groupName)
+        {
+            if (groupName != null
+                && _groupsCollapsed.ContainsKey(groupName))
+            {
+                return _groupsCollapsed[groupName];
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Set the collapsed state of the group in the bots list
+        /// </summary>
+        public void SetGroupCollapsed(string groupName, bool collapsed)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(groupName))
+                {
+                    return;
+                }
+
+                _groupsCollapsed[groupName] = collapsed;
+                SaveGroups();
+            }
+            catch (Exception error)
+            {
+                SendNewLogMessage(error.ToString(), LogMessageType.Error);
+            }
+        }
+
+        /// <summary>
+        /// Load robot groups from file
+        /// </summary>
+        private void LoadGroups()
+        {
+            string path = @"Engine\Settings" + _typeWorkKeeper + "KeeperGroups.txt";
+
+            if (!File.Exists(path))
+            {
+                return;
+            }
+
+            try
+            {
+                using (StreamReader reader = new StreamReader(path))
+                {
+                    while (reader.EndOfStream == false)
+                    {
+                        string line = reader.ReadLine();
+
+                        if (string.IsNullOrWhiteSpace(line))
+                        {
+                            continue;
+                        }
+
+                        string[] values = line.Split('@');
+
+                        if (values.Length < 3)
+                        {
+                            continue;
+                        }
+
+                        if (values[0] == "GROUP")
+                        {
+                            bool collapsed = false;
+
+                            try
+                            {
+                                collapsed = Convert.ToBoolean(values[2]);
+                            }
+                            catch
+                            {
+                                // ignore
+                            }
+
+                            if (values[1] == BotPanel.BaseGroupName)
+                            {
+                                _groupsCollapsed[BotPanel.BaseGroupName] = collapsed;
+                            }
+                            else if (_botsGroups.Contains(values[1]) == false)
+                            {
+                                _botsGroups.Add(values[1]);
+                                _groupsCollapsed[values[1]] = collapsed;
+                            }
+                        }
+                        else if (values[0] == "BOT")
+                        {
+                            BotPanel bot = null;
+
+                            for (int i = 0; PanelsArray != null && i < PanelsArray.Count; i++)
+                            {
+                                if (PanelsArray[i].NameStrategyUniq == values[1])
+                                {
+                                    bot = PanelsArray[i];
+                                    break;
+                                }
+                            }
+
+                            if (bot == null)
+                            {
+                                continue;
+                            }
+
+                            if (values[2] != BotPanel.BaseGroupName
+                                && _botsGroups.Contains(values[2]) == false)
+                            {
+                                _botsGroups.Add(values[2]);
+                            }
+
+                            bot.BotGroup = values[2];
+                        }
+                    }
+
+                    reader.Close();
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
+        /// <summary>
+        /// Save robot groups to file
+        /// </summary>
+        public void SaveGroups()
+        {
+            try
+            {
+                using (StreamWriter writer = new StreamWriter(@"Engine\Settings" + _typeWorkKeeper + "KeeperGroups.txt", false))
+                {
+                    writer.WriteLine("GROUP@" + BotPanel.BaseGroupName + "@" + IsGroupCollapsed(BotPanel.BaseGroupName));
+
+                    for (int i = 0; i < _botsGroups.Count; i++)
+                    {
+                        writer.WriteLine("GROUP@" + _botsGroups[i] + "@" + IsGroupCollapsed(_botsGroups[i]));
+                    }
+
+                    for (int i = 0; PanelsArray != null && i < PanelsArray.Count; i++)
+                    {
+                        if (string.IsNullOrEmpty(PanelsArray[i].BotGroup) == false
+                            && PanelsArray[i].BotGroup != BotPanel.BaseGroupName)
+                        {
+                            writer.WriteLine("BOT@" + PanelsArray[i].NameStrategyUniq + "@" + PanelsArray[i].BotGroup);
+                        }
+                    }
+
+                    writer.Close();
+                }
+            }
+            catch
+            {
+                // ignored
+            }
+        }
+
+        #endregion
+
+        /// <summary>
+        /// Save robots preset to file
+        /// </summary>
+        /// <param name="filePath">path to preset file</param>
+        /// <param name="prefix">prefix added to robot names in the preset file</param>
+        public void SaveBotsPreset(string filePath, string prefix)
+        {
+            try
+            {
+                if (PanelsArray == null || PanelsArray.Count == 0)
+                {
+                    CustomMessageBoxUi uiNoBots = new CustomMessageBoxUi(OsLocalization.Trader.Label750);
+                    uiNoBots.ShowDialog();
+                    return;
+                }
+
+                if (prefix == null)
+                {
+                    prefix = "";
+                }
+
+                prefix = prefix.Trim();
+
+                if (prefix.Contains("@") || prefix.Contains(":"))
+                {
+                    SendNewLogMessage(OsLocalization.Trader.Label769, LogMessageType.Error);
+                    return;
+                }
+
+                // суффикс добавляется в конец имени как введён пользователем
+                string nameSuffix = prefix;
+
+                // пишем во временный файл, чтобы при сбое не оставить половинчатый пресет
+                string tempFilePath = filePath + ".tmp";
+
+                List<string> botsWithoutParams = new List<string>();
+
+                using (StreamWriter writer = new StreamWriter(tempFilePath, false))
+                {
+                    writer.WriteLine("OsEngine Bots Preset v1");
+
+                    for (int i = 0; i < PanelsArray.Count; i++)
+                    {
+                        string botName = PanelsArray[i].NameStrategyUniq + nameSuffix;
+
+                        if (PanelsArray[i].IsScript == false)
+                        {
+                            writer.WriteLine("ROBOT:" + botName + "@" +
+                                             PanelsArray[i].GetNameStrategyType() +
+                                              "@" + false
+                                              + "@" + PanelsArray[i].PublicName);
+                        }
+                        else
+                        {
+                            writer.WriteLine("ROBOT:" + botName + "@" +
+                            PanelsArray[i].FileName +
+                            "@" + true
+                             + "@" + PanelsArray[i].PublicName);
+                        }
+                    }
+
+                    writer.WriteLine("---");
+
+                    string enginePath = @"Engine\";
+
+                    for (int i = 0; i < PanelsArray.Count; i++)
+                    {
+                        string botName = PanelsArray[i].NameStrategyUniq;
+                        string paramsPath = System.IO.Path.Combine(enginePath, botName + "Parametrs.txt");
+
+                        if (!File.Exists(paramsPath))
+                        {
+                            botsWithoutParams.Add(botName);
+                            continue;
+                        }
+
+                        List<string> paramsContent = null;
+
+                        try
+                        {
+                            paramsContent = new List<string>();
+
+                            using (StreamReader reader = new StreamReader(paramsPath))
+                            {
+                                while (!reader.EndOfStream)
+                                {
+                                    paramsContent.Add(reader.ReadLine());
+                                }
+                            }
+                        }
+                        catch (Exception error)
+                        {
+                            SendNewLogMessage(error.ToString(), LogMessageType.Error);
+                            botsWithoutParams.Add(botName);
+                            continue;
+                        }
+
+                        // маркеры параметров пишем с тем же именем, что и строка робота
+                        string botNameInPreset = botName + nameSuffix;
+
+                        writer.WriteLine("PARAMS_START:" + botNameInPreset);
+
+                        for (int j = 0; j < paramsContent.Count; j++)
+                        {
+                            writer.WriteLine(paramsContent[j]);
+                        }
+
+                        writer.WriteLine("PARAMS_END:" + botNameInPreset);
+                    }
+                }
+
+                if (File.Exists(filePath))
+                {
+                    File.Delete(filePath);
+                }
+
+                File.Move(tempFilePath, filePath);
+
+                SendNewLogMessage(string.Format(OsLocalization.Trader.Label755, filePath), LogMessageType.System);
+
+                if (botsWithoutParams.Count > 0)
+                {
+                    string namesLine = string.Join(", ", botsWithoutParams);
+
+                    SendNewLogMessage(string.Format(OsLocalization.Trader.Label761, botsWithoutParams.Count)
+                        + ". " + namesLine, LogMessageType.Error);
+                }
+            }
+            catch (Exception error)
+            {
+                SendNewLogMessage(error.ToString(), LogMessageType.Error);
+            }
+        }
+
+        /// <summary>
+        /// Load robots preset from file
+        /// </summary>
+        /// <param name="filePath">path to preset file</param>
+        public void LoadBotsPreset(string filePath)
+        {
+            try
+            {
+                if (!File.Exists(filePath))
+                {
+                    CustomMessageBoxUi uiNoFile = new CustomMessageBoxUi(OsLocalization.Trader.Label751);
+                    uiNoFile.ShowDialog();
+                    return;
+                }
+
+                List<string> allLines = new List<string>();
+                using (StreamReader reader = new StreamReader(filePath))
+                {
+                    while (!reader.EndOfStream)
+                    {
+                        allLines.Add(reader.ReadLine());
+                    }
+                }
+
+                if (allLines.Count == 0
+                    || allLines[0].StartsWith("OsEngine Bots Preset v") == false)
+                {
+                    CustomMessageBoxUi uiBadFormat = new CustomMessageBoxUi(OsLocalization.Trader.Label753);
+                    uiBadFormat.ShowDialog();
+                    return;
+                }
+
+                int separatorIndex = allLines.FindIndex(l => l == "---");
+                if (separatorIndex == -1)
+                {
+                    CustomMessageBoxUi uiNoSeparator = new CustomMessageBoxUi(OsLocalization.Trader.Label753);
+                    uiNoSeparator.ShowDialog();
+                    return;
+                }
+
+                List<string> robotLines = allLines.GetRange(0, separatorIndex);
+                List<string> paramsLines = allLines.GetRange(separatorIndex + 1, allLines.Count - separatorIndex - 1);
+
+                Dictionary<string, List<string>> botParams = new Dictionary<string, List<string>>();
+                string currentBot = null;
+
+                for (int i = 0; i < paramsLines.Count; i++)
+                {
+                    string line = paramsLines[i];
+                    if (string.IsNullOrWhiteSpace(line))
+                    {
+                        continue;
+                    }
+
+                    if (line.StartsWith("PARAMS_START:"))
+                    {
+                        currentBot = line.Substring("PARAMS_START:".Length);
+                        botParams[currentBot] = new List<string>();
+                    }
+                    else if (line.StartsWith("PARAMS_END:"))
+                    {
+                        currentBot = null;
+                    }
+                    else if (currentBot != null)
+                    {
+                        botParams[currentBot].Add(line);
+                    }
+                }
+
+                string enginePath = @"Engine\";
+
+                HashSet<string> usedTargetNames = new HashSet<string>();
+
+                if (PanelsArray != null)
+                {
+                    for (int i = 0; i < PanelsArray.Count; i++)
+                    {
+                        usedTargetNames.Add(PanelsArray[i].NameStrategyUniq);
+                    }
+                }
+
+                if (PanelsArray == null)
+                {
+                    lock (_panelsArrayLocker)
+                    {
+                        if (PanelsArray == null)
+                        {
+                            PanelsArray = new List<BotPanel>();
+                        }
+                    }
+                }
+
+                int botIterator = PanelsArray.Count;
+
+                int botsBeforeLoad = PanelsArray.Count;
+
+                List<string> loadErrors = new List<string>();
+
+                for (int i = 1; i < robotLines.Count; i++)
+                {
+                    string robotLine = robotLines[i];
+                    if (!robotLine.StartsWith("ROBOT:"))
+                    {
+                        continue;
+                    }
+
+                    robotLine = robotLine.Substring("ROBOT:".Length);
+                    string[] names = robotLine.Split('@');
+
+                    if (names.Length < 2
+                        || string.IsNullOrEmpty(names[0])
+                        || string.IsNullOrEmpty(names[1]))
+                    {
+                        SendNewLogMessage(string.Format(OsLocalization.Trader.Label759, robotLine), LogMessageType.Error);
+                        continue;
+                    }
+
+                    string originalName = names[0];
+                    string targetName = originalName;
+
+                    if (usedTargetNames.Contains(targetName))
+                    {
+                        SendNewLogMessage(string.Format(OsLocalization.Trader.Label754, originalName, targetName), LogMessageType.Error);
+                        continue;
+                    }
+
+                    usedTargetNames.Add(targetName);
+
+                    string paramsPath = System.IO.Path.Combine(enginePath, targetName + "Parametrs.txt");
+
+                    if (botParams.ContainsKey(originalName) && botParams[originalName].Count > 0)
+                    {
+                        using (StreamWriter writer = new StreamWriter(paramsPath, false))
+                        {
+                            for (int j = 0; j < botParams[originalName].Count; j++)
+                            {
+                                writer.WriteLine(botParams[originalName][j]);
+                            }
+                        }
+                    }
+
+                    BotPanel bot = null;
+
+                    try
+                    {
+                        bool isScript = false;
+
+                        if (names.Length > 2)
+                        {
+                            isScript = Convert.ToBoolean(names[2]);
+                        }
+
+                        bot = BotFactory.GetStrategyForName(names[1], targetName, _startProgram, isScript);
+                    }
+                    catch (Exception e)
+                    {
+                        SendNewLogMessage("Error on bot creation. Bot Name: " + names[1] + "\n" + e.ToString(), LogMessageType.Error);
+                    }
+
+                    if (bot == null)
+                    {
+                        // робот не создан — удаляем записанный для него файл параметров
+                        try
+                        {
+                            if (File.Exists(paramsPath))
+                            {
+                                File.Delete(paramsPath);
+                            }
+                        }
+                        catch (Exception error)
+                        {
+                            SendNewLogMessage(error.ToString(), LogMessageType.Error);
+                        }
+
+                        usedTargetNames.Remove(targetName);
+                        loadErrors.Add(originalName);
+                        continue;
+                    }
+
+                    if (names.Length >= 4 && string.IsNullOrEmpty(names[3]) == false)
+                    {
+                        bot.PublicName = names[3];
+                    }
+                    else
+                    {
+                        bot.PublicName = originalName;
+                    }
+
+                    lock (_panelsArrayLocker)
+                    {
+                        PanelsArray.Add(bot);
+                    }
+
+                    if (BotCreateEvent != null)
+                    {
+                        BotCreateEvent(bot);
+                    }
+
+                    if (_tabBotNames != null)
+                    {
+                        _tabBotNames.Items.Add(" " + PanelsArray[botIterator].NameStrategyUniq + " ");
+                        SendNewLogMessage(OsLocalization.Trader.Label2 + PanelsArray[botIterator].NameStrategyUniq,
+                            LogMessageType.System);
+                    }
+
+                    botIterator++;
+
+                    bot.NewTabCreateEvent += _bot_NewTabCreateEvent;
+                }
+
+                if (PanelsArray.Count != 0)
+                {
+                    ReloadActiveBot(PanelsArray[0]);
+                }
+
+                Save();
+
+                SendNewLogMessage(string.Format(OsLocalization.Trader.Label756, filePath), LogMessageType.System);
+
+                if (PanelsArray.Count > botsBeforeLoad)
+                {
+                    SendNewLogMessage(OsLocalization.Trader.Label765, LogMessageType.System);
+                }
+
+                if (loadErrors.Count > 0)
+                {
+                    string namesLine = string.Join(", ", loadErrors);
+
+                    SendNewLogMessage(string.Format(OsLocalization.Trader.Label760, loadErrors.Count)
+                        + ". " + namesLine, LogMessageType.Error);
+                }
+            }
+            catch (Exception error)
+            {
+                SendNewLogMessage(error.ToString(), LogMessageType.Error);
             }
         }
 
@@ -457,7 +1149,7 @@ namespace OsEngine.OsTrader
                 _activePanel.StartPaint(_gridChart, _hostChart, _hostGlass, _hostOpenDeals, 
                     _hostCloseDeals, _hostBoxLog, _rectangleAroundChart, _hostAlerts, 
                     _tabBotTab, _textBoxLimitPrice, _gridChartControlPanel, 
-                    _textBoxVolume,_tabControlControl,_hostGrids);
+                    null,_tabControlControl,_hostGrids);
 
                 _tabBotNames.SelectionChanged -= _tabBotControl_SelectionChanged;
 
@@ -533,6 +1225,14 @@ namespace OsEngine.OsTrader
         }
 
         /// <summary>
+        /// Bot created a new tab - reload risk manager logs
+        /// </summary>
+        private void _bot_NewTabCreateEvent()
+        {
+            ReloadRiskJournals();
+        }
+
+        /// <summary>
         /// Reload risk manager logs
         /// </summary>
         public void ReloadRiskJournals()
@@ -550,55 +1250,49 @@ namespace OsEngine.OsTrader
                     _globalPositionViewer.ClearJournalsArray();
                 }
 
-                if (PanelsArray != null)
+                // snapshot: this method runs on the screener worker via NewTabCreateEvent,
+                // while UI mutates PanelsArray
+                BotPanel[] panels = GetPanelsArraySnapshot();
+
+                List<Journal.Journal> journalsAll = new List<Journal.Journal>();
+
+                for (int i = 0; i < panels.Length; i++)
                 {
-                    List<Journal.Journal> journalsAll = new List<Journal.Journal>();
+                    List<Journal.Journal> journalsCurrent = panels[i].GetJournals();
 
-                    for (int i = 0; i < PanelsArray.Count; i++)
+                    for (int i2 = 0; journalsCurrent != null && i2 < journalsCurrent.Count; i2++)
                     {
-                        List<Journal.Journal> journalsCurrent = PanelsArray[i].GetJournals();
+                        _riskManager.SetNewJournal(journalsCurrent[i2]);
 
-                        for (int i2 = 0; journalsCurrent != null && i2 < journalsCurrent.Count; i2++)
+                        if (_globalPositionViewer != null)
                         {
-                            _riskManager.SetNewJournal(journalsCurrent[i2]);
+                            journalsAll.AddRange(journalsCurrent[i2]);
+                        }
+                    }
+                }
 
-                            if (_globalPositionViewer != null)
-                            {
-                                journalsAll.AddRange(journalsCurrent[i2]);
-                            }
+                if (_globalPositionViewer != null)
+                {
+                    _globalPositionViewer.SetJournals(journalsAll);
+                }
+
+                if (_buyAtStopPosViewer != null)
+                {
+                    List<BotTabSimple> allTabs = new List<BotTabSimple>();
+
+                    for (int i = 0; i < panels.Length; i++)
+                    {
+                        List<BotTabSimple> simpleTabs = panels[i].TabsSimple;
+                        allTabs.AddRange(simpleTabs);
+
+                        List<BotTabScreener> screenerTabs = panels[i].TabsScreener;
+                        for (int i2 = 0; i2 < screenerTabs.Count; i2++)
+                        {
+                            screenerTabs[i2].CopyTabsInto(allTabs);
                         }
                     }
 
-                    if (_globalPositionViewer != null)
-                    {
-                        _globalPositionViewer.SetJournals(journalsAll);
-                    }
-
-                    if (_buyAtStopPosViewer != null)
-                    {
-                        List<BotTabSimple> allTabs = new List<BotTabSimple>();
-
-                        for (int i = 0; i < PanelsArray.Count; i++)
-                        {
-                            if (PanelsArray[i].TabsSimple != null)
-                            {
-                                allTabs.AddRange(PanelsArray[i].TabsSimple);
-                            }
-
-                            if (PanelsArray[i].TabsScreener != null)
-                            {
-                                for(int i2 = 0;i2 < PanelsArray[i].TabsScreener.Count; i2++)
-                                {
-                                    if(PanelsArray[i].TabsScreener[i2].Tabs != null)
-                                    {
-                                        allTabs.AddRange(PanelsArray[i].TabsScreener[i2].Tabs);
-                                    }
-                                }
-                            }
-                        }
-
-                        _buyAtStopPosViewer.LoadTabToWatch(allTabs);
-                    }
+                    _buyAtStopPosViewer.LoadTabToWatch(allTabs);
                 }
             }
             catch (Exception error)
@@ -722,9 +1416,18 @@ namespace OsEngine.OsTrader
 
             List<BotTabSimple> tabsWithMySecInAllBots = new List<BotTabSimple>();
 
-            for (int i = 0; i < PanelsArray.Count; i++)
+            // Called from a pool thread: PanelsArray is mutated by the UI thread.
+            // Take the atomic snapshot per the 2100 contract (GetPanelsArraySnapshot)
+            BotPanel[] panelsSnapshot = GetPanelsArraySnapshot();
+
+            for (int i = 0; i < panelsSnapshot.Length; i++)
             {
-                BotPanel bot = PanelsArray[i];
+                BotPanel bot = panelsSnapshot[i];
+
+                if (bot == null)
+                {
+                    continue;
+                }
 
                 List<BotTabSimple> botTabSimples = GetTabsSimpleWithMySecurity(secName, server, bot);
 
@@ -737,11 +1440,35 @@ namespace OsEngine.OsTrader
 
             for(int i = 0;i< tabsWithMySecInAllBots.Count;i++)
             {
+                List<Position> positionsOpen = tabsWithMySecInAllBots[i].PositionsOpenAll;
 
-                List<Position> poses = tabsWithMySecInAllBots[i].PositionsOpenAll;
-
-                for(int j = 0; poses != null && j < poses.Count; j++)
+                if (positionsOpen == null)
                 {
+                    continue;
+                }
+
+                // Called from a pool thread (ClearPositionOnBoardEvent): the live list is mutated
+                // concurrently, so iterate over a local copy like DeleteOpenPositionsWithSecurity below
+                List<Position> poses = new List<Position>();
+
+                try
+                {
+                    poses.AddRange(positionsOpen);
+                }
+                catch (Exception error) when (error is InvalidOperationException || error is ArgumentException)
+                {
+                    // Torn copy degrades to empty, same as PositionController.CreateOpenPositionsSnapshot
+                    SendNewLogMessage("CancelOrdersWithSecurity open positions copy skipped. " + error.ToString(), LogMessageType.Error);
+                    poses = new List<Position>();
+                }
+
+                for(int j = 0; j < poses.Count; j++)
+                {
+                    if (poses[j] == null)
+                    {
+                        continue;
+                    }
+
                     if (poses[j].SecurityName == secName)
                     {
                         tabsWithMySecInAllBots[i].CloseAllOrderToPosition(poses[j]);
@@ -753,7 +1480,7 @@ namespace OsEngine.OsTrader
             {
                 Security sec = null;
 
-                if (tabsWithMySecInAllBots.Count > 0)
+                if (tabsWithMySecInAllBots.Count > 0 && tabsWithMySecInAllBots[0] != null)
                 {
                     sec = tabsWithMySecInAllBots[0].Security;
                 }
@@ -774,9 +1501,18 @@ namespace OsEngine.OsTrader
         {
             List<BotTabSimple> tabsWithMySecInAllBots = new List<BotTabSimple>();
 
-            for (int i = 0; i < PanelsArray.Count; i++)
+            // Called from a pool thread: PanelsArray is mutated by the UI thread.
+            // Take the atomic snapshot per the 2100 contract (GetPanelsArraySnapshot)
+            BotPanel[] panelsSnapshot = GetPanelsArraySnapshot();
+
+            for (int i = 0; i < panelsSnapshot.Length; i++)
             {
-                BotPanel bot = PanelsArray[i];
+                BotPanel bot = panelsSnapshot[i];
+
+                if (bot == null)
+                {
+                    continue;
+                }
 
                 List<BotTabSimple> botTabSimples = GetTabsSimpleWithMySecurity(secName, server, bot);
 
@@ -796,10 +1532,24 @@ namespace OsEngine.OsTrader
 
                 List<Position> poses = new List<Position>();
 
-                poses.AddRange(tabsWithMySecInAllBots[i].PositionsOpenAll);
+                try
+                {
+                    poses.AddRange(tabsWithMySecInAllBots[i].PositionsOpenAll);
+                }
+                catch (Exception error) when (error is InvalidOperationException || error is ArgumentException)
+                {
+                    // Torn copy degrades to empty, same as PositionController.CreateOpenPositionsSnapshot
+                    SendNewLogMessage("DeleteOpenPositionsWithSecurity open positions copy skipped. " + error.ToString(), LogMessageType.Error);
+                    poses = new List<Position>();
+                }
 
                 for (int j = 0; poses != null && j < poses.Count; j++)
                 {
+                    if (poses[j] == null)
+                    {
+                        continue;
+                    }
+
                     if (poses[j].SecurityName == secName)
                     {
                         tabsWithMySecInAllBots[i]._journal.DeletePosition(poses[j]);
@@ -812,22 +1562,61 @@ namespace OsEngine.OsTrader
         {
             PositionOnBoard myPosOnBoards = null;
 
-            for(int i = 0;i < server.Portfolios.Count;i++)
+            // Called from a pool thread: Portfolios and PositionOnBoard are mutated by connector
+            // threads without locks (Portfolio.SetNewPosition), so both lists are copied first.
+            // A torn copy degrades to empty, same as 2220 / CreateOpenPositionsSnapshot
+            List<Portfolio> portfolios = new List<Portfolio>();
+
+            try
             {
-                Portfolio portf = server.Portfolios[i];
+                portfolios.AddRange(server.Portfolios);
+            }
+            catch (Exception error) when (error is InvalidOperationException || error is ArgumentException)
+            {
+                SendNewLogMessage("ClosePositionOnBoardWithFakePoses portfolios copy skipped. " + error.ToString(), LogMessageType.Error);
+                portfolios = new List<Portfolio>();
+            }
+
+            for(int i = 0;i < portfolios.Count;i++)
+            {
+                Portfolio portf = portfolios[i];
+
+                if (portf == null)
+                {
+                    continue;
+                }
 
                 List<PositionOnBoard> posesInPortfolio = portf.GetPositionOnBoard();
 
+                // Portfolios without positions keep PositionOnBoard == null (the list is created
+                // in SetNewPosition). This is the normal path, the gate must stay before the copy
                 if(posesInPortfolio == null)
                 {
                     continue;
                 }
 
-                for (int j = 0;j < posesInPortfolio.Count;j++)
+                List<PositionOnBoard> posesCopy = new List<PositionOnBoard>();
+
+                try
                 {
-                    if (posesInPortfolio[j].SecurityNameCode == fullName)
+                    posesCopy.AddRange(posesInPortfolio);
+                }
+                catch (Exception error) when (error is InvalidOperationException || error is ArgumentException)
+                {
+                    SendNewLogMessage("ClosePositionOnBoardWithFakePoses positions copy skipped. " + error.ToString(), LogMessageType.Error);
+                    posesCopy = new List<PositionOnBoard>();
+                }
+
+                for (int j = 0;j < posesCopy.Count;j++)
+                {
+                    if (posesCopy[j] == null)
                     {
-                        myPosOnBoards = posesInPortfolio[j];
+                        continue;
+                    }
+
+                    if (posesCopy[j].SecurityNameCode == fullName)
+                    {
+                        myPosOnBoards = posesCopy[j];
                         break;
                     }
                 }
@@ -838,7 +1627,11 @@ namespace OsEngine.OsTrader
                 return;
             }
 
-            if(myPosOnBoards.ValueCurrent == 0)
+            // ValueCurrent is mutated by connector threads: read it once so that (Volume, Side)
+            // of the closing order are always taken from the same position state
+            decimal valueSnapshot = myPosOnBoards.ValueCurrent;
+
+            if(valueSnapshot == 0)
             {
                 return;
             }
@@ -855,18 +1648,18 @@ namespace OsEngine.OsTrader
                 return;
             }
 
-            Order order = CreateOrderToClosePosition(secName, server, myPosOnBoards, sec);
+            Order order = CreateOrderToClosePosition(secName, server, myPosOnBoards, sec, valueSnapshot);
 
             server.ExecuteOrder(order);
         }
 
-        private Order CreateOrderToClosePosition(string secName, Market.Servers.IServer server, PositionOnBoard pos, Security sec)
+        private Order CreateOrderToClosePosition(string secName, Market.Servers.IServer server, PositionOnBoard pos, Security sec, decimal valueSnapshot)
         {
             Order newOrder = new Order();
 
             newOrder.NumberUser = NumberGen.GetNumberOrder(_startProgram);
             newOrder.State = OrderStateType.Active;
-            newOrder.Volume = Math.Abs(pos.ValueCurrent);
+            newOrder.Volume = Math.Abs(valueSnapshot);
             newOrder.Price = 0;
             newOrder.TimeCreate = server.ServerTime;
             newOrder.TypeOrder = OrderPriceType.Market;
@@ -876,7 +1669,7 @@ namespace OsEngine.OsTrader
             newOrder.ServerType = server.ServerType;
             newOrder.PositionConditionType = OrderPositionConditionType.Close;
 
-            if(pos.ValueCurrent > 0)
+            if(valueSnapshot > 0)
             {
                 newOrder.Side = Side.Sell;
             }
@@ -892,33 +1685,74 @@ namespace OsEngine.OsTrader
         {
             List<BotTabSimple> botTabSimples = new List<BotTabSimple>();
 
-            if (bot.TabsSimple != null &&
-                bot.TabsSimple.Count > 0)
+            // TabsSimple/TabsScreener getters already return atomic snapshots under _botTabsLocker,
+            // but each call is a NEW list: fetch each once, re-invoke on Count/[i]/Add is a refetch race
+            List<BotTabSimple> tabs = bot.TabsSimple;
+
+            if (tabs != null)
             {
-                for (int i = 0; i < bot.TabsSimple.Count; i++)
+                for (int i = 0; i < tabs.Count; i++)
                 {
-                    if (bot.TabsSimple[i].Connector.SecurityName == secName 
-                        && bot.TabsSimple[i].Connector.ServerType == server.ServerType)
+                    BotTabSimple tab = tabs[i];
+
+                    if (tab == null)
                     {
-                        botTabSimples.Add(bot.TabsSimple[i]);
+                        continue;
+                    }
+
+                    // hoisted once: Connector is set to null by tab.Delete() from another thread
+                    ConnectorCandles conn = tab.Connector;
+
+                    if (conn == null)
+                    {
+                        continue;
+                    }
+
+                    if (conn.SecurityName == secName
+                        && conn.ServerType == server.ServerType)
+                    {
+                        botTabSimples.Add(tab);
                     }
                 }
-
             }
 
-            if (bot.TabsScreener != null &&
-                bot.TabsScreener.Count > 0)
-            {
-                for (int j = 0; j < bot.TabsScreener.Count; j++)
-                {
-                    List<BotTabSimple> tabsInScreener = bot.TabsScreener[j].Tabs;
+            List<BotTabScreener> screeners = bot.TabsScreener;
 
-                    for (int i = 0; tabsInScreener != null && i < tabsInScreener.Count; i++)
+            if (screeners != null)
+            {
+                for (int j = 0; j < screeners.Count; j++)
+                {
+                    if (screeners[j] == null)
                     {
-                        if (tabsInScreener[i].Connector.SecurityName == secName
-                            && tabsInScreener[i].Connector.ServerType == server.ServerType)
+                        continue;
+                    }
+
+                    // .Tabs is a live field mutated under _tabsLocker; for external readers
+                    // there is CopyTabsInto (2100 contract), take it instead of reading live
+                    List<BotTabSimple> tabsInScreener = new List<BotTabSimple>();
+                    screeners[j].CopyTabsInto(tabsInScreener);
+
+                    for (int i = 0; i < tabsInScreener.Count; i++)
+                    {
+                        BotTabSimple tab = tabsInScreener[i];
+
+                        if (tab == null)
                         {
-                            botTabSimples.Add(tabsInScreener[i]);
+                            continue;
+                        }
+
+                        // hoisted once: Connector is set to null by tab.Delete() from another thread
+                        ConnectorCandles conn = tab.Connector;
+
+                        if (conn == null)
+                        {
+                            continue;
+                        }
+
+                        if (conn.SecurityName == secName
+                            && conn.ServerType == server.ServerType)
+                        {
+                            botTabSimples.Add(tab);
                         }
                     }
                 }
@@ -931,9 +1765,18 @@ namespace OsEngine.OsTrader
         {
             List<BotTabSimple> tabsWithMySecInAllBots = new List<BotTabSimple>();
 
-            for (int i = 0; i < PanelsArray.Count; i++)
+            // Called from a pool thread: PanelsArray is mutated by the UI thread.
+            // Take the atomic snapshot per the 2100 contract (GetPanelsArraySnapshot)
+            BotPanel[] panelsSnapshot = GetPanelsArraySnapshot();
+
+            for (int i = 0; i < panelsSnapshot.Length; i++)
             {
-                BotPanel bot = PanelsArray[i];
+                BotPanel bot = panelsSnapshot[i];
+
+                if (bot == null)
+                {
+                    continue;
+                }
 
                 List<BotTabSimple> botTabSimples = GetTabsSimpleWithMySecurity(secName, server, bot);
 
@@ -951,7 +1794,7 @@ namespace OsEngine.OsTrader
 
             Security sec = null;
 
-            if (tabsWithMySecInAllBots.Count > 0)
+            if (tabsWithMySecInAllBots.Count > 0 && tabsWithMySecInAllBots[0] != null)
             {
                 sec = tabsWithMySecInAllBots[0].Security;
             }
@@ -1195,46 +2038,39 @@ namespace OsEngine.OsTrader
         {
             try
             {
-                if (PanelsArray != null)
+                // snapshot: UI click here races screener-worker mutations of the tab lists
+                BotPanel[] panels = GetPanelsArraySnapshot();
+
+                List<BotTabSimple> allTabs = new List<BotTabSimple>();
+
+                for (int i = 0; i < panels.Length; i++)
                 {
-                    List<BotTabSimple> allTabs = new List<BotTabSimple>();
+                    List<BotTabSimple> simpleTabs = panels[i].TabsSimple;
+                    allTabs.AddRange(simpleTabs);
 
-                    for (int i = 0; i < PanelsArray.Count; i++)
+                    List<BotTabScreener> screenerTabs = panels[i].TabsScreener;
+                    for (int i2 = 0; i2 < screenerTabs.Count; i2++)
                     {
-                        if(PanelsArray[i].TabsSimple != null)
-                        {
-                            allTabs.AddRange(PanelsArray[i].TabsSimple);
-                        }
-                      
-                        if (PanelsArray[i].TabsScreener != null)
-                        {
-                            for (int i2 = 0; i2 < PanelsArray[i].TabsScreener.Count; i2++)
-                            {
-                                if (PanelsArray[i].TabsScreener[i2].Tabs != null)
-                                {
-                                    allTabs.AddRange(PanelsArray[i].TabsScreener[i2].Tabs);
-                                }
-                            }
-                        }
+                        screenerTabs[i2].CopyTabsInto(allTabs);
                     }
+                }
 
-                    for(int i = 0;i < allTabs.Count; i++)
+                for(int i = 0;i < allTabs.Count; i++)
+                {
+                    if(signal == SignalType.DeleteAllPoses)
                     {
-                        if(signal == SignalType.DeleteAllPoses)
+                        allTabs[i].BuyAtStopCancel();
+                        allTabs[i].SellAtStopCancel();
+                    }
+                    else
+                    {
+                       for(int i2 = 0;i2 < allTabs[i].PositionOpenerToStop.Count;i2++)
                         {
-                            allTabs[i].BuyAtStopCancel();
-                            allTabs[i].SellAtStopCancel();
-                        }
-                        else
-                        {
-                           for(int i2 = 0;i2 < allTabs[i].PositionOpenerToStop.Count;i2++)
+                           if(allTabs[i].PositionOpenerToStop[i2].Number == ordNum)
                             {
-                               if(allTabs[i].PositionOpenerToStop[i2].Number == ordNum)
-                                {
-                                    allTabs[i].PositionOpenerToStop.RemoveAt(i2);
-                                    allTabs[i].UpdateStopLimits();
-                                    return;
-                                }
+                                allTabs[i].PositionOpenerToStop.RemoveAt(i2);
+                                allTabs[i].UpdateStopLimits();
+                                return;
                             }
                         }
                     }
@@ -1266,7 +2102,7 @@ namespace OsEngine.OsTrader
             }
             else if (type == LogMessageType.Error)
             {
-                MessageBox.Show(message);
+                ServerMaster.SendNewLogMessage(message, LogMessageType.Error);
             }
         }
 
@@ -1315,7 +2151,7 @@ namespace OsEngine.OsTrader
                 {
                     _activePanel.StartPaint(_gridChart, _hostChart, _hostGlass, _hostOpenDeals, 
                         _hostCloseDeals, _hostBoxLog, _rectangleAroundChart, _hostAlerts, 
-                        _tabBotTab, _textBoxLimitPrice, _gridChartControlPanel, _textBoxVolume, 
+                        _tabBotTab, _textBoxLimitPrice, _gridChartControlPanel, null, 
                         _tabControlControl, _hostGrids);
                 }
 
@@ -1332,7 +2168,16 @@ namespace OsEngine.OsTrader
                 }
                 if (PanelsArray != null)
                 {
-                    ((TesterServer)ServerMaster.GetServers()[0]).SynchSecurities(PanelsArray.ToList());
+                    // servers are kept in creation order, TesterServer is not necessarily index 0 when a live server was created earlier
+                    TesterServer testerServer = (TesterServer)ServerMaster.GetServers()?.Find(server => server.ServerType == ServerType.Tester);
+                    if (testerServer == null)
+                    {
+                        SendNewLogMessage("Tester server not found. Securities are not synchronized.", LogMessageType.Error);
+                    }
+                    else
+                    {
+                        testerServer.SynchSecurities(PanelsArray.ToList());
+                    }
                 }
             }
             catch (Exception error)
@@ -1420,7 +2265,7 @@ namespace OsEngine.OsTrader
                         {
                             _activePanel.StartPaint(_gridChart, _hostChart, _hostGlass, _hostOpenDeals, 
                                 _hostCloseDeals, _hostBoxLog, _rectangleAroundChart, _hostAlerts, 
-                                _tabBotTab, _textBoxLimitPrice, _gridChartControlPanel, _textBoxVolume, 
+                                _tabBotTab, _textBoxLimitPrice, _gridChartControlPanel, null, 
                                 _tabControlControl, _hostGrids);
                         }
                     }
@@ -1454,8 +2299,11 @@ namespace OsEngine.OsTrader
         /// </summary>
         private bool TabsScreenerIsActive()
         {
-            if (_activePanel.TabsScreener == null ||
-                _activePanel.TabsScreener.Count == 0)
+            // Each getter call returns a NEW snapshot: use one for null+Count (BUG-0359)
+            List<BotTabScreener> screenerTabs = _activePanel.TabsScreener;
+
+            if (screenerTabs == null ||
+                screenerTabs.Count == 0)
             {
                 return false;
             }
@@ -1481,9 +2329,12 @@ namespace OsEngine.OsTrader
 
                 if (TabsScreenerIsActive())
                 {
-                    for (int i = 0; i < _activePanel.TabsScreener.Count; i++)
+                    // One snapshot: re-invoking the getter on Count/[i] is a refetch race (BUG-0359)
+                    List<BotTabScreener> screenerTabs = _activePanel.TabsScreener;
+
+                    for (int i = 0; i < screenerTabs.Count; i++)
                     {
-                        if (_activePanel.TabsScreener[i].IsLoadTabs == true)
+                        if (screenerTabs[i].IsLoadTabs == true)
                         {
                             SendNewLogMessage(OsLocalization.Trader.Label183, LogMessageType.Error);
                             return;
@@ -1494,11 +2345,16 @@ namespace OsEngine.OsTrader
 
                 _activePanel.StopPaint();
 
+                _activePanel.NewTabCreateEvent -= _bot_NewTabCreateEvent;
+
                 _activePanel.Delete();
 
                 SendNewLogMessage(OsLocalization.Trader.Label5 + _activePanel.NameStrategyUniq, LogMessageType.System);
 
-                PanelsArray.Remove(_activePanel);
+                lock (_panelsArrayLocker)
+                {
+                    PanelsArray.Remove(_activePanel);
+                }
 
                 if (BotDeleteEvent != null)
                 {
@@ -1603,21 +2459,21 @@ namespace OsEngine.OsTrader
                     return;
                 }
 
-                if (PanelsArray == null)
+                lock (_panelsArrayLocker)
                 {
-                    PanelsArray = new List<BotPanel>();
+                    if (PanelsArray == null)
+                    {
+                        PanelsArray = new List<BotPanel>();
+                    }
+                    PanelsArray.Add(newRobot);
                 }
-                PanelsArray.Add(newRobot);
 
                 if(BotCreateEvent != null)
                 {
                     BotCreateEvent(newRobot);
                 }
 
-                newRobot.NewTabCreateEvent += () =>
-                {
-                    ReloadRiskJournals();
-                };
+                newRobot.NewTabCreateEvent += _bot_NewTabCreateEvent;
 
                 SendNewLogMessage(OsLocalization.Trader.Label9 + newRobot.NameStrategyUniq, LogMessageType.System);
 
@@ -1644,21 +2500,21 @@ namespace OsEngine.OsTrader
                     return;
                 }
 
-                if (PanelsArray == null)
+                lock (_panelsArrayLocker)
                 {
-                    PanelsArray = new List<BotPanel>();
+                    if (PanelsArray == null)
+                    {
+                        PanelsArray = new List<BotPanel>();
+                    }
+                    PanelsArray.Add(newRobot);
                 }
-                PanelsArray.Add(newRobot);
 
                 if (BotCreateEvent != null)
                 {
                     BotCreateEvent(newRobot);
                 }
 
-                newRobot.NewTabCreateEvent += () =>
-                {
-                    ReloadRiskJournals();
-                };
+                newRobot.NewTabCreateEvent += _bot_NewTabCreateEvent;
 
                 SendNewLogMessage(OsLocalization.Trader.Label9 + newRobot.NameStrategyUniq, LogMessageType.System);
 

@@ -396,6 +396,8 @@ namespace OsEngine.Market.Servers.Bitfinex
 
         private RateGate _rateGatePortfolio = new RateGate(1, TimeSpan.FromMilliseconds(750));
 
+        private readonly object _portfoliosSyncLock = new object();
+
         public void GetPortfolios()
         {
             CreateQueryPortfolio();
@@ -418,11 +420,7 @@ namespace OsEngine.Market.Servers.Bitfinex
 
                 if (response.StatusCode == HttpStatusCode.OK)
                 {
-                    Portfolio portfolio = new Portfolio();
-
-                    portfolio.Number = "BitfinexSpotPortfolio";
-                    portfolio.ValueBegin = 1;
-                    portfolio.ValueCurrent = 1;
+                    List<PositionOnBoard> positions = new List<PositionOnBoard>();
 
                     List<List<string>> wallets = JsonConvert.DeserializeObject<List<List<string>>>(response.Content);
 
@@ -437,27 +435,28 @@ namespace OsEngine.Market.Servers.Bitfinex
                             position.PortfolioName = "BitfinexSpotPortfolio";
                             position.SecurityNameCode = wallet[1].ToString();
                             position.ValueBegin = wallet[2].ToString().ToDecimal();
-                            position.ValueCurrent = wallet[4].ToString().ToDecimal();
 
                             if (wallet[4] != null)
                             {
+                                position.ValueCurrent = wallet[4].ToString().ToDecimal();
                                 position.ValueBlocked = wallet[2].ToString().ToDecimal() - wallet[4].ToString().ToDecimal();
                             }
                             else
                             {
+                                // BUG-0534: [4]=BALANCE_AVAILABLE — Float/Null по docs/reference/ws-auth-wallets
+                                // (shared Wallet layout, «available balance is null if the value has not yet
+                                // been calculated»): фолбэк на [2]=BALANCE, та же семантика, что WS 'wu' (fix/bug-0514)
+                                position.ValueCurrent = wallet[2].ToString().ToDecimal();
                                 position.ValueBlocked = 0;
+                                SendLogMessage("CreateQueryPortfolio> Available balance not calculated. Wallet: "
+                                    + position.SecurityNameCode + ". Fallback to BALANCE", LogMessageType.System);
                             }
 
-                            portfolio.SetNewPosition(position);
+                            positions.Add(position);
                         }
                     }
 
-                    _portfolios.Add(portfolio);
-
-                    if (_portfolios.Count != 0)
-                    {
-                        PortfolioEvent?.Invoke(_portfolios);
-                    }
+                    SyncPortfolio(positions);
                 }
                 else
                 {
@@ -467,6 +466,38 @@ namespace OsEngine.Market.Servers.Bitfinex
             catch (Exception exception)
             {
                 SendLogMessage(exception.ToString(), LogMessageType.Error);
+            }
+        }
+
+        /// <summary>
+        /// Bitfinex exposes exactly one portfolio. A REST snapshot and every WS 'wu' frame must update
+        /// the existing entry in place (SetNewPosition); a new entry per frame grew _portfolios without
+        /// bound (bug-0521). REST (AServer thread) and WS (socket thread) are serialised by the lock.
+        /// </summary>
+        private void SyncPortfolio(List<PositionOnBoard> positions)
+        {
+            lock (_portfoliosSyncLock)
+            {
+                Portfolio portfolio = _portfolios.Find(p => p.Number == "BitfinexSpotPortfolio");
+
+                if (portfolio == null)
+                {
+                    portfolio = new Portfolio();
+
+                    portfolio.Number = "BitfinexSpotPortfolio";
+                    portfolio.ValueBegin = 1;
+                    portfolio.ValueCurrent = 1;
+                    portfolio.ServerType = ServerType.BitfinexSpot;
+
+                    _portfolios.Add(portfolio);
+                }
+
+                for (int i = 0; i < positions.Count; i++)
+                {
+                    portfolio.SetNewPosition(positions[i]);
+                }
+
+                PortfolioEvent?.Invoke(_portfolios);
             }
         }
 
@@ -590,9 +621,14 @@ namespace OsEngine.Market.Servers.Bitfinex
                         newTrade.Id = tradeList[i][0].ToString();
                         newTrade.Time = TimeManager.GetDateTimeFromTimeStamp(Convert.ToInt64(tradeList[i][1]));
                         newTrade.SecurityNameCode = security;
-                        decimal amount = tradeList[i][2].ToString().ToDecimal();
+                        // BUG-0509: numeric payload fields are Float per Bitfinex v2 docs, boxed Double after
+                        // JsonConvert<List<object>>. ToString()+culture parser zeroes dust (|v|<1e-4) under
+                        // comma cultures; Convert.To* reads the boxed value directly, null->0. String paths
+                        // (wallets REST :427, candles :830, CreateMyTrade :2870) stay as-is: Newtonsoft
+                        // ReadAsString for List<List<string>> deserializes JSON numbers invariantly.
+                        decimal amount = Convert.ToDecimal(tradeList[i][2]);
                         newTrade.Volume = Math.Abs(amount);
-                        newTrade.Price = (tradeList[i][3]).ToString().ToDecimal();
+                        newTrade.Price = Convert.ToDecimal(tradeList[i][3]);
                         newTrade.Side = amount > 0 ? Side.Buy : Side.Sell;
 
                         trades.Add(newTrade);
@@ -1707,22 +1743,24 @@ namespace OsEngine.Market.Servers.Bitfinex
 
                     if (webSocketPublicMarketDepths != null && webSocketPublicMarketDepths?.ReadyState == WebSocketState.Open)
                     {
-                        int depthCount = _depthDictionary.Count;
+                        List<int> depthChanIds;
 
-                        int k = 0;
-
-                        while (k < depthCount)
+                        lock (_channelDictionariesLocker)
                         {
-                            int chanId = new List<int>(_depthDictionary.Keys)[k];
+                            depthChanIds = new List<int>(_depthDictionary.Keys);
 
-                            string message = "{\"event\":\"unsubscribe\",\"chanId\":" + chanId + "}";
-
-                            webSocketPublicMarketDepths.SendAsync(message);
-
-                            k++;
+                            _depthDictionary.Clear();
                         }
 
-                        _depthDictionary.Clear();
+                        // Send outside the lock: its sync throw raises OnError -> SendLogMessage on the holding thread
+                        // (WebSocketOsEngine.cs :223); UI-marshalling log subscribers (Log.cs :1360) then deadlock
+                        // against AServer.Delete() waiting on the same locker
+                        for (int k = 0; k < depthChanIds.Count; k++)
+                        {
+                            string message = "{\"event\":\"unsubscribe\",\"chanId\":" + depthChanIds[k] + "}";
+
+                            webSocketPublicMarketDepths.SendAsync(message);
+                        }
                     }
                 }
 
@@ -1732,22 +1770,22 @@ namespace OsEngine.Market.Servers.Bitfinex
 
                     if (webSocketPublicTrades != null && webSocketPublicTrades?.ReadyState == WebSocketState.Open)
                     {
-                        int tradeCount = _tradeDictionary.Count;
+                        List<int> tradeChanIds;
 
-                        int j = 0;
-
-                        while (j < tradeCount)
+                        lock (_channelDictionariesLocker)
                         {
-                            int chanId = new List<int>(_tradeDictionary.Keys)[j];
+                            tradeChanIds = new List<int>(_tradeDictionary.Keys);
 
-                            string message = "{\"event\":\"unsubscribe\",\"chanId\":" + chanId + "}";
-
-                            webSocketPublicTrades.SendAsync(message);
-
-                            j++;
+                            _tradeDictionary.Clear();
                         }
 
-                        _tradeDictionary.Clear();
+                        // Send outside the lock, see depth block above
+                        for (int j = 0; j < tradeChanIds.Count; j++)
+                        {
+                            string message = "{\"event\":\"unsubscribe\",\"chanId\":" + tradeChanIds[j] + "}";
+
+                            webSocketPublicTrades.SendAsync(message);
+                        }
                     }
                 }
 
@@ -1772,6 +1810,9 @@ namespace OsEngine.Market.Servers.Bitfinex
         private int _currentChannelIdDepth;
 
         private int _channelIdTrade;
+
+        // chanId->symbol dictionaries: written by WS reader threads; Dispose (UnsubscribeFromAllChannels) clears them from AServer daemon, UI or MCP thread (AServer.Delete)
+        private readonly object _channelDictionariesLocker = new object();
 
         private Dictionary<int, string> _tradeDictionary = new Dictionary<int, string>();
 
@@ -1808,10 +1849,13 @@ namespace OsEngine.Market.Servers.Bitfinex
 
                         int key = Convert.ToInt32(responseDepth.ChanId);
 
-                        if (!_depthDictionary.ContainsKey(key))
+                        lock (_channelDictionariesLocker)
                         {
-                            _depthDictionary.Add(key, responseDepth.Symbol);
-                            _currentChannelIdDepth = key;
+                            if (!_depthDictionary.ContainsKey(key))
+                            {
+                                _depthDictionary.Add(key, responseDepth.Symbol);
+                                _currentChannelIdDepth = key;
+                            }
                         }
                     }
 
@@ -1880,15 +1924,49 @@ namespace OsEngine.Market.Servers.Bitfinex
 
                         int key = Convert.ToInt32(responseTrade.ChanId);
 
-                        if (!_tradeDictionary.ContainsKey(key))
+                        lock (_channelDictionariesLocker)
                         {
-                            _tradeDictionary.Add(key, responseTrade.Symbol);
-                            _channelIdTrade = key;
+                            if (!_tradeDictionary.ContainsKey(key))
+                            {
+                                _tradeDictionary.Add(key, responseTrade.Symbol);
+                                _channelIdTrade = key;
+                            }
                         }
                     }
 
-                    if ((message.Contains("te")
-                        || message.Contains("tu"))
+                    // Snapshot frame [chanId,[[...]]] arrives on every subscribe/resubscribe.
+                    // It is logged and dropped here: it must not reach UpdateTrade below.
+                    // Own try-catch so a malformed frame cannot trigger the reader-level
+                    // 5-second sleep in the outer catch. Guard before any element access.
+                    if (message.Contains("[["))
+                    {
+                        try
+                        {
+                            List<object> root = JsonConvert.DeserializeObject<List<object>>(message);
+
+                            System.Collections.IList snapshot = root != null && root.Count >= 2
+                                ? root[1] as System.Collections.IList
+                                : null;
+
+                            if (snapshot != null)
+                            {
+                                SendLogMessage("Trades snapshot on channel " + Convert.ToInt32(root[0])
+                                    + ": " + snapshot.Count + " trades. Not replayed", LogMessageType.System);
+
+                                continue;
+                            }
+                        }
+                        catch (Exception exception)
+                        {
+                            SendLogMessage("Trades snapshot parse failed: " + exception.Message, LogMessageType.Error);
+                        }
+                    }
+
+                    // Live updates (te/tu) only. Snapshot replay is a deliberate rejection:
+                    // NewTradesEvent is a forward-only live tape, history is loaded via
+                    // GetTickDataToSecurity. Re-subscription after reconnect is on the
+                    // consumer (NeedToReconnectEvent), the connector keeps no channel state.
+                    if (message.Contains("te")
                         && _channelIdTrade != 0
                         && !message.Contains("event"))
                     {
@@ -2030,22 +2108,22 @@ namespace OsEngine.Market.Servers.Bitfinex
                 {
                     List<object> value = snapshot[i];
 
-                    decimal amount = (value[2]).ToString().ToDecimal();
+                    decimal amount = Convert.ToDecimal(value[2]);
 
                     if (amount > 0)
                     {
                         bids.Add(new MarketDepthLevel()
                         {
-                            Bid = (value[2]).ToString().ToDouble(),
-                            Price = (value[0]).ToString().ToDouble(),
+                            Bid = Convert.ToDouble(value[2]),
+                            Price = Convert.ToDouble(value[0]),
                         });
                     }
                     else
                     {
                         asks.Add(new MarketDepthLevel()
                         {
-                            Ask = Math.Abs((value[2]).ToString().ToDouble()),
-                            Price = (value[0]).ToString().ToDouble(),
+                            Ask = Math.Abs(Convert.ToDouble(value[2])),
+                            Price = Convert.ToDouble(value[0]),
                         });
                     }
                 }
@@ -2119,9 +2197,10 @@ namespace OsEngine.Market.Servers.Bitfinex
                     return;
                 }
 
-                double price = (update[0]).ToString().ToDouble();
+                double price = Convert.ToDouble(update[0]);
+                // count is Int per v2 docs (live run: boxed Int64) — culture-safe as-is
                 double count = (update[1]).ToString().ToDouble();
-                double amount = (update[2]).ToString().ToDouble();
+                double amount = Convert.ToDouble(update[2]);
 
                 needDepth.Time = ServerTime;
 
@@ -2232,18 +2311,16 @@ namespace OsEngine.Market.Servers.Bitfinex
 
         private void UpdateTrade(string message)
         {
-            //if (message.Contains("tu"))
-            //{
-            //    return;
-            //}
+            // tu (trade updated) comes for the same trade as te with identical id and payload (Bitfinex WS v2):
+            // only te is routed in PublicMessageTradesReader, otherwise NewTradesEvent fires twice per trade.
 
             try
             {
                 List<object> root = JsonConvert.DeserializeObject<List<object>>(message);
 
-                if (root == null && root.Count < 2)
+                if (root == null || root.Count < 3 || root[2] == null)
                 {
-                    SendLogMessage("UpdateTrade> Received empty json", LogMessageType.Error);
+                    SendLogMessage("UpdateTrade> Root json empty or too short", LogMessageType.Error);
                     return;
                 }
 
@@ -2251,9 +2328,18 @@ namespace OsEngine.Market.Servers.Bitfinex
 
                 int channelId = Convert.ToInt32(root[0]);
 
-                if (tradeData == null && tradeData.Count < 4)
+                if (tradeData == null || tradeData.Count < 4)
                 {
-                    SendLogMessage("UpdateTrade> Received empty json", LogMessageType.Error);
+                    SendLogMessage("UpdateTrade> Trade payload json empty or too short", LogMessageType.Error);
+                    return;
+                }
+
+                // Рабочий гейт формы кадра: выше стоящие проверки намеренно не исправлены
+                // (линия BUG-0501); без них null/короткий массив дали бы молчаливый нулевой
+                // трейд, т.к. Convert.ToDecimal(null)=0. Текст Error — штатный.
+                if (tradeData == null || tradeData.Count < 4 || tradeData[2] == null || tradeData[3] == null)
+                {
+                    SendLogMessage("UpdateTrade> Trade payload fields are null", LogMessageType.Error);
                     return;
                 }
 
@@ -2261,9 +2347,12 @@ namespace OsEngine.Market.Servers.Bitfinex
 
                 newTrade.SecurityNameCode = GetSymbolByKeyInTrades(channelId);
                 newTrade.Id = tradeData[0].ToString();
-                newTrade.Price = tradeData[3].ToString().ToDecimal();
+                // BUG-0498: число берём из boxed-значения напрямую. ToString() текущей культуры
+                // на comma-culture даёт «4,12E-05» для |Double|<1e-4, а ToDecimal()->ToDouble()
+                // парсит экспоненту только по InvariantCulture и молча возвращает 0.
+                newTrade.Price = Convert.ToDecimal(tradeData[3]);
 
-                decimal volume = tradeData[2].ToString().ToDecimal();
+                decimal volume = Convert.ToDecimal(tradeData[2]);
 
                 if (volume < 0)
                 {
@@ -2273,6 +2362,14 @@ namespace OsEngine.Market.Servers.Bitfinex
                 newTrade.Volume = volume;
                 newTrade.Side = volume > 0 ? Side.Buy : Side.Sell;
                 newTrade.Time = TimeManager.GetDateTimeFromTimeStamp(Convert.ToInt64(tradeData[1]));
+
+                // BUG-0498: пыльные трейды (<1e-4) раньше терялись в нуль; строка подтверждает
+                // работу парсинга на живом потоке
+                if (volume > 0 && volume < 0.0001m)
+                {
+                    SendLogMessage("UpdateTrade> Dust Trade Parsed. Sec: " + newTrade.SecurityNameCode
+                        + " Volume: " + volume, LogMessageType.System);
+                }
 
                 NewTradesEvent?.Invoke(newTrade);
             }
@@ -2301,9 +2398,9 @@ namespace OsEngine.Market.Servers.Bitfinex
                 }
                 List<object> tradeData = JsonConvert.DeserializeObject<List<object>>(tradeDataJson);
 
-                if (tradeData == null)
+                if (tradeData == null || tradeData.Count < 11)
                 {
-                    SendLogMessage("UpdateMyTrade> Received empty json", LogMessageType.Error);
+                    SendLogMessage("UpdateMyTrade> Trade payload json is null", LogMessageType.Error);
                     return;
                 }
 
@@ -2312,9 +2409,9 @@ namespace OsEngine.Market.Servers.Bitfinex
                 myTrade.Time = TimeManager.GetDateTimeFromTimeStamp(Convert.ToInt64(tradeData[2]));
                 myTrade.SecurityNameCode = Convert.ToString(tradeData[1]);
                 myTrade.NumberOrderParent = (tradeData[3]).ToString();
-                myTrade.Price = (tradeData[7]).ToString().ToDecimal();
+                myTrade.Price = Convert.ToDecimal(tradeData[7]);
                 myTrade.NumberTrade = (tradeData[0]).ToString();
-                decimal volume = (tradeData[4]).ToString().ToDecimal();
+                decimal volume = Convert.ToDecimal(tradeData[4]);
                 myTrade.Side = volume > 0 ? Side.Buy : Side.Sell;
 
                 if (volume < 0)
@@ -2326,7 +2423,7 @@ namespace OsEngine.Market.Servers.Bitfinex
 
                 if (myTrade.SecurityNameCode.StartsWith("t" + commissionSecName))
                 {
-                    myTrade.Volume = volume + tradeData[9].ToString().ToDecimal();
+                    myTrade.Volume = volume + Convert.ToDecimal(tradeData[9]);
                 }
                 else
                 {
@@ -2349,17 +2446,17 @@ namespace OsEngine.Market.Servers.Bitfinex
             {
                 List<object> rootArray = JsonConvert.DeserializeObject<List<object>>(message);
 
-                if (rootArray == null)
+                if (rootArray == null || rootArray.Count < 3)
                 {
-                    SendLogMessage("UpdateOrder> Received empty json", LogMessageType.Error);
+                    SendLogMessage("UpdateOrder> Root json is null", LogMessageType.Error);
                     return;
                 }
 
                 List<object> orderDataList = JsonConvert.DeserializeObject<List<object>>(rootArray[2].ToString());
 
-                if (orderDataList == null)
+                if (orderDataList == null || orderDataList.Count < 17)
                 {
-                    SendLogMessage("UpdateOrder> Received empty json", LogMessageType.Error);
+                    SendLogMessage("UpdateOrder> Order payload json is null", LogMessageType.Error);
                     return;
                 }
 
@@ -2379,7 +2476,7 @@ namespace OsEngine.Market.Servers.Bitfinex
                 }
 
                 updateOrder.NumberMarket = (orderDataList[0]).ToString();
-                updateOrder.Side = (orderDataList[7]).ToString().ToDecimal() > 0 ? Side.Buy : Side.Sell;
+                updateOrder.Side = Convert.ToDecimal(orderDataList[7]) > 0 ? Side.Buy : Side.Sell;
                 updateOrder.State = GetOrderState((orderDataList[13]).ToString());
 
                 string typeOrder = (orderDataList[8]).ToString();
@@ -2394,9 +2491,9 @@ namespace OsEngine.Market.Servers.Bitfinex
                     updateOrder.TypeOrder = OrderPriceType.Market;
                 }
 
-                updateOrder.Price = (orderDataList[16]).ToString().ToDecimal();
+                updateOrder.Price = Convert.ToDecimal(orderDataList[16]);
                 updateOrder.ServerType = ServerType.BitfinexSpot;
-                decimal volume = (orderDataList[7]).ToString().ToDecimal();
+                decimal volume = Convert.ToDecimal(orderDataList[7]);
 
                 if (volume < 0)
                 {
@@ -2431,12 +2528,7 @@ namespace OsEngine.Market.Servers.Bitfinex
                     return;
                 }
 
-                Portfolio portfolio = new Portfolio();
-
-                portfolio.Number = "BitfinexSpotPortfolio";
-                portfolio.ValueBegin = 1;
-                portfolio.ValueCurrent = 1;
-                portfolio.ServerType = ServerType.BitfinexSpot;
+                List<PositionOnBoard> positions = new List<PositionOnBoard>();
 
                 if (wallet[0].ToString() == "exchange")
                 {
@@ -2444,26 +2536,26 @@ namespace OsEngine.Market.Servers.Bitfinex
 
                     position.PortfolioName = "BitfinexSpotPortfolio";
                     position.SecurityNameCode = wallet[1].ToString();
-                    position.ValueCurrent = wallet[2].ToString().ToDecimal();
-                    position.ValueBegin = wallet[2].ToString().ToDecimal();
+                    // Docs (ws-auth-wallets): [2]=BALANCE total, [4]=BALANCE_AVAILABLE is the current one,
+                    // null while not calculated yet -> fall back to [2]. Mirrors REST path (CreateQueryPortfolio).
+                    decimal balance = Convert.ToDecimal(wallet[2]);
+
+                    position.ValueBegin = balance;
+                    position.ValueCurrent = wallet[4] != null ? Convert.ToDecimal(wallet[4]) : balance;
 
                     if (wallet[4] != null)
                     {
-                        position.ValueBlocked = wallet[2].ToString().ToDecimal() - wallet[4].ToString().ToDecimal();
+                        position.ValueBlocked = balance - Convert.ToDecimal(wallet[4]);
                     }
                     else
                     {
                         position.ValueBlocked = 0;
                     }
-                    portfolio.SetNewPosition(position);
+
+                    positions.Add(position);
                 }
 
-                _portfolios.Add(portfolio);
-
-                if (_portfolios.Count > 0)
-                {
-                    PortfolioEvent?.Invoke(_portfolios);
-                }
+                SyncPortfolio(positions);
             }
             catch (Exception exception)
             {
@@ -2689,7 +2781,7 @@ namespace OsEngine.Market.Servers.Bitfinex
                         return;
                     }
 
-                    order.Price = orderDataArray[16].ToString().ToDecimal();
+                    order.Price = Convert.ToDecimal(orderDataArray[16]);
                     order.State = GetOrderState(orderDataArray[13].ToString());
 
                     SendLogMessage("Order change price. New price: " + order.Price
@@ -2764,16 +2856,16 @@ namespace OsEngine.Market.Servers.Bitfinex
                         }
 
                         activeOrder.NumberMarket = orderData[0].ToString();
-                        activeOrder.Side = (orderData[7]).ToString().ToDecimal() > 0 ? Side.Buy : Side.Sell;
+                        activeOrder.Side = Convert.ToDecimal(orderData[7]) > 0 ? Side.Buy : Side.Sell;
                         activeOrder.State = GetOrderState(orderData[13].ToString());
-                        decimal volume = orderData[7].ToString().ToDecimal();
+                        decimal volume = Convert.ToDecimal(orderData[7]);
 
                         if (volume < 0)
                         {
                             volume = Math.Abs(volume);
                         }
                         activeOrder.Volume = volume;
-                        activeOrder.Price = orderData[16].ToString().ToDecimal();
+                        activeOrder.Price = Convert.ToDecimal(orderData[16]);
                         activeOrder.PortfolioNumber = "BitfinexSpotPortfolio";
 
                         orders.Add(activeOrder);
@@ -2987,7 +3079,7 @@ namespace OsEngine.Market.Servers.Bitfinex
                                 historyOrder.TimeCallBack = TimeManager.GetDateTimeFromTimeStamp(Convert.ToInt64(orderData[4]));
                                 historyOrder.ServerType = ServerType.BitfinexSpot;
                                 historyOrder.SecurityNameCode = orderData[3]?.ToString();
-                                historyOrder.Side = orderData[7]?.ToString().ToDecimal() > 0 ? Side.Buy : Side.Sell;
+                                historyOrder.Side = Convert.ToDecimal(orderData[7]) > 0 ? Side.Buy : Side.Sell;
                                 historyOrder.State = GetOrderState(orderData[13]?.ToString());
                                 string typeOrder = orderData[8].ToString();
 
@@ -3000,14 +3092,14 @@ namespace OsEngine.Market.Servers.Bitfinex
                                     historyOrder.TypeOrder = OrderPriceType.Market;
                                 }
 
-                                decimal volume = orderData[7].ToString().ToDecimal();
+                                decimal volume = Convert.ToDecimal(orderData[7]);
 
                                 if (volume < 0)
                                 {
                                     volume = Math.Abs(volume);
                                 }
 
-                                historyOrder.Price = orderData[16].ToString().ToDecimal();
+                                historyOrder.Price = Convert.ToDecimal(orderData[16]);
                                 historyOrder.PortfolioNumber = "BitfinexSpotPortfolio";
                                 historyOrder.Volume = volume;
 
@@ -3055,9 +3147,12 @@ namespace OsEngine.Market.Servers.Bitfinex
         {
             string symbol = "";
 
-            if (_tradeDictionary.TryGetValue(channelId, out symbol))
+            lock (_channelDictionariesLocker)
             {
-                return symbol;
+                if (_tradeDictionary.TryGetValue(channelId, out symbol))
+                {
+                    return symbol;
+                }
             }
             return null;
         }
@@ -3066,9 +3161,12 @@ namespace OsEngine.Market.Servers.Bitfinex
         {
             string symbol = "";
 
-            if (_depthDictionary.TryGetValue(channelId, out symbol))
+            lock (_channelDictionariesLocker)
             {
-                return symbol;
+                if (_depthDictionary.TryGetValue(channelId, out symbol))
+                {
+                    return symbol;
+                }
             }
             return null;
         }

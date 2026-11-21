@@ -30,6 +30,8 @@ namespace OsEngine.Market.Servers.InteractiveBrokers
                 {
                     realization.ShowSecuritySubscribeUi();
                 };
+            CreateParameterBoolean("Use Shared RateGate", false);
+            ServerParameters[3].Comment = OsLocalization.Market.Label324;
         }
 
         public List<Candle> GetCandleHistory(string nameSec, TimeFrame tf)
@@ -202,8 +204,13 @@ namespace OsEngine.Market.Servers.InteractiveBrokers
         {
             IbContractStorageUi ui = new IbContractStorageUi(_secIB, this);
             ui.ShowDialog();
-            _secIB = ui.SecToSubscribe;
+            //_secIB = ui.SecToSubscribe;
             GetSecurities();
+        }
+
+        public void SetSecuritiesInSecIB(List<SecurityIb> sec)
+        {
+            _secIB = sec;
         }
 
         private List<SecurityIb> _secIB = new List<SecurityIb>();
@@ -887,7 +894,14 @@ contract =>
 
         private List<string> _connectedContracts = new List<string>();
 
+        private static readonly RateGate _sharedRateGate = new RateGate(1, TimeSpan.FromMilliseconds(2000));
+
         private RateGate _rateGate = new RateGate(1, TimeSpan.FromMilliseconds(2000));
+
+        private RateGate GetRateGate()
+        {
+            return ((ServerParameterBool)ServerParameters[3]).Value ? _sharedRateGate : _rateGate;
+        }
 
         private string _subLocker = "subLocker";
 
@@ -918,7 +932,7 @@ contract =>
                     return;
                 }
 
-                _rateGate.WaitToProceed();
+                GetRateGate().WaitToProceed();
 
                 SecurityIb contractIb =
            _secIB.Find(

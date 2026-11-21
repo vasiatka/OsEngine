@@ -28,8 +28,54 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
             myServer.LogMessageEvent += MyServer_LogMessageEvent;
 
-            Test();
-            TestEnded();
+            // bug-0281: отписка подписки в finally — обработчик не утекает
+            // в переиспользуемый инстанс AServer между тестами
+
+            try
+            {
+                Test();
+                TestEnded();
+            }
+            finally
+            {
+                myServer.LogMessageEvent -= MyServer_LogMessageEvent;
+            }
+        }
+
+        private const int StatusChangeTimeoutMs = 30000;
+
+        private const int DataTimeoutMs = 30000;
+
+        private static void WaitStatusChange(AServer myServer, ServerConnectStatus previousStatus, int timeoutMs)
+        {
+            int waited = 0;
+            while (myServer.ServerStatus == previousStatus && waited < timeoutMs)
+            {
+                Thread.Sleep(250);
+                waited += 250;
+            }
+        }
+
+        private static void WaitConnectWithSecurities(AServer myServer, int timeoutMs)
+        {
+            int waited = 0;
+            while (waited < timeoutMs &&
+                (myServer.ServerStatus != ServerConnectStatus.Connect ||
+                 myServer.Securities.Count == 0))
+            {
+                Thread.Sleep(250);
+                waited += 250;
+            }
+        }
+
+        private static void WaitSecurities(AServer myServer, int timeoutMs)
+        {
+            int waited = 0;
+            while (waited < timeoutMs && myServer.Securities.Count == 0)
+            {
+                Thread.Sleep(250);
+                waited += 250;
+            }
         }
 
         private void MyServer_LogMessageEvent(string arg1, Logging.LogMessageType arg2)
@@ -39,12 +85,20 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                 return;
             }
 
+            // bug-0281: серверная Error считается только впервые наблюдавшейся
+            // в окне этого теста; остаток прошлого теста глушит гейт ([Isolation] пишет сам)
+
+            if (!ShouldCountServerError(arg1, out _))
+            {
+                return;
+            }
+
             this.SetNewError("Error 1. Error in Server: " + arg1);
         }
 
         private void Test()
         {
-            Thread.Sleep(10000);
+            WaitSecurities(Server, DataTimeoutMs);
 
             ServerConnectStatus _lastStatus = ServerConnectStatus.Disconnect;
 
@@ -65,7 +119,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                 {
                     _lastStatus = ServerConnectStatus.Disconnect;
                     myServer.StartServer();
-                    Thread.Sleep(10000);
+                    WaitConnectWithSecurities(myServer, StatusChangeTimeoutMs);
                     List<CandleSeries> series = Subscribe();
 
                     if (series == null ||
@@ -74,7 +128,13 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                         return;
                     }
 
+                    // shortcut: GAP-4 — фаза рестарта проверяет только первую Day-серию батареи, по решению рецензента
+
+                    CandleSeries daySeries = series.Find(s => s.TimeFrame == TimeFrame.Day);
+
                     CheckTfInSeries(series);
+
+                    RestartDaySeries(daySeries);
                     return;
                 }
 
@@ -82,7 +142,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                 {
                     _lastStatus = ServerConnectStatus.Connect;
                     myServer.StopServer();
-                    Thread.Sleep(10000);
+                    WaitStatusChange(myServer, ServerConnectStatus.Connect, StatusChangeTimeoutMs);
                 }
             }
         }
@@ -247,6 +307,14 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                     seriesReady.Add(series);
                 }
             }
+            if (permission.TradeTimeFramePermission.TimeFrameDayIsOn)
+            {
+                CandleSeries series = Subscribe(sec, TimeFrame.Day);
+                if (series != null)
+                {
+                    seriesReady.Add(series);
+                }
+            }
 
             return seriesReady;
         }
@@ -356,6 +424,15 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
                     SetNewError("Error 10. Candle time is equal! " + timeFrame.ToString() + "Security: " + sec);
                     return false;
                 }
+
+                // Двух свечей одного календарного дня на Day не бывает, bug-0064
+
+                if (timeFrame == TimeFrame.Day
+                    && candleLast.TimeStart.Date == candleNow.TimeStart.Date)
+                {
+                    SetNewError("Error 20. Candle date is duplicated! " + timeFrame.ToString() + "Security: " + sec);
+                    return false;
+                }
             }
 
             // 4 ошибка если open ниже лоя или выше хая
@@ -427,6 +504,120 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
             }
 
             return true;
+        }
+
+        // bug-0064: рестарт дневной серии в течение дня (воспроизведение класса 0031).
+        // Снимок условия над проверкой. Скипы без Error: нет Day-серии, история не докачалась
+        // до прежнего объёма за 60с, пересечение полуночи за время фазы.
+
+        private void RestartDaySeries(CandleSeries daySeries)
+        {
+            if (daySeries == null)
+            {
+                this.SetNewServiceInfo("Day series restart phase skipped. No Day series subscribed");
+                return;
+            }
+
+            AServer myServer = Server;
+
+            List<Candle> candlesBefore = daySeries.CandlesAll;
+
+            if (candlesBefore == null || candlesBefore.Count == 0)
+            {
+                this.SetNewServiceInfo("Day series restart phase skipped. No candles before restart");
+                return;
+            }
+
+            int countBefore = candlesBefore.Count;
+            DateTime dateBefore = DateTime.Now.Date;
+            DateTime today = dateBefore;
+
+            bool hadToday = false;
+
+            for (int i = 0; i < candlesBefore.Count; i++)
+            {
+                if (candlesBefore[i].TimeStart.Date == today)
+                {
+                    hadToday = true;
+                    break;
+                }
+            }
+
+            this.SetNewServiceInfo("Day series restart. Security: " + daySeries.Security.Name + " Candles before: " + countBefore.ToString());
+
+            myServer.StopThisSecurity(daySeries);
+
+            TimeFrameBuilder tfb = new TimeFrameBuilder(StartProgram.IsOsTrader);
+            tfb.TimeFrame = TimeFrame.Day;
+
+            int waited = 0;
+            CandleSeries series = myServer.StartThisSecurity(daySeries.Security.Name, tfb, daySeries.Security.NameClass);
+
+            // GAP-2: ждём возврат прежнего объёма истории, частичная докачка не маскирует фазу
+
+            while (waited < 60000 &&
+                (series == null || series.CandlesAll == null || series.CandlesAll.Count < countBefore))
+            {
+                Thread.Sleep(250);
+                waited += 250;
+
+                if (series == null)
+                {
+                    series = myServer.StartThisSecurity(daySeries.Security.Name, tfb, daySeries.Security.NameClass);
+                }
+            }
+
+            if (series == null || series.CandlesAll == null || series.CandlesAll.Count < countBefore)
+            {
+                this.SetNewServiceInfo("Day series restart phase skipped. History not refilled to " + countBefore.ToString() + " candles within 60 sec");
+                return;
+            }
+
+            if (DateTime.Now.Date != dateBefore)
+            {
+                this.SetNewServiceInfo("Day series restart phase skipped. Midnight crossed during phase");
+                return;
+            }
+
+            List<Candle> candlesAfter = series.CandlesAll;
+
+            if (!CandlesIsOk(candlesAfter, TimeFrame.Day, daySeries.Security.Name))
+            {
+                return;
+            }
+
+            // GAP-3: ассерт по числу сегодняшних свечей (как в D2), а не по сырому Count.
+            // G1 гейт сохранён: без today в снимке до рестарта Error 21 не стреляет.
+
+            int todayAfter = CountCandlesOfDayHere(candlesAfter, today);
+
+            if (hadToday && todayAfter > 1)
+            {
+                SetNewError("Error 21. Day candles of today duplicated after restart. Security: " + daySeries.Security.Name
+                    + " Today after: " + todayAfter.ToString() + " Count: " + countBefore.ToString() + "->" + candlesAfter.Count.ToString());
+                return;
+            }
+
+            if (candlesAfter.Count != countBefore || (!hadToday && todayAfter > 0))
+            {
+                this.SetNewServiceInfo("Day series restart. History shifted legit. Security: " + daySeries.Security.Name
+                    + " Count: " + countBefore.ToString() + "->" + candlesAfter.Count.ToString() + " Today after: " + todayAfter.ToString());
+            }
+        }
+
+        private static int CountCandlesOfDayHere(List<Candle> candles, DateTime day)
+        {
+            int count = 0;
+
+            for (int i = 0; i < candles.Count; i++)
+            {
+                if (candles[i].TimeStart.Date == day)
+                {
+                    count++;
+                }
+            }
+
+            return count;
         }
     }
 }

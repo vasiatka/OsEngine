@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Your rights to use code governed by this license https://github.com/AlexWan/OsEngine/blob/master/LICENSE
  * Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
 */
@@ -26,6 +26,7 @@ namespace OsEngine.OsTrader.Gui
         {
             InitializeComponent();
             OsEngine.Layout.StickyBorders.Listen(this);
+            OsEngine.Layout.StartupLocation.Start_FitHeightToWorkArea(this);
             ServerMaster.SetHostTable(HostPositionOnBoard, HostOrdersOnBoard,null, StartUiToPainter.IsOsTrader,
                 ComboBoxQuantityPerPageActive, BackButtonActiveList, NextButtonActiveList, null,
                 null, null);
@@ -38,6 +39,7 @@ namespace OsEngine.OsTrader.Gui
             _strategyKeeper.CreateGlobalPositionController(HostAllPosition);
 
             Closing += RobotUi_Closing;
+            Closed += RobotUi_Closed;
            
             LocationChanged += RobotUi_LocationChanged;
 
@@ -64,10 +66,18 @@ namespace OsEngine.OsTrader.Gui
 
         public static RobotUi Instance;
 
-        void RobotUi_Closing(object sender, System.ComponentModel.CancelEventArgs e)
+        private void RobotUi_Closing(object sender, System.ComponentModel.CancelEventArgs e)
         {
             try
             {
+                if (Application.Current.MainWindow is MainWindow mainWindow
+                    && mainWindow.IsProgrammaticClose)
+                {
+                    ServerMaster.AbortAll();
+                    _strategyKeeper.StopPaint();
+                    return;
+                }
+
                 AcceptDialogUi ui = new AcceptDialogUi(OsLocalization.Trader.Label48);
                 ui.ShowDialog();
 
@@ -78,10 +88,77 @@ namespace OsEngine.OsTrader.Gui
                 }
 
                 ServerMaster.AbortAll();
+                _strategyKeeper.StopPaint();
             }
             catch (Exception ex)
             {
                 _strategyKeeper.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
+            }
+        }
+
+        private void RobotUi_Closed(object sender, EventArgs e)
+        {
+            try
+            {
+                LocationChanged -= RobotUi_LocationChanged;
+                TabControlBotsName.SizeChanged -= TabControlBotsName_SizeChanged;
+                CheckBoxPaintOnOff.Click -= CheckBoxPaintOnOff_Click;
+
+                if (HostPositionOnBoard != null)
+                {
+                    HostPositionOnBoard.Child = null;
+                }
+                if (HostOrdersOnBoard != null)
+                {
+                    HostOrdersOnBoard.Child = null;
+                }
+                if (HostAllPosition != null)
+                {
+                    HostAllPosition.Child = null;
+                }
+                if (HostOpenPosition != null)
+                {
+                    HostOpenPosition.Child = null;
+                }
+                if (HostClosePosition != null)
+                {
+                    HostClosePosition.Child = null;
+                }
+                if (HostBotLog != null)
+                {
+                    HostBotLog.Child = null;
+                }
+                if (HostBotLogPrime != null)
+                {
+                    HostBotLogPrime.Child = null;
+                }
+                if (HostGlass != null)
+                {
+                    HostGlass.Child = null;
+                }
+                if (HostAllert != null)
+                {
+                    HostAllert.Child = null;
+                }
+                if (HostGrids != null)
+                {
+                    HostGrids.Child = null;
+                }
+                if (ChartHostPanel != null)
+                {
+                    ChartHostPanel.Child = null;
+                }
+
+                Instance = null;
+                _ordersPainter = null;
+                _strategyKeeper = null;
+
+                Closing -= RobotUi_Closing;
+                Closed -= RobotUi_Closed;
+            }
+            catch (Exception ex)
+            {
+                _strategyKeeper?.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
             }
         }
 

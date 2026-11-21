@@ -7,13 +7,17 @@ using OsEngine.Entity;
 using OsEngine.Logging;
 using OsEngine.Market.Servers.Entity;
 using OsEngine.Market.Servers.TData.Entity;
-using RestSharp;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.IO.Compression;
 using System.Net;
+using System.Net.Http;
+using System.Net.Security;
+using System.Reflection;
+using System.Security.Cryptography.X509Certificates;
+using System.Text;
 
 
 namespace OsEngine.Market.Servers.TData
@@ -52,10 +56,89 @@ namespace OsEngine.Market.Servers.TData
             }
         }
 
+        private void InitializeHttpClient()
+        {
+            DisposeHttpClient();
+
+            _httpClient = CreateHttpClient(true);
+            _fileHttpClient = CreateHttpClient(false);
+        }
+
+        private void DisposeHttpClient()
+        {
+            _httpClient?.Dispose();
+            _fileHttpClient?.Dispose();
+            _httpClient = null;
+            _fileHttpClient = null;
+        }
+
+        private HttpClient CreateHttpClient(bool enableDecompression)
+        {
+            var socketsHandler = new SocketsHttpHandler()
+            {
+                AutomaticDecompression = enableDecompression
+                    ? DecompressionMethods.GZip | DecompressionMethods.Deflate
+                    : DecompressionMethods.None,
+                SslOptions = new SslClientAuthenticationOptions
+                {
+                    EnabledSslProtocols = System.Security.Authentication.SslProtocols.Tls12
+                                        | System.Security.Authentication.SslProtocols.Tls13,
+                    CertificateChainPolicy = new X509ChainPolicy
+                    {
+                        RevocationMode = X509RevocationMode.NoCheck,
+                        TrustMode = X509ChainTrustMode.CustomRootTrust,
+                    }
+                }
+            };
+
+            foreach (X509Certificate2 cert in _tDataCertificates.Value)
+            {
+                socketsHandler.SslOptions.CertificateChainPolicy.CustomTrustStore.Add(cert);
+            }
+
+            return new HttpClient(socketsHandler)
+            {
+                BaseAddress = new Uri(_baseUrl),
+                Timeout = TimeSpan.FromSeconds(60)
+            };
+        }
+
+        private static X509Certificate2[] LoadTDataCertificates()
+        {
+            var assembly = typeof(TDataServerRealization).Assembly;
+
+            string[] resourceNames = new[]
+            {
+                "OsEngine.Market.Servers.TInvest.Certificates.russian_trusted_root_ca.cer",
+                "OsEngine.Market.Servers.TInvest.Certificates.russian_trusted_sub_ca.cer"
+            };
+
+            var certificates = new List<X509Certificate2>(resourceNames.Length);
+
+            foreach (string resourceName in resourceNames)
+            {
+                using (Stream stream = assembly.GetManifestResourceStream(resourceName))
+                {
+                    if (stream == null)
+                    {
+                        throw new InvalidOperationException($"TData certificate resource not found: {resourceName}");
+                    }
+
+                    byte[] data = new byte[stream.Length];
+                    stream.ReadExactly(data, 0, data.Length);
+                    certificates.Add(X509CertificateLoader.LoadCertificate(data));
+                }
+            }
+
+            return certificates.ToArray();
+        }
+
         public void Connect(WebProxy proxy)
         {
             try
             {
+                InitializeHttpClient();
+
                 if (TryGetTradesArchivesDates())
                 {
                     ServerStatus = ServerConnectStatus.Connect;
@@ -110,7 +193,11 @@ namespace OsEngine.Market.Servers.TData
             _candlesArchivesInfoFut.Clear();
             _candlesArchivesInfoSpot.Clear();
             _candlesArchivesInfoBond.Clear();
+            _candlesArchivesInfoEtf.Clear();
+
             _datesArchives.Clear();
+
+            DisposeHttpClient();
 
             if (ServerStatus != ServerConnectStatus.Disconnect)
             {
@@ -167,7 +254,14 @@ namespace OsEngine.Market.Servers.TData
 
         public List<IServerParameter> ServerParameters { get; set; }
 
-        private string _baseUrl = "https://invest-public-api.tinkoff.ru";
+        private string _baseUrl = "https://invest-public-api.tbank.ru";
+        //private string _baseUrl = "https://invest-public-api.tinkoff.ru";
+
+        private static readonly Lazy<X509Certificate2[]> _tDataCertificates = new Lazy<X509Certificate2[]>(LoadTDataCertificates);
+
+        private HttpClient _httpClient;
+
+        private HttpClient _fileHttpClient;
 
         private Dictionary<string, TSecurityResponse> _candlesArchivesInfoSpot = [];
 
@@ -176,6 +270,8 @@ namespace OsEngine.Market.Servers.TData
         private Dictionary<string, TSecurityResponse> _candlesArchivesInfoCur = [];
 
         private Dictionary<string, TSecurityResponse> _candlesArchivesInfoBond = [];
+
+        private Dictionary<string, TSecurityResponse> _candlesArchivesInfoEtf = [];
 
         private DateTime _startTimeCandleArchive = new DateTime(2018, 03, 07);
 
@@ -212,10 +308,11 @@ namespace OsEngine.Market.Servers.TData
                 GetCurrencySecurities();
 
                 GetBondSecurities();
+
+                GetEtfSecurities();
             }
             catch (Exception ex)
             {
-
                 SendLogMessage($"Securities downloading error. Error: {ex.Message}", LogMessageType.Error);
             }
 
@@ -380,6 +477,67 @@ namespace OsEngine.Market.Servers.TData
                         _candlesArchivesInfoFut = root.Instruments;
 
                         CombineDataBySecurities(_candlesArchivesInfoFut, futSecCandles);
+                    }
+                }
+            }
+            else
+            {
+                SendLogMessage($"Securities futures downloading error", LogMessageType.Error);
+            }
+        }
+
+        private void GetEtfSecurities()
+        {
+            string response = GetStringRequest("/trades-instruments-index/instrument-type/etf");
+
+            if (response != null)
+            {
+                RootResponse root = System.Text.Json.JsonSerializer.Deserialize<RootResponse>(response);
+
+                Dictionary<string, TSecurityResponse>.Enumerator enumerator = root.Instruments.GetEnumerator();
+
+                while (enumerator.MoveNext())
+                {
+                    if (enumerator.Current.Value.ClassCode != "TQTF" && enumerator.Current.Value.ClassCode != "TQIF")
+                        root.Instruments.Remove(enumerator.Current.Key);
+                }
+
+                List<TSecurityResponse> etfInstruments = new List<TSecurityResponse>(root.Instruments.Values);
+
+                for (int i = 0; i < etfInstruments.Count; i++)
+                {
+                    TSecurityResponse item = etfInstruments[i];
+
+                    Security newSecurity = new Security();
+
+                    newSecurity.Exchange = "MOEX";
+                    newSecurity.Name = item.Ticker;
+                    newSecurity.NameFull = item.Name;
+                    newSecurity.NameClass = item.ClassCode;
+                    newSecurity.NameId = item.Ticker;
+                    newSecurity.SecurityType = SecurityType.Fund;
+                    newSecurity.PriceStep = 0;
+                    newSecurity.PriceStepCost = 0;
+                    newSecurity.Lot = 1;
+
+                    _securities.Add(newSecurity);
+                }
+
+                // получить информацию по свечным архивам
+                string candlesInfoResponse = GetStringRequest("/candles-instruments-index/instrument-type/etf");
+
+                if (candlesInfoResponse != null)
+                {
+                    RootResponse candlesRoot = System.Text.Json.JsonSerializer.Deserialize<RootResponse>(candlesInfoResponse);
+
+                    List<TSecurityResponse> etfSecCandles = new List<TSecurityResponse>(candlesRoot.Instruments.Values)
+                        .FindAll(instrument => instrument.ClassCode == "TQTF" || instrument.ClassCode == "TQIF");
+
+                    if (etfSecCandles.Count > 0)
+                    {
+                        _candlesArchivesInfoEtf = root.Instruments;
+
+                        CombineDataBySecurities(_candlesArchivesInfoEtf, etfSecCandles);
                     }
                 }
             }
@@ -605,6 +763,14 @@ namespace OsEngine.Market.Servers.TData
                         return null;
                     }
                 }
+                else if (security.SecurityType == SecurityType.Fund)
+                {
+                    if (!_candlesArchivesInfoEtf.TryGetValue(secKey, out securityCandlesInfo))
+                    {
+                        SendLogMessage($"No archive with candles for {secKey}", LogMessageType.System);
+                        return null;
+                    }
+                }
 
                 // получить url архива
                 List<Archive> urls = securityCandlesInfo.Archives.FindAll(p => p.Year == startTime.Year || p.Year == endTime.Year);
@@ -823,6 +989,10 @@ namespace OsEngine.Market.Servers.TData
             if (timeFrame == TimeFrame.Min5)
             {
                 return 5;
+            }
+            if (timeFrame == TimeFrame.Min10)
+            {
+                return 10;
             }
             if (timeFrame == TimeFrame.Min15)
             {
@@ -1104,22 +1274,27 @@ namespace OsEngine.Market.Servers.TData
 
             try
             {
-                RestRequest requestRest = new(url, RestSharp.Method.GET);
-
-                ConfigureRestQuery(requestRest, false);
-
-                RestClient client = new(_baseUrl);
-
-                IRestResponse response = client.Execute(requestRest);
-
-                if (response.StatusCode == HttpStatusCode.OK)
+                using (HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Get, url))
                 {
-                    return response.Content;
-                }
-                else
-                {
-                    SendLogMessage($"Error response: {response.StatusCode}-{response.Content}", LogMessageType.Error);
-                    return null;
+                    ConfigureHttpQuery(request, false);
+
+                    HttpResponseMessage response = _httpClient.Send(request);
+
+                    if (response.StatusCode == HttpStatusCode.OK)
+                    {
+                        byte[] rawBytes = response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult();
+                        return GetResponseContent(rawBytes);
+                    }
+                    else
+                    {
+                        string content = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                        // content — сырое тело ответа (HTML отказа CDN многострочный, до десятков КБ): single-line и кап 4000 — одна Error-строка и живые грепы (прецедент 0382 R1)
+                        string body = (content ?? "").Replace("\r", " ").Replace("\n", " ");
+                        if (body.Length > 4000) body = body.Substring(0, 4000) + "…";
+
+                        SendLogMessage($"Error response: {response.StatusCode}-{response.ReasonPhrase}. Body: {body}. Url: {_baseUrl}{url}", LogMessageType.Error);
+                        return null;
+                    }
                 }
             }
             catch (Exception error)
@@ -1130,6 +1305,34 @@ namespace OsEngine.Market.Servers.TData
             }
         }
 
+        private string GetResponseContent(byte[] rawBytes)
+        {
+            if (rawBytes == null || rawBytes.Length < 2)
+            {
+                return string.Empty;
+            }
+
+            // Если HttpClient не смог распаковать gzip (например, нет Content-Encoding), распакуем вручную
+            if (rawBytes[0] == 0x1f && rawBytes[1] == 0x8b)
+            {
+                try
+                {
+                    using (MemoryStream compressedStream = new MemoryStream(rawBytes))
+                    using (GZipStream gzipStream = new GZipStream(compressedStream, CompressionMode.Decompress))
+                    using (StreamReader reader = new StreamReader(gzipStream, Encoding.UTF8))
+                    {
+                        return reader.ReadToEnd();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    SendLogMessage($"GZip decompress error: {ex.Message}.", LogMessageType.Error);
+                }
+            }
+
+            return Encoding.UTF8.GetString(rawBytes);
+        }
+
         private string DownloadGZipArchive(string path, string archiveDate, string secName, bool isTrades = false)
         {
             _rateGateData.WaitToProceed();
@@ -1138,28 +1341,30 @@ namespace OsEngine.Market.Servers.TData
             {
                 string archivePath = isTrades ? _tradesDirectory + archiveDate + ".csv.gz" : _tempDirectory + Path.GetRandomFileName();
 
-                RestRequest request = new RestRequest(Method.GET);
-
-                ConfigureRestQuery(request, true);
-
-                RestClient client = new RestClient(_baseUrl + path);
-
-                IRestResponse response = client.Execute(request);
-
-                if (response.StatusCode == HttpStatusCode.OK && response.RawBytes != null && response.RawBytes.Length > 0)
+                using (HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Get, path))
                 {
-                    using (FileStream fileStream = new FileStream(archivePath, FileMode.Create, FileAccess.Write, FileShare.None))
+                    ConfigureHttpQuery(request, true);
+
+                    HttpResponseMessage response = _fileHttpClient.Send(request);
+
+                    if (response.StatusCode == HttpStatusCode.OK && response.Content != null)
                     {
-                        fileStream.Write(response.RawBytes, 0, response.RawBytes.Length);
+                        byte[] rawBytes = response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult();
+
+                        if (rawBytes != null && rawBytes.Length > 0)
+                        {
+                            using (FileStream fileStream = new FileStream(archivePath, FileMode.Create, FileAccess.Write, FileShare.None))
+                            {
+                                fileStream.Write(rawBytes, 0, rawBytes.Length);
+                            }
+
+                            return archivePath;
+                        }
                     }
-                }
-                else
-                {
+
                     SendLogMessage($"Сouldn't upload gzip archive {secName} {archiveDate}. Http status: {response.StatusCode}", LogMessageType.Error);
                     return null;
                 }
-
-                return archivePath;
             }
             catch (Exception ex)
             {
@@ -1168,35 +1373,34 @@ namespace OsEngine.Market.Servers.TData
             }
         }
 
-        private void ConfigureRestQuery(RestRequest request, bool getFile)
+        private void ConfigureHttpQuery(HttpRequestMessage request, bool getFile)
         {
-            request.AddHeader("Accept-Encoding", "gzip, deflate, br, zstd");
-            request.AddHeader("Accept-Language", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7");
-            request.AddHeader("Referer", "https://developer.tbank.ru/");
-            request.AddHeader("Sec-Ch-Ua", "\"Not(A:Brand\";v=\"8\", \"Chromium\";v=\"144\", \"YaBrowser\";v=\"26.3\", \"Yowser\";v=\"2.5\"");
-            request.AddHeader("Sec-Ch-Ua-Mobile", "?0");
-            request.AddHeader("Sec-Ch-Ua-Platform", "Windows");
-            request.AddHeader("Sec-Fetch-Site", "cross-site");
+            request.Headers.Add("Accept-Language", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7");
+            request.Headers.Referrer = new Uri("https://developer.tbank.ru/");
+            request.Headers.Add("Sec-Ch-Ua", "\"Not(A:Brand\";v=\"8\", \"Chromium\";v=\"144\", \"YaBrowser\";v=\"26.3\", \"Yowser\";v=\"2.5\"");
+            request.Headers.Add("Sec-Ch-Ua-Mobile", "?0");
+            request.Headers.Add("Sec-Ch-Ua-Platform", "Windows");
+            request.Headers.Add("Sec-Fetch-Site", "cross-site");
 
             if (getFile)
             {
-                request.AddHeader("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7");
-                request.AddHeader("Priority", "u=0, i");
-                request.AddHeader("Sec-Fetch-Dest", "document");
-                request.AddHeader("Sec-Fetch-Mode", "navigate");
-                request.AddHeader("Sec-Fetch-User", "?1");
-                request.AddHeader("Upgrade-insecure-requests", "1");
+                request.Headers.Add("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7");
+                request.Headers.Add("Priority", "u=0, i");
+                request.Headers.Add("Sec-Fetch-Dest", "document");
+                request.Headers.Add("Sec-Fetch-Mode", "navigate");
+                request.Headers.Add("Sec-Fetch-User", "?1");
+                request.Headers.Add("Upgrade-Insecure-Requests", "1");
             }
             else
             {
-                request.AddHeader("Accept", "*/*");
-                request.AddHeader("Priority", "u=1, i");
-                request.AddHeader("Origin", "https://developer.tbank.ru");
-                request.AddHeader("Sec-Fetch-Dest", "empty");
-                request.AddHeader("Sec-Fetch-Mode", "cors");
+                request.Headers.Add("Accept", "*/*");
+                request.Headers.Add("Priority", "u=1, i");
+                request.Headers.Add("Origin", "https://developer.tbank.ru");
+                request.Headers.Add("Sec-Fetch-Dest", "empty");
+                request.Headers.Add("Sec-Fetch-Mode", "cors");
             }
 
-            request.AddHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36");
+            request.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36");
         }
 
         #endregion

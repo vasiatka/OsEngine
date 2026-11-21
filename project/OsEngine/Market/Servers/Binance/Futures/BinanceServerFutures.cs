@@ -48,6 +48,7 @@ namespace OsEngine.Market.Servers.Binance.Futures
             ServerParameters[3].ValueChange += BinanceServerFutures_ValueChange;
             CreateParameterBoolean("Demo Account", false);
             CreateParameterBoolean("Extended Data", false);
+            CreateParameterBoolean("Use Shared RateGate", false);
 
             ServerParameters[0].Comment = OsLocalization.Market.Label246;
             ServerParameters[1].Comment = OsLocalization.Market.Label247;
@@ -55,6 +56,7 @@ namespace OsEngine.Market.Servers.Binance.Futures
             ServerParameters[3].Comment = OsLocalization.Market.Label250;
             ServerParameters[4].Comment = OsLocalization.Market.Label268;
             ServerParameters[5].Comment = OsLocalization.Market.Label270;
+            ServerParameters[6].Comment = OsLocalization.Market.Label324;
 
         }
 
@@ -64,7 +66,7 @@ namespace OsEngine.Market.Servers.Binance.Futures
         }
     }
 
-    public class BinanceServerFuturesRealization : IServerRealization
+    public class BinanceServerFuturesRealization : IServerRealization, IServerMarginInfo
     {
         #region 1 Constructor, Status, Connection
 
@@ -74,26 +76,32 @@ namespace OsEngine.Market.Servers.Binance.Futures
 
             Thread worker1 = new Thread(PortfolioUpdater);
             worker1.Name = "BinanceFutThread_PortfolioUpdater";
+            worker1.IsBackground = true;
             worker1.Start();
 
             Thread worker2 = new Thread(KeepaliveUserDataStream);
             worker2.Name = "BinanceFutThread_KeepaliveUserDataStream";
+            worker2.IsBackground = true;
             worker2.Start();
 
             Thread worker3 = new Thread(ConverterPublicMessagesAll);
             worker3.Name = "BinanceFutThread_ConverterPublicMessages";
+            worker3.IsBackground = true;
             worker3.Start();
 
             Thread worker4 = new Thread(ConverterUserData);
             worker4.Name = "BinanceFutThread_ConverterUserData";
+            worker4.IsBackground = true;
             worker4.Start();
 
             Thread worker5 = new Thread(ThreadExtendedData);
             worker5.Name = "BinanceFutThread_ExtendedData";
+            worker5.IsBackground = true;
             worker5.Start();
 
             Thread worker6 = new Thread(ConverterPublicMessagesMarketDepths);
             worker6.Name = "BinanceFutThread_MarketDepthParse";
+            worker6.IsBackground = true;
             worker6.Start();
         }
 
@@ -146,7 +154,9 @@ namespace OsEngine.Market.Servers.Binance.Futures
             if (((ServerParameterEnum)ServerParameters[2]).Value == "USDT-M")
             {
                 _baseUrl = "https://fapi.binance.com";
-                wss_point = "wss://fstream.binance.com";
+                wss_point = "wss://fstream.binance.com/public";
+                wss_point_market = "wss://fstream.binance.com/market";
+                wss_point_private = "wss://fstream.binance.com/private";
                 type_str_selector = "fapi";
             }
             else if (((ServerParameterEnum)ServerParameters[2]).Value == "COIN-M")
@@ -231,7 +241,11 @@ namespace OsEngine.Market.Servers.Binance.Futures
 
         public string _baseUrl = "https://fapi.binance.com";
 
-        public string wss_point = "wss://fstream.binance.com";
+        public string wss_point = "wss://fstream.binance.com/public";
+
+        public string wss_point_market = "wss://fstream.binance.com/market";
+
+        public string wss_point_private = "wss://fstream.binance.com/private";
 
         public string type_str_selector = "fapi";
 
@@ -300,7 +314,14 @@ namespace OsEngine.Market.Servers.Binance.Futures
                 //GET /sapi/v1/margin/allPairs
 
                 string res = CreateQuery(Method.GET, "/" + type_str_selector + "/v1/exchangeInfo", null, false);
+
+                if (string.IsNullOrEmpty(res))
+                {
+                    return;
+                }
+
                 SecurityResponse secResp = JsonConvert.DeserializeAnonymousType(res, new SecurityResponse());
+                UpdateRateLimits(secResp);
                 UpdatePairs(secResp);
             }
             catch (Exception ex)
@@ -314,8 +335,44 @@ namespace OsEngine.Market.Servers.Binance.Futures
 
         private List<Security> _securities = new List<Security>();
 
+        private int _requestWeightLimitPerMinute = 2400;
+
+        private void UpdateRateLimits(SecurityResponse response)
+        {
+            // реальный лимит REQUEST_WEIGHT приходит в exchangeInfo, не зашиваем его константой
+
+            if (response == null
+                || response.rateLimits == null)
+            {
+                return;
+            }
+
+            for (int i = 0; i < response.rateLimits.Count; i++)
+            {
+                Spot.BinanceSpotEntity.RateLimit limit = response.rateLimits[i];
+
+                if (limit.rateLimitType == "REQUEST_WEIGHT"
+                    && limit.interval == "MINUTE"
+                    && limit.intervalNum == "1")
+                {
+                    int parsedLimit;
+
+                    if (int.TryParse(limit.limit, out parsedLimit)
+                        && parsedLimit > 0)
+                    {
+                        _requestWeightLimitPerMinute = parsedLimit;
+
+                        SendLogMessage("Binance Futures: REQUEST_WEIGHT limit is " + parsedLimit + " per minute", LogMessageType.System);
+                    }
+                }
+            }
+        }
+
         private void UpdatePairs(SecurityResponse pairs)
         {
+            // локальный список и переприсваивание при публикации: отказ или частичный разбор REST не обнуляют опубликованный реестр, переприсваивание атомарно для snapshot-читателя (GetSecurityClassCode)
+            List<Security> local = new List<Security>();
+
             foreach (var sec in pairs.symbols)
             {
                 string status = sec.status == null ? sec.contractStatus : sec.status.ToString();
@@ -388,19 +445,19 @@ namespace OsEngine.Market.Servers.Binance.Futures
                 security.MinTradeAmountType = MinTradeAmountType.C_Currency;
 
                 security.State = SecurityStateType.Activ;
-                _securities.Add(security);
+                local.Add(security);
             }
 
             List<Security> secNonPerp = new List<Security>();
 
-            for (int i = 0; i < _securities.Count; i++)
+            for (int i = 0; i < local.Count; i++)
             {
-                string[] str = _securities[i].Name.Split('_');
+                string[] str = local[i].Name.Split('_');
 
                 if (str.Length > 1 &&
                     str[1] != "PERP")
                 {
-                    secNonPerp.Add(_securities[i]);
+                    secNonPerp.Add(local[i]);
                 }
             }
 
@@ -408,10 +465,13 @@ namespace OsEngine.Market.Servers.Binance.Futures
 
             //_securities.AddRange(securitiesHistorical);
 
-            if (_securities.Count > 0)
+            // пустой ответ не публикуем: реестр и подписчики остаются на прошлом наборе
+            if (local.Count == 0)
             {
-                _securities = _securities.OrderBy(s => s.Name).ToList();
+                return;
             }
+
+            _securities = local.OrderBy(s => s.Name).ToList();
 
             if (SecurityEvent != null)
             {
@@ -562,10 +622,65 @@ namespace OsEngine.Market.Servers.Binance.Futures
 
         private List<Portfolio> _portfolios = new List<Portfolio>();
 
+        private Dictionary<string, SecurityMarginInfo> _marginInfo = new Dictionary<string, SecurityMarginInfo>();
+
+        public SecurityMarginInfo GetMarginInfo(string securityNameCode)
+        {
+            // the dictionary is replaced as a whole on every update, so readers need no lock
+            Dictionary<string, SecurityMarginInfo> info = _marginInfo;
+
+            if (securityNameCode != null
+                && info.TryGetValue(securityNameCode, out SecurityMarginInfo result))
+            {
+                return result;
+            }
+
+            return null;
+        }
+
+        private void UpdateMarginInfo(List<PositionFutures> positions)
+        {
+            // leverage and isolated flag come with every account response, there is no need for an additional request
+            if (positions == null)
+            {
+                return;
+            }
+
+            Dictionary<string, SecurityMarginInfo> info = new Dictionary<string, SecurityMarginInfo>();
+            DateTime now = DateTime.UtcNow;
+
+            for (int i = 0; i < positions.Count; i++)
+            {
+                PositionFutures position = positions[i];
+
+                if (string.IsNullOrEmpty(position.symbol)
+                    || string.IsNullOrEmpty(position.leverage)
+                    || info.ContainsKey(position.symbol))
+                {
+                    continue;
+                }
+
+                // in Hedge mode a symbol has several entries (BOTH, LONG, SHORT) with the same settings
+                SecurityMarginInfo item = new SecurityMarginInfo();
+                item.SecurityNameCode = position.symbol;
+                item.Leverage = position.leverage.ToDecimal();
+                item.IsIsolated = string.Equals(position.isolated, "true", StringComparison.OrdinalIgnoreCase);
+                item.TimeUpdate = now;
+                info[position.symbol] = item;
+            }
+
+            if (info.Count > 0)
+            {
+                _marginInfo = info;
+            }
+        }
+
         private void UpdatePortfolio(AccountResponseFutures portfs, bool IsUpdateValueBegin)
         {
             try
             {
+                UpdateMarginInfo(portfs.positions);
+
                 Portfolio myPortfolio = _portfolios.Find(p => p.Number == "BinanceFutures");
 
                 if (myPortfolio == null)
@@ -730,6 +845,11 @@ namespace OsEngine.Market.Servers.Binance.Futures
                     new Dictionary<string, string>() { { "symbol=", symbol } },
                     true);
 
+                if (string.IsNullOrEmpty(res))
+                {
+                    return null;
+                }
+
                 PremiumIndex resp = JsonConvert.DeserializeAnonymousType(res, new PremiumIndex());
                 return resp;
             }
@@ -746,11 +866,17 @@ namespace OsEngine.Market.Servers.Binance.Futures
             DateTime endTime = DateTime.UtcNow;
             DateTime startTime = endTime.AddMinutes(-tfTotalMinutes * candleCount);
 
-            return GetCandleDataToSecurity(security, timeFrameBuilder, startTime, endTime, startTime);
+            return GetCandleDataToSecurityWithCount(security, timeFrameBuilder, startTime, endTime, startTime, candleCount);
         }
 
         public List<Candle> GetCandleDataToSecurity(Security security, TimeFrameBuilder timeFrameBuilder,
             DateTime startTime, DateTime endTime, DateTime actualTime)
+        {
+            return GetCandleDataToSecurityWithCount(security, timeFrameBuilder, startTime, endTime, actualTime, 0);
+        }
+
+        private List<Candle> GetCandleDataToSecurityWithCount(Security security, TimeFrameBuilder timeFrameBuilder,
+            DateTime startTime, DateTime endTime, DateTime actualTime, int candleCount)
         {
             if (actualTime > endTime)
             {
@@ -760,7 +886,9 @@ namespace OsEngine.Market.Servers.Binance.Futures
             if (endTime > DateTime.Now - new TimeSpan(0, 0, 1, 0))
                 endTime = DateTime.Now - new TimeSpan(0, 0, 1, 0);
 
-            int interval = 1500 * (int)timeFrameBuilder.TimeFrameTimeSpan.TotalMinutes;
+            int interval = 1000 * (int)timeFrameBuilder.TimeFrameTimeSpan.TotalMinutes;
+
+            int tfMinutes = (int)timeFrameBuilder.TimeFrameTimeSpan.TotalMinutes;
 
             List<Candle> candles = new List<Candle>();
 
@@ -776,7 +904,31 @@ namespace OsEngine.Market.Servers.Binance.Futures
                 if (realEndTime > DateTime.Now - new TimeSpan(0, 0, (int)timeFrameBuilder.TimeFrameTimeSpan.TotalMinutes, 0))
                     realEndTime = DateTime.Now - new TimeSpan(0, 0, (int)timeFrameBuilder.TimeFrameTimeSpan.TotalMinutes, 0);
 
-                List<Candle> stepCandles = GetCandlesForTimes(security.Name, timeFrameBuilder.TimeFrameTimeSpan, startTimeStep, realEndTime);
+                // считаем limit по реальной потребности: вес klines 1-2 при limit < 500, 5 при limit <= 1000 против 10 при limit > 1000
+
+                int chunkLimit = (int)((realEndTime - startTimeStep).TotalMinutes / tfMinutes) + 2;
+
+                if (candleCount > 0)
+                {
+                    int remaining = candleCount - candles.Count + 2;
+
+                    if (remaining < chunkLimit)
+                    {
+                        chunkLimit = remaining;
+                    }
+                }
+
+                if (chunkLimit < 1)
+                {
+                    chunkLimit = 1;
+                }
+
+                if (chunkLimit > 1000)
+                {
+                    chunkLimit = 1000;
+                }
+
+                List<Candle> stepCandles = GetCandlesForTimes(security.Name, timeFrameBuilder.TimeFrameTimeSpan, startTimeStep, realEndTime, chunkLimit);
 
                 if (stepCandles != null)
                 {
@@ -832,7 +984,7 @@ namespace OsEngine.Market.Servers.Binance.Futures
             return candles;
         }
 
-        private List<Candle> GetCandlesForTimes(string nameSec, TimeSpan tf, DateTime timeStart, DateTime timeEnd)
+        private List<Candle> GetCandlesForTimes(string nameSec, TimeSpan tf, DateTime timeStart, DateTime timeEnd, int limit)
         {
             DateTime yearBegin = new DateTime(1970, 1, 1);
 
@@ -895,7 +1047,7 @@ namespace OsEngine.Market.Servers.Binance.Futures
             if (needTf != "2m" && needTf != "10m" && needTf != "20m" && needTf != "45m")
             {
                 var param = new Dictionary<string, string>();
-                param.Add("symbol=" + nameSec.ToUpper(), "&interval=" + needTf + "&startTime=" + startTime + "&endTime=" + endTime + "&limit=1500");
+                param.Add("symbol=" + nameSec.ToUpper(), "&interval=" + needTf + "&startTime=" + startTime + "&endTime=" + endTime + "&limit=" + limit);
 
                 string res = CreateQuery(Method.GET, endPoint, param, false);
 
@@ -910,10 +1062,16 @@ namespace OsEngine.Market.Servers.Binance.Futures
             }
             else
             {
+                // для составных таймфреймов limit умножаем на коэффициент базового ТФ
+
+                int baseLimit2 = Math.Min(limit * 2, 1000);
+                int baseLimit4 = Math.Min(limit * 4, 1000);
+                int baseLimit3 = Math.Min(limit * 3, 1000);
+
                 if (needTf == "2m")
                 {
                     var param = new Dictionary<string, string>();
-                    param.Add("symbol=" + nameSec.ToUpper(), "&interval=1m" + "&startTime=" + startTime + "&endTime=" + endTime);
+                    param.Add("symbol=" + nameSec.ToUpper(), "&interval=1m" + "&startTime=" + startTime + "&endTime=" + endTime + "&limit=" + baseLimit2);
                     var res = CreateQuery(Method.GET, endPoint, param, false);
 
                     if (string.IsNullOrEmpty(res))
@@ -929,7 +1087,7 @@ namespace OsEngine.Market.Servers.Binance.Futures
                 else if (needTf == "10m")
                 {
                     var param = new Dictionary<string, string>();
-                    param.Add("symbol=" + nameSec.ToUpper(), "&interval=5m" + "&startTime=" + startTime + "&endTime=" + endTime);
+                    param.Add("symbol=" + nameSec.ToUpper(), "&interval=5m" + "&startTime=" + startTime + "&endTime=" + endTime + "&limit=" + baseLimit2);
                     var res = CreateQuery(Method.GET, endPoint, param, false);
 
                     if (string.IsNullOrEmpty(res))
@@ -944,7 +1102,7 @@ namespace OsEngine.Market.Servers.Binance.Futures
                 else if (needTf == "20m")
                 {
                     var param = new Dictionary<string, string>();
-                    param.Add("symbol=" + nameSec.ToUpper(), "&interval=5m" + "&startTime=" + startTime + "&endTime=" + endTime);
+                    param.Add("symbol=" + nameSec.ToUpper(), "&interval=5m" + "&startTime=" + startTime + "&endTime=" + endTime + "&limit=" + baseLimit4);
                     var res = CreateQuery(Method.GET, endPoint, param, false);
 
                     if (string.IsNullOrEmpty(res))
@@ -959,7 +1117,7 @@ namespace OsEngine.Market.Servers.Binance.Futures
                 else if (needTf == "45m")
                 {
                     var param = new Dictionary<string, string>();
-                    param.Add("symbol=" + nameSec.ToUpper(), "&interval=15m" + "&startTime=" + startTime + "&endTime=" + endTime);
+                    param.Add("symbol=" + nameSec.ToUpper(), "&interval=15m" + "&startTime=" + startTime + "&endTime=" + endTime + "&limit=" + baseLimit3);
                     var res = CreateQuery(Method.GET, endPoint, param, false);
 
                     if (string.IsNullOrEmpty(res))
@@ -1317,15 +1475,24 @@ namespace OsEngine.Market.Servers.Binance.Futures
 
                     var res2 = CreateQuery(Method.GET, endPoint, param, false);
 
+                    if (string.IsNullOrEmpty(res2))
+                    {
+                        // null/пустое тело = отказ REST или пауза IP-бана, не «нет данных»: пустое тело Newtonsoft возвращает null без броска, и без гейта отказ молчал бы через null-воронку (BUG-0387)
+
+                        SendLogMessage("Binance Futures: tick history request failed (see prior error or IP ban). Symbol/" + security + ", from: " + startTime, LogMessageType.Error);
+
+                        return null;
+                    }
+
                     AgregatedHistoryTrade[] tradeHistory = JsonConvert.DeserializeObject<AgregatedHistoryTrade[]>(res2);
 
                     var oldTrades = CreateTradesFromJson(security, tradeHistory);
 
                     return oldTrades;
                 }
-                catch
+                catch (Exception error)
                 {
-                    SendLogMessage(OsLocalization.Market.Message95 + security, LogMessageType.Error);
+                    SendLogMessage("Binance Futures: tick history parse error. Symbol/" + security + ", from: " + startTime + ". " + error.ToString(), LogMessageType.Error);
 
                     return null;
                 }
@@ -1381,6 +1548,8 @@ namespace OsEngine.Market.Servers.Binance.Futures
 
         private string _listenKey = "";
 
+        private string _lastRestError = "";
+
         private WebSocket _socketPrivateData;
 
         private Dictionary<string, WebSocket> _socketsArray = new Dictionary<string, WebSocket>();
@@ -1389,7 +1558,12 @@ namespace OsEngine.Market.Servers.Binance.Futures
         {
             try
             {
-                _listenKey = CreateListenKey();
+                // BUG-0345: keep the live key if renewal failed (keep-alive worker checks only for empty string)
+                string renewedListenKey = CreateListenKey();
+                if (!string.IsNullOrEmpty(renewedListenKey))
+                {
+                    _listenKey = renewedListenKey;
+                }
             }
             catch (Exception exception)
             {
@@ -1401,6 +1575,11 @@ namespace OsEngine.Market.Servers.Binance.Futures
         {
             string createListenKeyUrl = String.Format("/{0}/v1/listenKey", type_str_selector);
             var createListenKeyResult = CreateQueryNoLock(Method.POST, createListenKeyUrl, null, false);
+            if (string.IsNullOrEmpty(createListenKeyResult))
+            {
+                // BUG-0345: null here means the request failed and the failure is already logged; deserializing null throws ArgumentNullException
+                return null;
+            }
             ListenKey responseKey = JsonConvert.DeserializeAnonymousType(createListenKeyResult, new ListenKey());
 
             if (responseKey == null)
@@ -1415,8 +1594,19 @@ namespace OsEngine.Market.Servers.Binance.Futures
         {
             try
             {
+                _lastRestError = "";
                 _listenKey = CreateListenKey();
-                string urlStr = wss_point + "/ws/" + _listenKey;
+
+                if (string.IsNullOrEmpty(_listenKey))
+                {
+                    // BUG-0345: report the real REST failure instead of opening the socket without a listenKey
+                    SendLogMessage("Binance Futures: can not get listenKey. "
+                        + (_lastRestError == "" ? "Server returned empty response." : _lastRestError),
+                        LogMessageType.Connect);
+                    return;
+                }
+
+                string urlStr = $"{wss_point_private}/ws?listenKey={_listenKey}&events=ORDER_TRADE_UPDATE/ACCOUNT_UPDATE";
 
                 _socketPrivateData = new WebSocket(urlStr);
 
@@ -1592,6 +1782,9 @@ namespace OsEngine.Market.Servers.Binance.Futures
             {
                 return;
             }
+            // BUG-0466: null/binary/пустая рамка — не данные. Тихий пропуск до Contains и enqueue
+            // (у обёртки binary-кадры приходят с Data=null); по образцу guard 0448
+            if (string.IsNullOrEmpty(e.Data)) { return; }
             if (e.Data.Contains("\"depthUpdate\""))
             {
                 _queuePublicMessagesMarketDepths.Enqueue(e.Data);
@@ -1658,7 +1851,7 @@ namespace OsEngine.Market.Servers.Binance.Futures
 
         private List<Security> _subscribedSecurities = new List<Security>();
 
-        private RateGate _rateGateSubscribe = new RateGate(1, TimeSpan.FromMilliseconds(150));
+        private RateGate _rateGateSubscribe = new RateGate(1, TimeSpan.FromMilliseconds(50));
 
         public void Subscribe(Security security)
         {
@@ -1684,7 +1877,7 @@ namespace OsEngine.Market.Servers.Binance.Futures
 
                 string urlStrDepth = null;
 
-                if (((ServerParameterBool)ServerParameters[13]).Value == false)
+                if (((ServerParameterBool)ServerParameters[14]).Value == false)
                 {
                     urlStrDepth = wss_point + "/stream?streams="
                                  + security.Name.ToLower() + "@depth5"
@@ -1700,7 +1893,22 @@ namespace OsEngine.Market.Servers.Binance.Futures
 
                 if (_extendedMarketData)
                 {
-                    urlStrDepth += "/" + security.Name.ToLower() + "@markPrice" + "/" + security.Name.ToLower() + "@miniTicker";
+                    string urlStrMarKet = wss_point_market + "/stream?streams=" + security.Name.ToLower() + "@markPrice" + "/" + security.Name.ToLower() + "@miniTicker";
+
+                    WebSocket wsClientMarket = new WebSocket(urlStrMarKet);
+
+                    if (_myProxy != null)
+                    {
+                        wsClientMarket.SetProxy(_myProxy);
+                    }
+
+                    wsClientMarket.EmitOnPing = true;
+                    wsClientMarket.OnMessage += _socket_PublicMessage;
+                    wsClientMarket.OnError += _socketClient_Error;
+                    wsClientMarket.OnClose += _socketClient_Closed;
+                    wsClientMarket.ConnectAsync();
+
+                    _socketsArray.Add(security.Name + "_market", wsClientMarket);
 
                     GetFundingRate(security.Name);
                     GetFundingHistory(security.Name.ToLower());
@@ -1732,6 +1940,11 @@ namespace OsEngine.Market.Servers.Binance.Futures
             try
             {
                 string res = CreateQuery(Method.GET, "/" + type_str_selector + "/v1/fundingInfo", null, true);
+
+                if (string.IsNullOrEmpty(res))
+                {
+                    return;
+                }
 
                 List<FundingInfo> response = JsonConvert.DeserializeAnonymousType(res, new List<FundingInfo>());
 
@@ -1765,7 +1978,19 @@ namespace OsEngine.Market.Servers.Binance.Futures
             {
                 string res = CreateQuery(Method.GET, "/" + type_str_selector + "/v1/fundingRate", new Dictionary<string, string>() { { "symbol=", security } }, false);
 
+                if (string.IsNullOrEmpty(res))
+                {
+                    return;
+                }
+
                 List<FundingHistory> response = JsonConvert.DeserializeAnonymousType(res, new List<FundingHistory>());
+
+                if (response == null
+                    || response.Count == 0)
+                {
+                    // пустой ответ = нет истории, [^1] на пустом списке бросал ArgumentOutOfRangeException
+                    return;
+                }
 
                 Funding data = new Funding();
 
@@ -1782,6 +2007,9 @@ namespace OsEngine.Market.Servers.Binance.Futures
         }
 
         private List<OpenInterestData> _openInterest = new List<OpenInterestData>();
+
+        // Guards _openInterest: written by ThreadExtendedData, read per trade by ConverterPublicMessagesAll
+        private readonly object _openInterestLocker = new object();
 
         private DateTime _timeLastUpdateExtendedData = DateTime.Now;
 
@@ -1836,6 +2064,12 @@ namespace OsEngine.Market.Servers.Binance.Futures
                 {
                     string res = CreateQuery(Method.GET, "/" + type_str_selector + "/v1/openInterest", new Dictionary<string, string>() { { "symbol=", _subscribedSecurities[i].Name } }, false);
 
+                    if (string.IsNullOrEmpty(res))
+                    {
+                        // отказ по одному инструменту не обрывает батч по остальным подпискам
+                        continue;
+                    }
+
                     OpenInterestInfo response = JsonConvert.DeserializeAnonymousType(res, new OpenInterestInfo());
 
                     OpenInterestData openInterestData = new OpenInterestData();
@@ -1848,19 +2082,22 @@ namespace OsEngine.Market.Servers.Binance.Futures
 
                         bool isInArray = false;
 
-                        for (int j = 0; j < _openInterest.Count; j++)
+                        lock (_openInterestLocker)
                         {
-                            if (_openInterest[j].SecutityName == openInterestData.SecutityName)
+                            for (int j = 0; j < _openInterest.Count; j++)
                             {
-                                _openInterest[j].OpenInterestValue = openInterestData.OpenInterestValue;
-                                isInArray = true;
-                                break;
+                                if (_openInterest[j].SecutityName == openInterestData.SecutityName)
+                                {
+                                    _openInterest[j].OpenInterestValue = openInterestData.OpenInterestValue;
+                                    isInArray = true;
+                                    break;
+                                }
                             }
-                        }
 
-                        if (isInArray == false)
-                        {
-                            _openInterest.Add(openInterestData);
+                            if (isInArray == false)
+                            {
+                                _openInterest.Add(openInterestData);
+                            }
                         }
                     }
                 }
@@ -1994,8 +2231,10 @@ namespace OsEngine.Market.Servers.Binance.Futures
                         if (_queuePrivateMessages.TryDequeue(out messsage))
                         {
                             string mes = messsage.MessageStr;
+                            // BUG-0448: null/пустая рамка — не данные. Тихий пропуск, по образцу guard в Spot (ClassifyUserDataFrame)
+                            if (string.IsNullOrEmpty(mes)) { continue; }
 
-                            if (mes.Contains("code"))
+                            if (mes.Contains("\"code\":")) // BUG-0422: key position, not bare substring ("c" may contain "code")
                             {
                                 // если есть code ошибки, то пытаемся распарсить
                                 ErrorMessage _err = new ErrorMessage();
@@ -2206,6 +2445,29 @@ namespace OsEngine.Market.Servers.Binance.Futures
             }
         }
 
+        // класс бумаги из реестра по символу. Snapshot + try/catch: UpdatePairs перестраивает реестр на reconnect, исключение отсюда = потеря WS-события
+        private string GetSecurityClassCode(string symbol)
+        {
+            try
+            {
+                List<Security> list = _securities;
+
+                for (int i = 0; i < list.Count; i++)
+                {
+                    if (list[i].Name == symbol)
+                    {
+                        return list[i].NameClass;
+                    }
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+
+            return null;
+        }
+
         private void UpdateMyOrderAndMyOrders(string mes)
         {
             // если ошибки в ответе ордера
@@ -2237,6 +2499,7 @@ namespace OsEngine.Market.Servers.Binance.Futures
             {
                 Order newOrder = new Order();
                 newOrder.SecurityNameCode = order.s;
+                newOrder.SecurityClassCode = GetSecurityClassCode(order.s);
                 newOrder.TimeCallBack = new DateTime(1970, 1, 1).AddMilliseconds(Convert.ToDouble(ord.T));
                 newOrder.NumberUser = orderNumUser;
 
@@ -2267,6 +2530,7 @@ namespace OsEngine.Market.Servers.Binance.Futures
             {
                 Order newOrder = new Order();
                 newOrder.SecurityNameCode = order.s;
+                newOrder.SecurityClassCode = GetSecurityClassCode(order.s);
                 newOrder.TimeCallBack = new DateTime(1970, 1, 1).AddMilliseconds(Convert.ToDouble(ord.T));
                 newOrder.TimeCancel = newOrder.TimeCallBack;
                 newOrder.NumberUser = orderNumUser;
@@ -2296,6 +2560,7 @@ namespace OsEngine.Market.Servers.Binance.Futures
             {
                 Order newOrder = new Order();
                 newOrder.SecurityNameCode = order.s;
+                newOrder.SecurityClassCode = GetSecurityClassCode(order.s);
                 newOrder.TimeCallBack = new DateTime(1970, 1, 1).AddMilliseconds(Convert.ToDouble(ord.T));
                 newOrder.NumberUser = orderNumUser;
                 newOrder.NumberMarket = order.i.ToString();
@@ -2342,6 +2607,7 @@ namespace OsEngine.Market.Servers.Binance.Futures
                 {
                     Order newOrder = new Order();
                     newOrder.SecurityNameCode = order.s;
+                    newOrder.SecurityClassCode = GetSecurityClassCode(order.s);
                     newOrder.TimeCallBack = new DateTime(1970, 1, 1).AddMilliseconds(Convert.ToDouble(ord.T));
                     newOrder.NumberUser = orderNumUser;
                     newOrder.NumberMarket = order.i.ToString();
@@ -2371,6 +2637,7 @@ namespace OsEngine.Market.Servers.Binance.Futures
             {
                 Order newOrder = new Order();
                 newOrder.SecurityNameCode = order.s;
+                newOrder.SecurityClassCode = GetSecurityClassCode(order.s);
                 newOrder.TimeCallBack = new DateTime(1970, 1, 1).AddMilliseconds(Convert.ToDouble(ord.T));
                 newOrder.TimeCancel = newOrder.TimeCallBack;
                 newOrder.NumberUser = orderNumUser;
@@ -2434,21 +2701,24 @@ namespace OsEngine.Market.Servers.Binance.Futures
 
         private decimal GetOpenInterestValue(string securityNameCode)
         {
-            if (_openInterest.Count == 0
-                 || _openInterest == null)
+            lock (_openInterestLocker)
             {
+                if (_openInterest == null
+                    || _openInterest.Count == 0)
+                {
+                    return 0;
+                }
+
+                for (int i = 0; i < _openInterest.Count; i++)
+                {
+                    if (_openInterest[i].SecutityName == securityNameCode)
+                    {
+                        return _openInterest[i].OpenInterestValue.ToDecimal();
+                    }
+                }
+
                 return 0;
             }
-
-            for (int i = 0; i < _openInterest.Count; i++)
-            {
-                if (_openInterest[i].SecutityName == securityNameCode)
-                {
-                    return _openInterest[i].OpenInterestValue.ToDecimal();
-                }
-            }
-
-            return 0;
         }
 
         private readonly object _depthLocker = new object();
@@ -2625,7 +2895,7 @@ namespace OsEngine.Market.Servers.Binance.Futures
                         param.Add("&timeInForce=", "GTC");
                     }
 
-                    param.Add("&price=",order.Price.ToString(CultureInfo.InvariantCulture)
+                    param.Add("&price=", order.Price.ToString(CultureInfo.InvariantCulture)
                             .Replace(CultureInfo.InvariantCulture.NumberFormat.NumberDecimalSeparator, "."));
                 }
 
@@ -2973,6 +3243,7 @@ namespace OsEngine.Market.Servers.Binance.Futures
                     }
                     newOrder.ServerType = ServerType.BinanceFutures;
                     newOrder.SecurityNameCode = orderOnBoardResp.symbol;
+                    newOrder.SecurityClassCode = GetSecurityClassCode(orderOnBoardResp.symbol);
                     newOrder.TimeCreate = new DateTime(1970, 1, 1).AddMilliseconds(Convert.ToDouble(orderOnBoardResp.time));
                     newOrder.TimeCallBack = new DateTime(1970, 1, 1).AddMilliseconds(Convert.ToDouble(orderOnBoardResp.updateTime));
 
@@ -3086,6 +3357,9 @@ namespace OsEngine.Market.Servers.Binance.Futures
                 newOrder.NumberMarket = orderOnBoard.orderId;
                 newOrder.NumberUser = oldOrder.NumberUser;
                 newOrder.SecurityNameCode = oldOrder.SecurityNameCode;
+                newOrder.SecurityClassCode = string.IsNullOrEmpty(oldOrder.SecurityClassCode)
+                    ? GetSecurityClassCode(oldOrder.SecurityNameCode)
+                    : oldOrder.SecurityClassCode;
                 // newOrder.State = OrderStateType.Cancel;
 
                 newOrder.Volume = oldOrder.Volume;
@@ -3162,13 +3436,135 @@ namespace OsEngine.Market.Servers.Binance.Futures
 
         RateGate _rateGate = new RateGate(1, TimeSpan.FromMilliseconds(100));
 
+        private static readonly RateGate _sharedRateGate = new RateGate(1, TimeSpan.FromMilliseconds(100));
+
+        private RateGate GetRateGate()
+        {
+            return ((ServerParameterBool)ServerParameters[6]).Value ? _sharedRateGate : _rateGate;
+        }
+
+        private RestClient _restClient;
+
+        private string _restClientBaseUrl;
+
+        private DateTime _ipBannedUntil = DateTime.MinValue;
+
+        private int _lastUsedWeight = 0;
+
+        private DateTime _lastUsedWeightTime = DateTime.MinValue;
+
+        private bool IsIpBanned()
+        {
+            return DateTime.UtcNow < _ipBannedUntil;
+        }
+
+        private void UpdateUsedWeight(IRestResponse response)
+        {
+            // Binance присылает текущий расход лимита в заголовке X-MBX-USED-WEIGHT-1M
+
+            for (int i = 0; i < response.Headers.Count; i++)
+            {
+                if (response.Headers[i].Name == "X-MBX-USED-WEIGHT-1M")
+                {
+                    int weight;
+
+                    if (int.TryParse(Convert.ToString(response.Headers[i].Value), out weight))
+                    {
+                        _lastUsedWeight = weight;
+                        _lastUsedWeightTime = DateTime.UtcNow;
+                    }
+
+                    return;
+                }
+            }
+        }
+
+        private void WaitIfWeightNearLimit()
+        {
+            // жёсткий лимит Binance Futures приходит из exchangeInfo, тормозим заранее от 75%
+            // вес в скользящем окне Binance живёт полные 60 секунд: затухание не считаем,
+            // иначе недооцениваем окно и долетаем до 429
+
+            if (_lastUsedWeightTime == DateTime.MinValue)
+            {
+                return;
+            }
+
+            double secondsPassed = (DateTime.UtcNow - _lastUsedWeightTime).TotalSeconds;
+
+            if (secondsPassed >= 60)
+            {
+                return;
+            }
+
+            double softLimit = _requestWeightLimitPerMinute * 0.75;
+
+            if (_lastUsedWeight <= softLimit)
+            {
+                return;
+            }
+
+            // ждём до гарантированной очистки окна: запросы под lock'ом, новых ответов не будет
+
+            Thread.Sleep(TimeSpan.FromSeconds(60 - secondsPassed));
+        }
+
+        private void TryRegisterIpBan(string response)
+        {
+            // формат сообщения: "Way too many requests; IP(1.2.3.4) banned until 1786092758447. Please use the websocket..."
+
+            if (string.IsNullOrEmpty(response))
+            {
+                return;
+            }
+
+            int bannedIndex = response.IndexOf("banned until ", StringComparison.Ordinal);
+
+            if (bannedIndex < 0)
+            {
+                return;
+            }
+
+            int start = bannedIndex + "banned until ".Length;
+            int end = start;
+
+            while (end < response.Length && char.IsDigit(response[end]))
+            {
+                end++;
+            }
+
+            long banMs;
+
+            if (end == start
+                || long.TryParse(response.Substring(start, end - start), out banMs) == false)
+            {
+                return;
+            }
+
+            DateTime banUntil = new DateTime(1970, 1, 1).AddMilliseconds(banMs);
+
+            if (banUntil > _ipBannedUntil)
+            {
+                _ipBannedUntil = banUntil;
+
+                SendLogMessage("Binance Futures: IP banned until " + _ipBannedUntil.ToString("yyyy.MM.dd HH:mm:ss")
+                    + " UTC. REST requests are paused until that time.", LogMessageType.System);
+            }
+        }
+
         public string CreateQuery(Method method, string endpoint, Dictionary<string, string> param = null, bool auth = false)
         {
+            if (IsIpBanned())
+            {
+                return null;
+            }
+
             try
             {
                 lock (_queryHttpLocker)
                 {
-                    _rateGate.WaitToProceed();
+                    GetRateGate().WaitToProceed();
+                    WaitIfWeightNearLimit();
                     return PerformHttpRequest(method, endpoint, param, auth);
                 }
             }
@@ -3185,6 +3581,11 @@ namespace OsEngine.Market.Servers.Binance.Futures
 
         public string CreateQueryNoLock(Method method, string endpoint, Dictionary<string, string> param = null, bool auth = false)
         {
+            if (IsIpBanned())
+            {
+                return null;
+            }
+
             try
             {
                 return PerformHttpRequest(method, endpoint, param, auth);
@@ -3233,14 +3634,61 @@ namespace OsEngine.Market.Servers.Binance.Futures
 
             string baseUrl = _baseUrl;
 
-            RestClient client = new RestClient(baseUrl);
+            // один RestClient на базовый адрес: keep-alive, без нового TLS-handshake на каждый запрос
 
-            if (_myProxy != null)
+            if (_restClient == null
+                || _restClientBaseUrl != baseUrl
+                || _restClient.Proxy != _myProxy)
             {
-                client.Proxy = _myProxy;
+                _restClient = new RestClient(baseUrl);
+                _restClientBaseUrl = baseUrl;
+
+                if (_myProxy != null)
+                {
+                    _restClient.Proxy = _myProxy;
+                }
             }
 
-            var response = client.Execute(request).Content;
+            IRestResponse restResponse = _restClient.Execute(request);
+
+            // RestSharp не бросает при сетевом сбое: причина только в ErrorException, Content при этом "" — без проверки отказ уходит коллеру молчаливым пустым успехом
+
+            if (restResponse.ErrorException != null)
+            {
+                throw new Exception(endpoint + ". Network error: " + restResponse.ErrorException.GetType().Name + ": " + restResponse.ErrorException.Message, restResponse.ErrorException);
+            }
+
+            UpdateUsedWeight(restResponse);
+
+            var response = restResponse.Content;
+
+            if (restResponse.StatusCode == (HttpStatusCode)429)
+            {
+                // превышен лимит без бана: ждём Retry-After, чтобы не получить 418
+
+                DateTime pauseUntil = DateTime.UtcNow.AddSeconds(10);
+
+                for (int i = 0; i < restResponse.Headers.Count; i++)
+                {
+                    if (restResponse.Headers[i].Name == "Retry-After")
+                    {
+                        int retrySeconds;
+
+                        if (int.TryParse(Convert.ToString(restResponse.Headers[i].Value), out retrySeconds))
+                        {
+                            pauseUntil = DateTime.UtcNow.AddSeconds(retrySeconds);
+                        }
+                    }
+                }
+
+                if (pauseUntil > _ipBannedUntil)
+                {
+                    _ipBannedUntil = pauseUntil;
+
+                    SendLogMessage("Binance Futures: 429 Too Many Requests. REST requests are paused until "
+                        + pauseUntil.ToString("yyyy.MM.dd HH:mm:ss") + " UTC", LogMessageType.System);
+                }
+            }
 
             if (response.StartsWith("<!DOCTYPE"))
             {
@@ -3248,8 +3696,15 @@ namespace OsEngine.Market.Servers.Binance.Futures
             }
             else if (response.Contains("code") && !response.StartsWith("{\"code\":200"))
             {
+                TryRegisterIpBan(response);
+
                 var error = JsonConvert.DeserializeAnonymousType(response, new ErrorMessage());
-                throw new Exception(error.msg);
+                // BUG-0345: carrying the exchange error code out; body without msg -> raw response instead of null-message exception
+                if (error == null || string.IsNullOrEmpty(error.msg))
+                {
+                    throw new Exception(response);
+                }
+                throw new Exception(error.code == 0 ? error.msg : error.code + ": " + error.msg);
             }
 
             return response;
@@ -3268,28 +3723,47 @@ namespace OsEngine.Market.Servers.Binance.Futures
                 return null;
             }
 
+            _lastRestError = ex.Message;
             SendLogMessage(ex.ToString(), LogMessageType.Error);
             return null;
         }
 
+        private TimeSpan _serverTimeOffset = TimeSpan.Zero;
+
+        private DateTime _lastServerTimeSync = DateTime.MinValue;
+
         private string GetNonce()
         {
-            var resTime = CreateQuery(Method.GET, "/" + type_str_selector + "/v1/time", null, false);
-
-            if (!string.IsNullOrEmpty(resTime))
+            if (_lastServerTimeSync == DateTime.MinValue
+                || _lastServerTimeSync.AddMinutes(5) < DateTime.UtcNow)
             {
-                var result = JsonConvert.DeserializeAnonymousType(resTime, new BinanceTime());
-                return (result.serverTime + 500).ToString();
+                SyncServerTime();
             }
-            else
-            {
-                DateTime yearBegin = new DateTime(1970, 1, 1);
-                var timeStamp = DateTime.UtcNow - yearBegin;
-                var r = timeStamp.TotalMilliseconds;
-                var re = Convert.ToInt64(r);
 
-                return re.ToString();
+            // считаем timestamp локально по сохранённому смещению, без лишнего REST-запроса
+
+            DateTime serverNow = DateTime.UtcNow + _serverTimeOffset;
+
+            long timeStamp = (long)(serverNow - new DateTime(1970, 1, 1)).TotalMilliseconds;
+
+            return (timeStamp + 500).ToString();
+        }
+
+        private void SyncServerTime()
+        {
+            string resTime = CreateQuery(Method.GET, "/" + type_str_selector + "/v1/time", null, false);
+
+            if (string.IsNullOrEmpty(resTime))
+            {
+                return;
             }
+
+            var result = JsonConvert.DeserializeAnonymousType(resTime, new BinanceTime());
+
+            DateTime serverTime = new DateTime(1970, 1, 1).AddMilliseconds(result.serverTime);
+
+            _serverTimeOffset = serverTime - DateTime.UtcNow;
+            _lastServerTimeSync = DateTime.UtcNow;
         }
 
         private string CreateSignature(string message)

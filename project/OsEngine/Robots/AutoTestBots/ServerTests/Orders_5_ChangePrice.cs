@@ -30,7 +30,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
             List<Security> securities = Server.Securities;
 
-            if (securities == null &&
+            if (securities == null ||
                 securities.Count == 0)
             {
                 SetNewError("Error 2. No securities found");
@@ -59,21 +59,21 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
             IServerPermission serverPermission = ServerMaster.GetServerPermission(_myServer.ServerType);
 
-            if(serverPermission == null)
+            if (serverPermission == null)
             {
                 SetNewError("Error 4. No server permission.");
                 TestEnded();
                 return;
             }
 
-            if(serverPermission.IsCanChangeOrderPrice == false)
+            if (serverPermission.IsCanChangeOrderPrice == false)
             {
-                SetNewServiceInfo("No permission. Server can`t change order price. Test over");
+                SetTestSkipped("No permission. Server can`t change order price. Test over");
                 TestEnded();
                 return;
             }
 
-            if(CountOrders < 5)
+            if (CountOrders < 5)
             {
                 SetNewError("Error 5. CountOrders < 5");
                 TestEnded();
@@ -124,7 +124,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
             // ордер на покупку
 
-            decimal price = Math.Round((md.Asks[0].Price.ToDecimal() + md.Bids[0].Price.ToDecimal()) / 2, mySecurity.Decimals);
+            decimal price = AlignPriceToStep((md.Asks[0].Price.ToDecimal() + md.Bids[0].Price.ToDecimal()) / 2, mySecurity);
 
             for (int i = 0; i < CountOrders; i++)
             {
@@ -184,7 +184,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
         {
             decimal volume = VolumeToTrade;
 
-            price = Math.Round(price - price * 0.005m, mySec.Decimals);
+            price = AlignPriceToStep(price - price * 0.005m, mySec);
 
             Order newOrder = CreateOrder(mySec, price, volume, Side.Buy);
             _waitSide = Side.Buy;
@@ -225,7 +225,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
         {
             decimal volume = VolumeToTrade;
 
-            price = Math.Round(price + price * 0.005m, mySec.Decimals);
+            price = AlignPriceToStep(price + price * 0.005m, mySec);
 
             Order newOrder = CreateOrder(mySec, price, volume, Side.Sell);
             _waitSide = Side.Sell;
@@ -262,7 +262,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
             return order;
         }
 
-        private void ChangeOrderPrice(Order order,Security security)
+        private void ChangeOrderPrice(Order order, Security security)
         {
             decimal newOrderPrice = order.Price;
 
@@ -271,14 +271,14 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
             if (order.Side == Side.Buy)
             {
-                newOrderPrice = Math.Round(bid - (bid * 0.01m),security.Decimals);
+                newOrderPrice = AlignPriceToStep(bid - (bid * 0.01m), security);
             }
             else if (order.Side == Side.Sell)
             {
-                newOrderPrice = Math.Round(ask + (ask * 0.01m), security.Decimals);
+                newOrderPrice = AlignPriceToStep(ask + (ask * 0.01m), security);
             }
 
-            while(order.Price ==  newOrderPrice)
+            while (order.Price == newOrderPrice)
             {
                 newOrderPrice += security.PriceStep;
             }
@@ -354,6 +354,7 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
             order.Volume = volume;
             order.Side = side;
             order.NumberUser = NumberGen.GetNumberOrder(StartProgram.IsOsTrader);
+            _myOrderNumbers.Add(order.NumberUser);
             order.ServerType = Server.ServerType;
             order.TypeOrder = OrderPriceType.Limit;
             order.SecurityNameCode = sec.Name;
@@ -364,6 +365,8 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
         }
 
         List<Order> _ordersActive = new List<Order>();
+
+        private HashSet<int> _myOrderNumbers = new HashSet<int>();
         List<Order> _ordersCancel = new List<Order>();
         List<Order> _ordersDone = new List<Order>();
         List<Order> _ordersFail = new List<Order>();
@@ -382,6 +385,11 @@ namespace OsEngine.Robots.AutoTestBots.ServerTests
 
         private void Server_NewOrderIncomeEvent(Order order)
         {
+            if (_myOrderNumbers.Contains(order.NumberUser) == false)
+            {
+                return;
+            }
+
             if (order.State == OrderStateType.None)
             {
                 this.SetNewError("Error 14. Order with state NONE");

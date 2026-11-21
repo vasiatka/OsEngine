@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Your rights to use code governed by this license http://o-s-a.net/doc/license_simple_engine.pdf
  * Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
 */
@@ -28,30 +28,31 @@ namespace OsEngine.Entity
             grid.MultiSelect = false;
             grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
             grid.ScrollBars = ScrollBars.None;
-            grid.BackColor = Color.FromArgb(21, 26, 30);
-            grid.BackgroundColor = Color.FromArgb(21, 26, 30);
-           
-            grid.GridColor = Color.FromArgb(17, 18, 23);
-            grid.ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.None;
-            grid.BorderStyle = BorderStyle.None;
 
-            DataGridViewCellStyle style = new DataGridViewCellStyle();
+            DataGridViewCellStyle style = CreateThemedCellStyle();
             style.Alignment = DataGridViewContentAlignment.TopLeft;
             style.WrapMode = DataGridViewTriState.True;
-            style.BackColor =  Color.FromArgb(21, 26, 30);
-            style.SelectionBackColor = Color.FromArgb(17, 18, 23);
-            style.ForeColor = Color.FromArgb(154, 156, 158);
+            style.Font = CreateGridFont(grid, "GridFontSize", FontStyle.Regular);
             grid.DefaultCellStyle = style;
+            grid.RowsDefaultCellStyle = (DataGridViewCellStyle)style.Clone();
 
-            DataGridViewCellStyle headerStyle = new DataGridViewCellStyle();
+            DataGridViewCellStyle headerStyle = CreateThemedHeaderStyle();
             headerStyle.Alignment = DataGridViewContentAlignment.TopLeft;
             headerStyle.WrapMode = DataGridViewTriState.True;
-            headerStyle.BackColor = Color.FromArgb(21, 26, 30);
-            headerStyle.SelectionBackColor = Color.FromArgb(21, 26, 30);
-            headerStyle.ForeColor = Color.FromArgb(154, 156, 158);
-
-
+            headerStyle.Font = CreateGridFont(grid, "GridHeaderFontSize", FontStyle.Bold);
             grid.ColumnHeadersDefaultCellStyle = headerStyle;
+
+            grid.BackColor = Themes.ThemeManager.GetColorWinForms("StandardBackGroundColorLight");
+            grid.BackgroundColor = Themes.ThemeManager.GetColorWinForms("StandardBackGroundColorLight");
+            System.Drawing.Color gridColor = Themes.ThemeManager.GetColorWinForms("GridLinesColor");
+            if (gridColor.A != 255)
+            {
+                gridColor = System.Drawing.SystemColors.ControlDark;
+            }
+            grid.GridColor = gridColor;
+
+            grid.ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.Single;
+            grid.BorderStyle = BorderStyle.None;
 
             grid.MouseLeave += GridMouseLeaveEvent;
 
@@ -65,9 +66,118 @@ namespace OsEngine.Entity
             return grid;
         }
 
+        /// <summary>
+        /// стиль ячеек в цветах текущей темы
+        /// </summary>
+        private static DataGridViewCellStyle CreateThemedCellStyle()
+        {
+            DataGridViewCellStyle style = new DataGridViewCellStyle();
+
+            style.BackColor = Themes.ThemeManager.GetColorWinForms("StandardBackGroundColorLight");
+            style.SelectionBackColor = Themes.ThemeManager.GetColorWinForms("GridSelectionBackColor");
+            style.SelectionForeColor = Themes.ThemeManager.GetColorWinForms("GridSelectionForeColor");
+            style.ForeColor = Themes.ThemeManager.GetColorWinForms("GridTextColor");
+
+            return style;
+        }
+
+        /// <summary>
+        /// стиль заголовков в цветах текущей темы
+        /// </summary>
+        private static DataGridViewCellStyle CreateThemedHeaderStyle()
+        {
+            DataGridViewCellStyle style = new DataGridViewCellStyle();
+
+            style.BackColor = Themes.ThemeManager.GetColorWinForms("StandardBackGroundColorLight");
+            style.SelectionBackColor = Themes.ThemeManager.GetColorWinForms("StandardBackGroundColorLight");
+            style.ForeColor = Themes.ThemeManager.GetColorWinForms("GridTextColor");
+
+            return style;
+        }
+
         class DoubleBufferedDataGridView : DataGridView
         {
             protected override bool DoubleBuffered { get => true; }
+        }
+
+        /// <summary>
+        /// применить текущую цветовую тему к существующей таблице
+        /// </summary>
+        public static void ApplyTheme(DataGridView grid)
+        {
+            if (grid == null)
+            {
+                return;
+            }
+
+            grid.BackColor = Themes.ThemeManager.GetColorWinForms("StandardBackGroundColorLight");
+            grid.BackgroundColor = Themes.ThemeManager.GetColorWinForms("StandardBackGroundColorLight");
+            System.Drawing.Color gridColor = Themes.ThemeManager.GetColorWinForms("GridLinesColor");
+            if (gridColor.A != 255)
+            {
+                gridColor = System.Drawing.SystemColors.ControlDark;
+            }
+            grid.GridColor = gridColor;
+
+            DataGridViewCellStyle style = CreateThemedCellStyle();
+
+            if (grid.DefaultCellStyle != null)
+            {
+                style.Alignment = grid.DefaultCellStyle.Alignment;
+                style.WrapMode = grid.DefaultCellStyle.WrapMode;
+            }
+
+            style.Font = CreateGridFont(grid, "GridFontSize", FontStyle.Regular);
+
+            grid.DefaultCellStyle = style;
+            grid.RowsDefaultCellStyle = (DataGridViewCellStyle)style.Clone();
+
+            DataGridViewCellStyle headerStyle = CreateThemedHeaderStyle();
+
+            if (grid.ColumnHeadersDefaultCellStyle != null)
+            {
+                headerStyle.Alignment = grid.ColumnHeadersDefaultCellStyle.Alignment;
+                headerStyle.WrapMode = grid.ColumnHeadersDefaultCellStyle.WrapMode;
+            }
+
+            headerStyle.Font = CreateGridFont(grid, "GridHeaderFontSize", FontStyle.Bold);
+
+            grid.ColumnHeadersDefaultCellStyle = headerStyle;
+
+            grid.Refresh();
+        }
+
+        /// <summary>
+        /// семейство шрифта таблиц из темы (размер — от grid.Font × множитель темы)
+        /// </summary>
+        private static string GetGridFontFamilyName()
+        {
+            string family = Themes.ThemeManager.GetString("GridFontFamily");
+
+            if (string.IsNullOrEmpty(family))
+            {
+                family = "Microsoft Sans Serif";
+            }
+
+            return family;
+        }
+
+        /// <summary>
+        /// шрифт таблицы: grid.Font.Size × множитель из темы (дефолт 1),
+        /// округление до 2 знаков
+        /// </summary>
+        private static System.Drawing.Font CreateGridFont(DataGridView grid, string scaleKey, System.Drawing.FontStyle style)
+        {
+            double scale = Themes.ThemeManager.GetDouble(scaleKey);
+
+            if (scale <= 0)
+            {
+                scale = 1;
+            }
+
+            float size = (float)Math.Round(grid.Font.Size * scale, 2);
+
+            return new System.Drawing.Font(GetGridFontFamilyName(), size, style);
         }
 
         private static void GridMouseWheelEvent(object sender, MouseEventArgs args)
@@ -110,7 +220,7 @@ namespace OsEngine.Entity
             }
             catch(Exception ex)
             {
-                MessageBox.Show(ex.ToString());
+                Market.ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
             }
         }
 
@@ -123,7 +233,7 @@ namespace OsEngine.Entity
             }
             catch (Exception ex)
             {
-                MessageBox.Show(ex.ToString());
+                Market.ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
             }
         }
 
@@ -189,7 +299,7 @@ namespace OsEngine.Entity
                     }
                     catch (Exception error)
                     {
-                        MessageBox.Show(error.ToString());
+                        Market.ServerMaster.SendNewLogMessage(error.ToString(), Logging.LogMessageType.Error);
                     }
                 };
 
@@ -200,7 +310,7 @@ namespace OsEngine.Entity
             }
             catch (Exception ex)
             {
-                MessageBox.Show(ex.ToString());
+                Market.ServerMaster.SendNewLogMessage(ex.ToString(), Logging.LogMessageType.Error);
             }
         }
 
@@ -976,6 +1086,61 @@ positionOpener.LifeTimeType
             myGridView.Columns.Add(column4);
 
             return myGridView;
+        }
+
+        // shortcut: кэш иконки инструкции на век процесса: грузится один раз, никогда не диспозится.
+        // Явный диспоуз (Rows.Clear/Dispose) дал бы ObjectDisposedException на репейнте у прежних держателей.
+        // Инициализация возможна с painter-потока (Pair/Polygon пересобирают таблицу с фонового цикла),
+        // поэтому DCL под приватным gate обязателен; под локом только file I/O + resize, без вызовов наружу.
+        // Трап _loadFailed кэширует неудачу: повторного file I/O и Error-лога на каждый репейнт нет.
+        private static readonly object _instructionPostGate = new object();
+        private static Bitmap _instructionPost;
+        private static bool _instructionPostLoadFailed;
+
+        /// <summary>
+        /// Общая иконка инструкций 25x20 (Images\InstructionPosts\GreenPostCollection.png).
+        /// null, если файла нет или он битый — коллер оставляет image-ячейку пустой, как сейчас при отсутствии файла
+        /// </summary>
+        public static Bitmap GetInstructionPostImage()
+        {
+            if (_instructionPost == null && _instructionPostLoadFailed == false)
+            {
+                lock (_instructionPostGate)
+                {
+                    if (_instructionPost == null && _instructionPostLoadFailed == false)
+                    {
+                        string path = Path.Combine(Application.StartupPath, @"Images\InstructionPosts\GreenPostCollection.png");
+                        try
+                        {
+                            if (File.Exists(path))
+                            {
+                                using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read))
+                                {
+                                    Image originalImage = Image.FromStream(fs);
+                                    try
+                                    {
+                                        _instructionPost = new Bitmap(originalImage, new Size(25, 20));
+                                    }
+                                    finally
+                                    {
+                                        originalImage.Dispose(); // оригинал не отдаётся наружу
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                _instructionPostLoadFailed = true; // нет файла — не повторяем проверку на каждый репейнт
+                            }
+                        }
+                        catch (Exception)
+                        {
+                            _instructionPostLoadFailed = true; // битый файл: шторм-защита, без Error-лога на каждый репейнт
+                        }
+                    }
+                }
+            }
+
+            return _instructionPost;
         }
 
     }

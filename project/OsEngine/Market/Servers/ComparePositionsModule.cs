@@ -1,4 +1,4 @@
-﻿/*
+/*
  *Your rights to use the code are governed by this license https://github.com/AlexWan/OsEngine/blob/master/LICENSE
  *Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
 */
@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using OsEngine.Entity;
 using System.IO;
+using OsEngine.OsTrader.Panels.Tab.Internal;
 
 namespace OsEngine.Market.Servers
 {
@@ -25,6 +26,7 @@ namespace OsEngine.Market.Servers
             LoadIgnoredSecurities();
 
             Thread worker = new Thread(UpdaterThreadWorker);
+            worker.IsBackground = true;
             worker.Start();
         }
 
@@ -194,7 +196,7 @@ namespace OsEngine.Market.Servers
 
                     if (haveErrorInSomePortfolio == true)
                     {
-                        Thread.Sleep(TimeDelaySeconds);
+                        Thread.Sleep(TimeDelaySeconds * 1000);
 
                         portfolios = UpdateCompareData();
 
@@ -715,6 +717,199 @@ namespace OsEngine.Market.Servers
 
         #endregion
 
+        #region Positions synchronization
+
+        private readonly PositionCreator _dealCreator = new PositionCreator();
+
+        /// <summary>
+        /// market orders that align the portfolio to robots accounting.
+        /// The exchange in hedge mode (long / short are separate rows, there is no net row) is compared by sides,
+        /// like the status in CompareSecurity; otherwise by the net position
+        /// </summary>
+        public List<ComparePositionsSyncOrder> GetSyncOrders(ComparePositionsSecurity security)
+        {
+            List<ComparePositionsSyncOrder> result = new List<ComparePositionsSyncOrder>();
+
+            Security sec = Server.GetSecurityForName(security.Security, string.Empty);
+            int decimals = sec != null ? sec.DecimalsVolume : 8;
+
+            if (security.PortfolioLong != 0 || security.PortfolioShort != 0)
+            {
+                decimal longDiff = Math.Round(security.RobotsLong - security.PortfolioLong, decimals);
+                decimal shortDiff = Math.Round(Math.Abs(security.RobotsShort) - Math.Abs(security.PortfolioShort), decimals);
+
+                if (longDiff > 0)
+                {
+                    result.Add(new ComparePositionsSyncOrder(Side.Buy, longDiff, OrderPositionConditionType.Open));
+                }
+                else if (longDiff < 0)
+                {
+                    result.Add(new ComparePositionsSyncOrder(Side.Sell, -longDiff, OrderPositionConditionType.Close));
+                }
+
+                if (shortDiff > 0)
+                {
+                    result.Add(new ComparePositionsSyncOrder(Side.Sell, shortDiff, OrderPositionConditionType.Open));
+                }
+                else if (shortDiff < 0)
+                {
+                    result.Add(new ComparePositionsSyncOrder(Side.Buy, -shortDiff, OrderPositionConditionType.Close));
+                }
+
+                return result;
+            }
+
+            decimal difference = Math.Round(security.RobotsCommon - security.PortfolioCommon, decimals);
+
+            if (difference != 0)
+            {
+                result.Add(new ComparePositionsSyncOrder(
+                    difference > 0 ? Side.Buy : Side.Sell,
+                    Math.Abs(difference),
+                    GetConditionType(difference, security.PortfolioCommon)));
+            }
+
+            return result;
+        }
+
+        public List<ComparePositionsSecurity> GetOutOfSyncSecurities(string portfolioName)
+        {
+            List<ComparePositionsSecurity> result = new List<ComparePositionsSecurity>();
+            List<ComparePositionsSecurity> securities = GetSecuritiesToPortfolio(portfolioName);
+
+            for (int i = 0; i < securities.Count; i++)
+            {
+                if (securities[i].Status == ComparePositionsStatus.Error
+                    && securities[i].IsIgnored == false)
+                {
+                    result.Add(securities[i]);
+                }
+            }
+
+            return result;
+        }
+
+        public int SynchronizePortfolio(string portfolioName)
+        {
+            int sentCount = 0;
+            List<ComparePositionsSecurity> outOfSync = GetOutOfSyncSecurities(portfolioName);
+
+            for (int i = 0; i < outOfSync.Count; i++)
+            {
+                if (SendSynchronizationOrder(portfolioName, outOfSync[i]))
+                {
+                    sentCount++;
+                }
+            }
+
+            return sentCount;
+        }
+
+        public bool SynchronizeSecurity(string portfolioName, string securityName)
+        {
+            List<ComparePositionsSecurity> securities = GetSecuritiesToPortfolio(portfolioName);
+
+            for (int i = 0; i < securities.Count; i++)
+            {
+                if (securities[i].Security == securityName)
+                {
+                    return SendSynchronizationOrder(portfolioName, securities[i]);
+                }
+            }
+
+            SendLogMessage("Synchronization canceled. Security " + securityName + " not found in compare list", LogMessageType.Error);
+            return false;
+        }
+
+        private bool SendSynchronizationOrder(string portfolioName, ComparePositionsSecurity security)
+        {
+            try
+            {
+                if (Server.ServerStatus != ServerConnectStatus.Connect)
+                {
+                    SendLogMessage("Synchronization canceled. Server is not connected.", LogMessageType.Error);
+                    return false;
+                }
+
+                Security sec = Server.GetSecurityForName(security.Security, string.Empty);
+
+                if (sec == null)
+                {
+                    SendLogMessage("Synchronization canceled. Security " + security.Security + " not found on the server", LogMessageType.Error);
+                    return false;
+                }
+
+                List<ComparePositionsSyncOrder> syncOrders = GetSyncOrders(security);
+
+                if (syncOrders.Count == 0)
+                {
+                    SendLogMessage("Synchronization skipped. Nothing to trade after rounding. Security " + security.Security, LogMessageType.System);
+                    return false;
+                }
+
+                for (int i = 0; i < syncOrders.Count; i++)
+                {
+                    ComparePositionsSyncOrder syncOrder = syncOrders[i];
+
+                    Order order = _dealCreator.CreateOrder(
+                        sec, syncOrder.Side, 0, syncOrder.Volume,
+                        OrderPriceType.Market, TimeSpan.FromSeconds(60),
+                        StartProgram.IsOsTrader, syncOrder.Condition,
+                        OrderTypeTime.GTC, Server.ServerNameUnique, false, 0);
+
+                    order.PortfolioNumber = portfolioName;
+
+                    Server.ExecuteOrder(order);
+
+                    SendLogMessage(
+                        "Synchronization order sent. Security " + security.Security +
+                        ", direction " + syncOrder.Side + ", " + syncOrder.Condition + ", volume " + syncOrder.Volume +
+                        ", robots long " + security.RobotsLong + " short " + security.RobotsShort + " common " + security.RobotsCommon +
+                        ", portfolio long " + security.PortfolioLong + " short " + security.PortfolioShort + " common " + security.PortfolioCommon,
+                        LogMessageType.System);
+                }
+
+                return true;
+            }
+            catch (Exception error)
+            {
+                SendLogMessage(error.ToString(), LogMessageType.Error);
+                return false;
+            }
+        }
+
+        private OrderPositionConditionType GetConditionType(decimal volumeOrder, decimal volumeInPortfolio)
+        {
+            if (volumeInPortfolio == 0)
+            {
+                return OrderPositionConditionType.Open;
+            }
+
+            if (volumeOrder > 0 && volumeInPortfolio > 0)
+            {
+                return OrderPositionConditionType.Open;
+            }
+
+            if (volumeOrder > 0 && volumeInPortfolio < 0)
+            {
+                return OrderPositionConditionType.Close;
+            }
+
+            if (volumeOrder < 0 && volumeInPortfolio < 0)
+            {
+                return OrderPositionConditionType.Open;
+            }
+
+            if (volumeOrder < 0 && volumeInPortfolio > 0)
+            {
+                return OrderPositionConditionType.Close;
+            }
+
+            return OrderPositionConditionType.Close;
+        }
+
+        #endregion
+
         #region Log
 
         /// <summary>
@@ -722,9 +917,11 @@ namespace OsEngine.Market.Servers
         /// </summary>
         private void SendLogMessage(string message, LogMessageType type)
         {
+            string messageUpdated = "ComparePositionsModule: " + message;
+
             if (LogMessageEvent != null)
             {
-                LogMessageEvent("ComparePositionsModule: " + message, type);
+                LogMessageEvent(messageUpdated, type);
             }
         }
 
@@ -742,6 +939,22 @@ namespace OsEngine.Market.Servers
 
         public List<ComparePositionsSecurity> CompareSecurities = new List<ComparePositionsSecurity>();
 
+    }
+
+    public class ComparePositionsSyncOrder
+    {
+        public ComparePositionsSyncOrder(Side side, decimal volume, OrderPositionConditionType condition)
+        {
+            Side = side;
+            Volume = volume;
+            Condition = condition;
+        }
+
+        public Side Side;
+
+        public decimal Volume;
+
+        public OrderPositionConditionType Condition;
     }
 
     public class ComparePositionsSecurity

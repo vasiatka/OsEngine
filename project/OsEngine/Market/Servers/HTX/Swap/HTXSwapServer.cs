@@ -67,30 +67,37 @@ namespace OsEngine.Market.Servers.HTX.Swap
 
             Thread threadMessageReaderPublic = new Thread(MessageReaderPublic);
             threadMessageReaderPublic.Name = "MessageReaderPublic";
+            threadMessageReaderPublic.IsBackground = true;
             threadMessageReaderPublic.Start();
 
             Thread threadMessageReaderPrivate = new Thread(MessageReaderPrivate);
             threadMessageReaderPrivate.Name = "MessageReaderPrivate";
+            threadMessageReaderPrivate.IsBackground = true;
             threadMessageReaderPrivate.Start();
 
             Thread threadUpdatePortfolio = new Thread(ThreadUpdatePortfolio);
             threadUpdatePortfolio.Name = "ThreadUpdatePortfolio";
+            threadUpdatePortfolio.IsBackground = true;
             threadUpdatePortfolio.Start();
 
             Thread threadExtendedData = new Thread(ThreadExtendedData);
             threadExtendedData.Name = "ThreadHTXSwapExtendedData";
+            threadExtendedData.IsBackground = true;
             threadExtendedData.Start();
 
             Thread threadCheckAliveWebSocket = new Thread(CheckAliveWebSocket);
             threadCheckAliveWebSocket.Name = "CheckAliveWebSocketHTXSwap";
+            threadCheckAliveWebSocket.IsBackground = true;
             threadCheckAliveWebSocket.Start();
 
             Thread threadMessageReaderMarketDepth = new Thread(ThreadMessageReaderMarketDepth);
             threadMessageReaderMarketDepth.Name = "ThreadHtxSwapMessageReaderMarketDepth";
+            threadMessageReaderMarketDepth.IsBackground = true;
             threadMessageReaderMarketDepth.Start();
 
             Thread threadMessageReaderTrades = new Thread(ThreadMessageReaderTrades);
             threadMessageReaderTrades.Name = "ThreadHtxSwapMessageReaderTrades";
+            threadMessageReaderTrades.IsBackground = true;
             threadMessageReaderTrades.Start();
         }
 
@@ -583,8 +590,10 @@ namespace OsEngine.Market.Servers.HTX.Swap
 
                     if (response.code != "200")
                     {
-                        if (response.msg.Contains("Incorrect Access key [Access key错误]")
-                            || response.msg.Contains("Verification failure [校验失败]"))
+                        // HTX может не прислать msg при ошибке, Contains по null кидает NRE вместо чистой ошибки
+                        if (!string.IsNullOrEmpty(response.msg)
+                            && (response.msg.Contains("Incorrect Access key [Access key错误]")
+                                || response.msg.Contains("Verification failure [校验失败]")))
                         {
                             Disconnect();
                         }
@@ -703,8 +712,10 @@ namespace OsEngine.Market.Servers.HTX.Swap
                     }
                     else
                     {
-                        if (response.msg.Contains("Incorrect Access key [Access key错误]")
-                            || response.msg.Contains("Verification failure [校验失败]"))
+                        // тот же null msg hazard, что в GetAccountInfo
+                        if (!string.IsNullOrEmpty(response.msg)
+                            && (response.msg.Contains("Incorrect Access key [Access key错误]")
+                                || response.msg.Contains("Verification failure [校验失败]")))
                         {
                             Disconnect();
                         }
@@ -1822,6 +1833,9 @@ namespace OsEngine.Market.Servers.HTX.Swap
 
         private List<OpenInterestData> _openInterest = new List<OpenInterestData>();
 
+        // Guards _openInterest: written by ThreadExtendedData, read per trade by UpdateTrade
+        private readonly object _openInterestLocker = new object();
+
         private DateTime _timeLastUpdateExtendedData = DateTime.Now;
 
         private RateGate _rateGateOpenInterest = new RateGate(240, TimeSpan.FromMilliseconds(3000));
@@ -1894,10 +1908,10 @@ namespace OsEngine.Market.Servers.HTX.Swap
 
                         if (response.status == "ok")
                         {
-                            OpenInterestData openInterestData = new OpenInterestData();
-
                             for (int j = 0; j < response.data.Count; j++)
                             {
+                                OpenInterestData openInterestData = new OpenInterestData();
+
                                 openInterestData.SecutityName = response.data[j].contract_code;
 
                                 if (response.data[j].amount != null)
@@ -1906,19 +1920,22 @@ namespace OsEngine.Market.Servers.HTX.Swap
 
                                     bool isInArray = false;
 
-                                    for (int k = 0; k < _openInterest.Count; k++)
+                                    lock (_openInterestLocker)
                                     {
-                                        if (_openInterest[k].SecutityName == openInterestData.SecutityName)
+                                        for (int k = 0; k < _openInterest.Count; k++)
                                         {
-                                            _openInterest[k].OpenInterestValue = openInterestData.OpenInterestValue;
-                                            isInArray = true;
-                                            break;
+                                            if (_openInterest[k].SecutityName == openInterestData.SecutityName)
+                                            {
+                                                _openInterest[k].OpenInterestValue = openInterestData.OpenInterestValue;
+                                                isInArray = true;
+                                                break;
+                                            }
                                         }
-                                    }
 
-                                    if (isInArray == false)
-                                    {
-                                        _openInterest.Add(openInterestData);
+                                        if (isInArray == false)
+                                        {
+                                            _openInterest.Add(openInterestData);
+                                        }
                                     }
                                 }
 
@@ -2258,21 +2275,24 @@ namespace OsEngine.Market.Servers.HTX.Swap
 
         private decimal GetOpenInterestValue(string securityNameCode)
         {
-            if (_openInterest.Count == 0
-                  || _openInterest == null)
+            lock (_openInterestLocker)
             {
+                if (_openInterest == null
+                    || _openInterest.Count == 0)
+                {
+                    return 0;
+                }
+
+                for (int i = 0; i < _openInterest.Count; i++)
+                {
+                    if (_openInterest[i].SecutityName == securityNameCode)
+                    {
+                        return _openInterest[i].OpenInterestValue.ToDecimal();
+                    }
+                }
+
                 return 0;
             }
-
-            for (int i = 0; i < _openInterest.Count; i++)
-            {
-                if (_openInterest[i].SecutityName == securityNameCode)
-                {
-                    return _openInterest[i].OpenInterestValue.ToDecimal();
-                }
-            }
-
-            return 0;
         }
 
         private void UpdateDepth(string message)

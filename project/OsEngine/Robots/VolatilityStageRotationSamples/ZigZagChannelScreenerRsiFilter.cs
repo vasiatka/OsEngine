@@ -168,7 +168,7 @@ namespace OsEngine.Robots.VolatilityStageRotationSamples
                 newData.Rsi = GetRsi(tabs[i]);
 
                 if(newData.Volume == 0
-                    || newData.Rsi == 0)
+                    || newData.Rsi < 0)
                 {
                     continue;
                 }
@@ -280,10 +280,11 @@ namespace OsEngine.Robots.VolatilityStageRotationSamples
                 rsi.Reload();
             }
 
-            if (rsi.DataSeries[0].Values.Count == 0 ||
-                rsi.DataSeries[0].Last == 0)
+            if (rsi.DataSeries[0].Values.Count == 0
+                || tab.CandlesAll == null
+                || tab.CandlesAll.Count < _rsiLen.ValueInt + 22) // непрогрев: first-write RSI на len+21 (RSI.cs, константа 20), ниже Last — padding-0
             {
-                return 0 ;
+                return -1;
             }
 
             decimal rsiValue = rsi.DataSeries[0].Last;
@@ -336,7 +337,21 @@ namespace OsEngine.Robots.VolatilityStageRotationSamples
                 return;
             }
 
-            if (_securitiesToTrade.ValueString.Contains(tab.Security.Name) == false)
+            // Точное совпадение токена вместо подстроки: Contains пропускал T внутри VTBR, SBER внутри SBERP
+            string[] list = _securitiesToTrade.ValueString
+                .Split(new[] { ' ', ',' }, StringSplitOptions.RemoveEmptyEntries);
+
+            bool inList = false;
+            for (int i = 0; i < list.Length; i++)
+            {
+                if (list[i] == tab.Security.Name)
+                {
+                    inList = true;
+                    break;
+                }
+            }
+
+            if (inList == false)
             {
                 return;
             }
@@ -350,13 +365,12 @@ namespace OsEngine.Robots.VolatilityStageRotationSamples
                 zigZag.Reload();
             }
 
-            if (zigZag.DataSeries[4].Values.Count == 0 ||
-                zigZag.DataSeries[4].Last == 0)
+            decimal zigZagUpLine = zigZag.DataSeries[4].Last; // пустая серия даёт Last 0 — тот же пропуск
+
+            if (zigZagUpLine == 0)
             {
                 return;
             }
-
-            decimal zigZagUpLine = zigZag.DataSeries[4].Last;
             decimal lastCandleClose = candles[candles.Count - 1].Close;
 
             if (lastCandleClose > zigZagUpLine)
@@ -401,13 +415,12 @@ namespace OsEngine.Robots.VolatilityStageRotationSamples
 
             Aindicator zigZag = (Aindicator)tab.Indicators[0];
 
-            if (zigZag.DataSeries[4].Values.Count == 0 ||
-                zigZag.DataSeries[4].Last == 0)
+            decimal zigZagUpLine = zigZag.DataSeries[4].Last; // пустая серия даёт Last 0 — тот же пропуск
+
+            if (zigZagUpLine == 0)
             {
                 return;
             }
-
-            decimal zigZagUpLine = zigZag.DataSeries[4].Last;
             decimal lastCandleClose = candles[candles.Count - 1].Close;
 
             if(zigZagUpLine != 0 &&

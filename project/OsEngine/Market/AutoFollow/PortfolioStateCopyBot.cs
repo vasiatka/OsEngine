@@ -28,9 +28,13 @@ namespace OsEngine.Market.AutoFollow
 
         private StrategyParameterString _regime;
 
+        private StrategyParameterString _fullLog;
+
         private List<string> _defaultIgnoredSec = ["RUB", "Rub", "rub", "USDT", "USD", "Usd", "Eur", "EUR"];
 
         private List<Tuple<Security, Side, decimal>> _notIgnoredSec = [];
+
+        private bool _timeNotReceivedLogged;
 
         public PortfolioStateCopyBot(string name, StartProgram startProgram) : base(name, startProgram)
         {
@@ -58,6 +62,8 @@ namespace OsEngine.Market.AutoFollow
             _posTabs = TabCreate<BotTabScreener>();
 
             _regime = CreateParameter(OsLocalization.Logging.Label5, "Off", new[] { "Off", "On" });
+
+            _fullLog = CreateParameter("Full log", "Off", new[] { "Off", "On" });
 
             _tradePeriodsShowDialogButton = CreateParameterButton(OsLocalization.Market.ServerParam14);
             _tradePeriodsShowDialogButton.UserClickOnButtonEvent += _tradePeriodsShowDialogButton_UserClickOnButtonEvent;
@@ -115,6 +121,11 @@ namespace OsEngine.Market.AutoFollow
                 File.Delete(@"Engine\" + NameStrategyUniq + "-IgnoredPos.txt");
             }
 
+            if (_grid != null)
+            {
+                _grid.DataError -= Grid_DataError;
+            }
+
             _botIsDelete = true;
         }
 
@@ -137,6 +148,8 @@ namespace OsEngine.Market.AutoFollow
             DataGridView newGrid =
                 DataGridFactory.GetDataGridView(DataGridViewSelectionMode.CellSelect,
                 DataGridViewAutoSizeRowsMode.AllCells);
+
+            newGrid.DataError += Grid_DataError;
 
             newGrid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
             DataGridViewTextBoxCell cell0 = new DataGridViewTextBoxCell();
@@ -184,6 +197,12 @@ namespace OsEngine.Market.AutoFollow
             _grid = newGrid;
         }
 
+        private void Grid_DataError(object sender, DataGridViewDataErrorEventArgs e)
+        {
+            e.ThrowException = false;
+            SendNewLogMessage(e.Exception.ToString(), Logging.LogMessageType.Error);
+        }
+
         private void _grid_Click(object sender, EventArgs e)
         {
             try
@@ -227,7 +246,7 @@ namespace OsEngine.Market.AutoFollow
 
                             // удалить позицию и вкладку
 
-                            BotTabSimple tab = _posTabs.Tabs.Find(t => t.Security.Name.StartsWith(newSec));
+                            BotTabSimple tab = _posTabs.Tabs.Find(t => t.Connector.SecurityName.StartsWith(newSec));
 
                             if (tab != null && tab.PositionsOpenAll.Count == 1)   // у бота есть позиция с таким инструментом
                             {
@@ -306,6 +325,71 @@ namespace OsEngine.Market.AutoFollow
 
         private bool _botIsDelete = false;
 
+        private class PendingPositionState
+        {
+            public string SecurityName;
+            public bool NeedClose;
+            public Side Side;
+            public decimal Volume;
+            public DateTime LastChangeTime;
+        }
+
+        private List<PendingPositionState> _pendingPositionStates = new List<PendingPositionState>();
+
+        private int _stabilizationSeconds = 5;
+
+        private bool IsStateStabilized(string securityName, bool needClose, Side side, decimal volume)
+        {
+            PendingPositionState pending = _pendingPositionStates.Find(p => p.SecurityName == securityName);
+
+            if (pending == null)
+            {
+                pending = new PendingPositionState();
+                pending.SecurityName = securityName;
+                pending.NeedClose = needClose;
+                pending.Side = side;
+                pending.Volume = volume;
+                pending.LastChangeTime = DateTime.Now;
+                _pendingPositionStates.Add(pending);
+
+                LogIfFull($"Pending state registered: {securityName} needClose={needClose} side={side} volume={volume}");
+                return false;
+            }
+
+            if (pending.NeedClose != needClose
+                || pending.Side != side
+                || pending.Volume != volume)
+            {
+                pending.NeedClose = needClose;
+                pending.Side = side;
+                pending.Volume = volume;
+                pending.LastChangeTime = DateTime.Now;
+
+                LogIfFull($"Pending state changed: {securityName} needClose={needClose} side={side} volume={volume}");
+                return false;
+            }
+
+            return DateTime.Now >= pending.LastChangeTime.AddSeconds(_stabilizationSeconds);
+        }
+
+        private void RemovePendingState(string securityName)
+        {
+            PendingPositionState pending = _pendingPositionStates.Find(p => p.SecurityName == securityName);
+
+            if (pending != null)
+            {
+                _pendingPositionStates.Remove(pending);
+            }
+        }
+
+        private void LogIfFull(string message)
+        {
+            if (_fullLog.ValueString == "On")
+            {
+                SendNewLogMessage(message, Logging.LogMessageType.System);
+            }
+        }
+
         public void WorkerPlace()
         {
             while (true)
@@ -332,7 +416,26 @@ namespace OsEngine.Market.AutoFollow
                         continue;
                     }
 
-                    if (_tradePeriodsSettings.CanTradeThisTime(_mainTab.TimeServerCurrent) == false)
+                    DateTime serverTime = _mainTab.TimeServerCurrent;
+
+                    if (serverTime == DateTime.MinValue)
+                    {
+                        // Серверное время ещё не получено. Без него неторговые периоды не работают, логику не запускаем.
+                        if (_timeNotReceivedLogged == false)
+                        {
+                            _timeNotReceivedLogged = true;
+                            SendNewLogMessage("Server time is not received yet. Copy trading is suspended until first data from the server.", Logging.LogMessageType.System);
+                        }
+                        continue;
+                    }
+
+                    if (_timeNotReceivedLogged == true)
+                    {
+                        _timeNotReceivedLogged = false;
+                        SendNewLogMessage("Server time is received. Copy trading is resumed.", Logging.LogMessageType.System);
+                    }
+
+                    if (_tradePeriodsSettings.CanTradeThisTime(serverTime) == false)
                     {
                         continue;
                     }
@@ -394,35 +497,69 @@ namespace OsEngine.Market.AutoFollow
                             continue;
                         }
 
-                        BotTabSimple tab = _posTabs.Tabs.Find(t => t.Security.Name.Equals(positionOnEx.SecurityNameCode));
+                        BotTabSimple tab = _posTabs.Tabs.Find(t => t.Connector.SecurityName.Equals(positionOnEx.SecurityNameCode));
 
                         if (tab != null && tab.PositionsOpenAll.Count > 0)   // у бота есть позиция с таким инструментом
                         {
-                            if (positionOnEx.ValueCurrent == 0 // бумаги нет в портфеле
-                                || positionOnEx.PortfolioName != _mainTab.Portfolio.Number) // ведущий портфель изменился
+                            bool needClose = positionOnEx.ValueCurrent == 0 // бумаги нет в портфеле
+                                || positionOnEx.PortfolioName != _mainTab.Portfolio.Number; // ведущий портфель изменился
+
+                            bool needRecreate = needClose == false
+                                && (tab.PositionsOpenAll[0].Direction != posExchangeDirection
+                                    || tab.PositionsOpenAll[0].OpenVolume != Math.Abs(positionOnEx.ValueCurrent));      // проверка направления и объема
+
+                            if (needClose == false && needRecreate == false)
                             {
+                                // состояние на бирже совпадает с позицией — отложенная реакция не нужна
+                                if (_pendingPositionStates.Find(p => p.SecurityName == positionOnEx.SecurityNameCode) != null)
+                                {
+                                    LogIfFull($"State returned to current position, pending cancelled: {positionOnEx.SecurityNameCode}");
+                                }
+                                RemovePendingState(positionOnEx.SecurityNameCode);
+                                continue;
+                            }
+
+                            // биржа может отдавать промежуточные значения портфеля — реагируем только на устоявшееся состояние
+                            if (IsStateStabilized(positionOnEx.SecurityNameCode, needClose, posExchangeDirection, positionOnEx.ValueCurrent) == false)
+                            {
+                                continue;
+                            }
+
+                            RemovePendingState(positionOnEx.SecurityNameCode);
+
+                            if (needClose)
+                            {
+                                LogIfFull($"Close position, exchange volume is zero: {security.Name}");
+
                                 tab.CloseAtFake(tab.PositionsOpenAll[0], tab.PositionsOpenAll[0].MaxVolume, tab.PriceBestAsk, DateTime.Now);
 
                                 _mainTab.Portfolio.PositionOnBoard.Remove(positionsOnExchange[i]);
 
                                 continue;
                             }
-                            else if (tab.PositionsOpenAll[0].Direction != posExchangeDirection
-                                || tab.PositionsOpenAll[0].OpenVolume != Math.Abs(positionOnEx.ValueCurrent))      // проверка направления и объема
+
+                            Tuple<Security, Side, decimal> changedSec = _notIgnoredSec.Find(s => s.Item1.Name == security.Name);
+
+                            if (changedSec != null)
                             {
-                                tab.CloseAtFake(tab.PositionsOpenAll[0], tab.PositionsOpenAll[0].MaxVolume, tab.PriceBestAsk, DateTime.Now);
+                                _notIgnoredSec.Remove(changedSec);
 
-                                Tuple<Security, Side, decimal> changedSec = _notIgnoredSec.Find(s => s.Item1.Name == security.Name);
+                                _notIgnoredSec.Add(new Tuple<Security, Side, decimal>(security, posExchangeDirection, positionOnEx.ValueCurrent));
+                            }
 
-                                if (changedSec != null)
-                                {
-                                    _notIgnoredSec.Remove(changedSec);
+                            Position position = tab.PositionsOpenAll[0];
+                            decimal botVolume = position.OpenVolume;
+                            decimal targetVolume = Math.Abs(positionOnEx.ValueCurrent);
 
-                                    _notIgnoredSec.Add(new Tuple<Security, Side, decimal>(security, posExchangeDirection, positionOnEx.ValueCurrent));
-                                }
+                            if (position.Direction != posExchangeDirection)
+                            {
+                                // разворот позиции — только закрытие старой и создание новой
+                                LogIfFull($"Recreate position, direction changed: {security.Name} bot={botVolume} exchange={targetVolume} side={posExchangeDirection}");
+
+                                tab.CloseAtFake(position, position.MaxVolume, tab.PriceBestAsk, DateTime.Now);
 
                                 Position newDeal = tab._dealCreator.CreatePosition(tab.TabName, posExchangeDirection, posExchangeDirection == Side.Buy ? tab.PriceBestAsk : tab.PriceBestBid,
-                                                   Math.Abs(positionOnEx.ValueCurrent), OrderPriceType.Market, tab.ManualPositionSupport.SecondToOpen, security, _mainTab.Portfolio,
+                                                   targetVolume, OrderPriceType.Market, tab.ManualPositionSupport.SecondToOpen, security, _mainTab.Portfolio,
                                                    tab.StartProgram, tab.ManualPositionSupport.OrderTypeTime, tab.ManualPositionSupport.LimitsMakerOnly);
 
                                 newDeal.NameBotClass = tab.BotClassName;
@@ -430,6 +567,33 @@ namespace OsEngine.Market.AutoFollow
                                 tab._journal.SetNewDeal(newDeal);
 
                                 tab.OrderFakeExecute(newDeal.OpenOrders[0], DateTime.Now);
+
+                                continue;
+                            }
+
+                            if (targetVolume > botVolume)
+                            {
+                                // докупаем дельту к существующей позиции, не закрывая её
+                                LogIfFull($"Increase position volume: {security.Name} {botVolume} -> {targetVolume}");
+
+                                Order addOrder = tab._dealCreator.CreateOrder(security, posExchangeDirection,
+                                    posExchangeDirection == Side.Buy ? tab.PriceBestAsk : tab.PriceBestBid,
+                                    targetVolume - botVolume, OrderPriceType.Market, tab.ManualPositionSupport.SecondToOpen,
+                                    tab.StartProgram, OrderPositionConditionType.Open, tab.ManualPositionSupport.OrderTypeTime,
+                                    _mainTab.Portfolio.ServerUniqueName, tab.ManualPositionSupport.LimitsMakerOnly, position.Number);
+
+                                addOrder.PortfolioNumber = position.PortfolioName;
+
+                                position.AddNewOpenOrder(addOrder);
+
+                                tab.OrderFakeExecute(addOrder, DateTime.Now);
+                            }
+                            else
+                            {
+                                // частично закрываем дельту — позиция остаётся открытой
+                                LogIfFull($"Decrease position volume: {security.Name} {botVolume} -> {targetVolume}");
+
+                                tab.CloseAtFake(position, botVolume - targetVolume, tab.PriceBestAsk, DateTime.Now);
                             }
 
                             continue;
@@ -468,11 +632,18 @@ namespace OsEngine.Market.AutoFollow
                                 if (_posTabs.SecuritiesNames[i2].SecurityName.Equals(securitiesToScreener[i].SecurityName))
                                 {
                                     isInArray = true;
+
+                                    if(_posTabs.SecuritiesNames[i2].IsOn == false)
+                                    {
+                                        _posTabs.SecuritiesNames[i2].IsOn = true;
+                                    }
+
                                     break;
                                 }
                             }
                             if (isInArray == false)
                             {
+                                LogIfFull($"Create tab: {securitiesToScreener[i].SecurityName}");
                                 _posTabs.SecuritiesNames.Add(securitiesToScreener[i]);
                             }
                         }
@@ -492,13 +663,31 @@ namespace OsEngine.Market.AutoFollow
 
                         for (int j = 0; j < securitiesToScreener.Count; j++)
                         {
-                            Tuple<Security, Side, decimal> sec = _notIgnoredSec.Find(s => s.Item1.Name == securitiesToScreener[j].SecurityName);
+                            ActivatedSecurity currentSecurity = securitiesToScreener[j];
 
-                            BotTabSimple tab = _posTabs.Tabs.Find(t => t.Security.Name == securitiesToScreener[j].SecurityName);
+                            Tuple<Security, Side, decimal> sec = _notIgnoredSec.Find(s => s.Item1.Name == currentSecurity.SecurityName);
 
-                            if (tab != null)
+                            BotTabSimple tab = _posTabs.Tabs.Find(t => t.Connector.SecurityName == currentSecurity.SecurityName);
+
+                            if (tab != null
+                                && tab.Security != null
+                                && tab.IsConnected
+                                && tab.CandlesAll != null
+                                && tab.CandlesAll.Count > 0)
                             {
-                                Position newDeal = tab._dealCreator.CreatePosition(tab.TabName, sec.Item2, sec.Item2 == Side.Buy ? tab.PriceBestAsk : tab.PriceBestBid,
+                                decimal bestAsk = tab.PriceBestAsk;
+                                decimal bestBid = tab.PriceBestBid;
+
+                                if (bestAsk == 0 && bestBid == 0)
+                                {
+                                    // стакана нет (например у ETF) — цена для фейкового исполнения из последней свечи
+                                    bestAsk = tab.CandlesAll[tab.CandlesAll.Count - 1].Close;
+                                    bestBid = bestAsk;
+                                }
+
+                                LogIfFull($"Open new position: {currentSecurity.SecurityName} side={sec.Item2} volume={sec.Item3}");
+
+                                Position newDeal = tab._dealCreator.CreatePosition(tab.TabName, sec.Item2, sec.Item2 == Side.Buy ? bestAsk : bestBid,
                                                    Math.Abs(sec.Item3), OrderPriceType.Market, tab.ManualPositionSupport.SecondToOpen, sec.Item1, tab.Portfolio,
                                                    tab.StartProgram, tab.ManualPositionSupport.OrderTypeTime, tab.ManualPositionSupport.LimitsMakerOnly);
 
@@ -507,6 +696,10 @@ namespace OsEngine.Market.AutoFollow
                                 tab._journal.SetNewDeal(newDeal);
 
                                 tab.OrderFakeExecute(newDeal.OpenOrders[0], DateTime.Now);
+                            }
+                            else
+                            {
+                                LogIfFull($"Skip opening position {currentSecurity.SecurityName}: tab not ready (tab={(tab != null)}, security={(tab != null && tab.Security != null)}, connected={(tab != null && tab.IsConnected)}, candles={(tab != null && tab.CandlesAll != null ? tab.CandlesAll.Count : 0)})");
                             }
                         }
                     }
@@ -521,7 +714,8 @@ namespace OsEngine.Market.AutoFollow
 
                         if (openPositionsInTab.Count == 0)
                         {
-                            _posTabs.RemoveTabBySecurityName(tabCurrent.Security.Name, tabCurrent.Security.NameClass);
+                            LogIfFull($"Remove tab (no positions in tab): {tabCurrent.Connector.SecurityName}");
+                            _posTabs.RemoveTabBySecurityName(tabCurrent.Connector.SecurityName, tabCurrent.Connector.SecurityClass);
                             Thread.Sleep(1000);
                             break;
                         }
@@ -538,15 +732,15 @@ namespace OsEngine.Market.AutoFollow
 
                                 if(string.IsNullOrEmpty(positionOnEx.SecurityNameClass) == false)
                                 {
-                                    if(positionOnEx.SecurityNameCode == tabCurrent.Security.Name
-                                        && positionOnEx.SecurityNameClass == tabCurrent.Security.NameClass)
+                                    if(positionOnEx.SecurityNameCode == tabCurrent.Connector.SecurityName
+                                        && positionOnEx.SecurityNameClass == tabCurrent.Connector.SecurityClass)
                                     {
                                         mySecurity = true;
                                     }
                                 }
                                 else
                                 {
-                                    if (positionOnEx.SecurityNameCode == tabCurrent.Security.Name)
+                                    if (positionOnEx.SecurityNameCode == tabCurrent.Connector.SecurityName)
                                     {
                                         mySecurity = true;
                                     }
@@ -562,7 +756,8 @@ namespace OsEngine.Market.AutoFollow
 
                             if(haveOnExchange == false)
                             {
-                                _posTabs.RemoveTabBySecurityName(tabCurrent.Security.Name, tabCurrent.Security.NameClass);
+                                LogIfFull($"Remove tab (no position on exchange): {tabCurrent.Connector.SecurityName}");
+                                _posTabs.RemoveTabBySecurityName(tabCurrent.Connector.SecurityName, tabCurrent.Connector.SecurityClass);
                                 Thread.Sleep(1000);
                                 break;
                             }
@@ -587,6 +782,21 @@ namespace OsEngine.Market.AutoFollow
                             }
 
                             Thread.Sleep(3000);
+                            break;
+                        }
+                    }
+
+                    // 5 проверяем экспирированные бумаги. Если Security равен null - удаляем такую вкладку
+
+                    for (int i = 0; i < _posTabs.Tabs.Count; i++)
+                    {
+                        BotTabSimple tabCurrent = _posTabs.Tabs[i];
+
+                        if (tabCurrent.Security == null)
+                        {
+                            LogIfFull($"Remove tab (security is null): {tabCurrent.Connector.SecurityName}");
+                            _posTabs.RemoveTabBySecurityName(tabCurrent.Connector.SecurityName, tabCurrent.Connector.SecurityClass);
+                            Thread.Sleep(1000);
                             break;
                         }
                     }

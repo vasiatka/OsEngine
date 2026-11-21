@@ -1,4 +1,4 @@
-﻿/*
+/*
  *Your rights to use the code are governed by this license https://github.com/AlexWan/OsEngine/blob/master/LICENSE
  *Ваши права на использование кода регулируются данной лицензией http://o-s-a.net/doc/license_simple_engine.pdf
 */
@@ -184,10 +184,7 @@ namespace OsEngine.Market.Connectors
             ComboBoxTypeServer.SelectionChanged += ComboBoxTypeServer_SelectionChanged;
 
             CheckBoxSaveTradeArrayInCandle.IsChecked = SourcesCreator.SaveTradesInCandles;
-            CheckBoxSaveTradeArrayInCandle.Click += delegate (object sender, RoutedEventArgs args)
-            {
-                _saveTradesInCandles = CheckBoxSaveTradeArrayInCandle.IsChecked.Value;
-            };
+            CheckBoxSaveTradeArrayInCandle.Click += CheckBoxSaveTradeArrayInCandle_Click;
 
             ComboBoxCandleMarketDataType.Items.Add(CandleMarketDataType.Tick.ToString());
             ComboBoxCandleMarketDataType.Items.Add(CandleMarketDataType.MarketDepth.ToString());
@@ -239,12 +236,15 @@ namespace OsEngine.Market.Connectors
                 ComboBoxExpiration.SelectionChanged -= ComboBoxExpirationAndStrike_SelectionChanged;
                 ComboBoxStrike.SelectionChanged -= ComboBoxExpirationAndStrike_SelectionChanged;
                 ComboBoxTypeServer.SelectionChanged -= ComboBoxTypeServer_SelectionChanged;
+                ComboBoxCandleMarketDataType.SelectionChanged -= ComboBoxCandleMarketDataType_SelectionChanged;
                 ComboBoxCandleCreateMethodType.SelectionChanged -= ComboBoxCandleCreateMethodType_SelectionChanged;
+                CheckBoxSaveTradeArrayInCandle.Click -= CheckBoxSaveTradeArrayInCandle_Click;
                 CheckBoxSelectAllCheckBox.Click -= CheckBoxSelectAllCheckBox_Click;
                 ButtonRightInSearchResults.Click -= ButtonRightInSearchResults_Click;
                 ButtonLeftInSearchResults.Click -= ButtonLeftInSearchResults_Click;
                 TextBoxSearchSecurity.KeyDown -= TextBoxSearchSecurity_KeyDown;
                 _gridSecurities.CellClick -= _gridSecurities_CellClick;
+                _gridSecurities.DataError -= _gridSecurities_DataError;
                 Closed -= MassSourcesCreateUi_Closed;
 
                 DeleteCandleRealizationGrid();
@@ -258,9 +258,7 @@ namespace OsEngine.Market.Connectors
             try
             {
                 _selectedSeries = null;
-                _series.Clear();
                 _series = null;
-                _searchResults.Clear();
                 _searchResults = null;
             }
             catch
@@ -409,6 +407,18 @@ namespace OsEngine.Market.Connectors
             }
 
             return sec;
+        }
+
+        private void CheckBoxSaveTradeArrayInCandle_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                _saveTradesInCandles = CheckBoxSaveTradeArrayInCandle.IsChecked.Value;
+            }
+            catch (Exception error)
+            {
+                SendNewLogMessage(error.ToString(), LogMessageType.Error);
+            }
         }
 
         private void ComboBoxCandleMarketDataType_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
@@ -872,9 +882,17 @@ namespace OsEngine.Market.Connectors
 
         private void DeleteGridSecurities()
         {
+            if (_gridSecurities == null)
+            {
+                return;
+            }
             DataGridFactory.ClearLinks(_gridSecurities);
             _gridSecurities.CellClick -= _gridSecurities_CellClick;
             _gridSecurities.DataError -= _gridSecurities_DataError;
+            _gridSecurities.Rows.Clear();
+            _gridSecurities.Columns.Clear();
+            _gridSecurities.DataSource = null;
+            _gridSecurities.Dispose();
             _gridSecurities = null;
             SecuritiesHost.Child = null;
         }
@@ -1104,14 +1122,14 @@ namespace OsEngine.Market.Connectors
                     {
                         for (int y = 0; y < _gridSecurities.ColumnCount; y++)
                         {
-                            _gridSecurities.Rows[e.RowIndex].Cells[y].Style.ForeColor = System.Drawing.ColorTranslator.FromHtml("#ffffff");
+                            _gridSecurities.Rows[e.RowIndex].Cells[y].Style.ForeColor = Themes.ThemeManager.GetColorWinForms("GridSelectionForeColor");
                         }
                     }
                     else
                     {
                         for (int y = 0; y < _gridSecurities.ColumnCount; y++)
                         {
-                            _gridSecurities.Rows[i].Cells[y].Style.ForeColor = System.Drawing.ColorTranslator.FromHtml("#FFA1A1A1");
+                            _gridSecurities.Rows[i].Cells[y].Style.ForeColor = Themes.ThemeManager.GetColorWinForms("GridTextInactiveColor");
                         }
                     }
                 }
@@ -1669,9 +1687,17 @@ namespace OsEngine.Market.Connectors
 
         private void DeleteCandleRealizationGrid()
         {
+            if (_candlesRealizationGrid == null)
+            {
+                return;
+            }
             DataGridFactory.ClearLinks(_candlesRealizationGrid);
             _candlesRealizationGrid.CellEndEdit -= _candlesRealizationGrid_CellEndEdit;
             _candlesRealizationGrid.DataError -= _candlesRealizationGrid_DataError;
+            _candlesRealizationGrid.Rows.Clear();
+            _candlesRealizationGrid.Columns.Clear();
+            _candlesRealizationGrid.DataSource = null;
+            _candlesRealizationGrid.Dispose();
             _candlesRealizationGrid = null;
             HostCandleSeriesParameters.Child = null;
         }
@@ -1820,7 +1846,7 @@ namespace OsEngine.Market.Connectors
                     box.Items.Add(TimeFrame.Sec2.ToString());
                     box.Items.Add(TimeFrame.Sec1.ToString());
 
-                    ComboBoxCandleMarketDataType.SelectedItem = CandleMarketDataType.Tick;
+                    ComboBoxCandleMarketDataType.SelectedItem = CandleMarketDataType.Tick.ToString();
                     ComboBoxCandleMarketDataType.IsEnabled = true;
                 }
                 else
@@ -1875,10 +1901,10 @@ namespace OsEngine.Market.Connectors
                         box.Items.Add(timeFramesArray[i]);
                     }
 
-                    ComboBoxCandleCreateMethodType.SelectedItem = CandleCreateMethodType.Simple;
+                    ComboBoxCandleCreateMethodType.SelectedItem = CandleCreateMethodType.Simple.ToString();
                     ComboBoxCandleCreateMethodType.IsEnabled = false;
 
-                    ComboBoxCandleMarketDataType.SelectedItem = CandleMarketDataType.Tick;
+                    ComboBoxCandleMarketDataType.SelectedItem = CandleMarketDataType.Tick.ToString();
                     ComboBoxCandleMarketDataType.IsEnabled = false;
                 }
             }

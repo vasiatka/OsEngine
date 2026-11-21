@@ -1,5 +1,4 @@
 ﻿using OsEngine.Entity;
-using OsEngine.Entity.SyntheticBondEntity;
 using OsEngine.Logging;
 using OsEngine.Market;
 using OsEngine.Market.Servers;
@@ -87,6 +86,7 @@ namespace OsEngine.OsTrader.Iceberg
                     else if (stopTradeOnFailOrders == "False")
                         _stopTradeOnFailOrders = false;
 
+                    TimeShift = Convert.ToInt32(reader.ReadLine());
                     int mainLegsCount = Convert.ToInt32(reader.ReadLine());
                     int secondaryLegsCount = Convert.ToInt32(reader.ReadLine());
 
@@ -278,6 +278,7 @@ namespace OsEngine.OsTrader.Iceberg
                     writer.WriteLine(_currentMode.ToString());
                     writer.WriteLine(_nonTradePeriods.NameUnique.ToString());
                     writer.WriteLine(_stopTradeOnFailOrders.ToString());
+                    writer.WriteLine(TimeShift.ToString());
                     writer.WriteLine(_mainLegs.Count.ToString());
                     writer.WriteLine(_secondaryLegs.Count.ToString());
 
@@ -541,7 +542,7 @@ namespace OsEngine.OsTrader.Iceberg
             {
                 try
                 {
-                    _currentTimeServer = DateTime.UtcNow.AddHours(ShiftTime);
+                    _currentTimeServer = DateTime.UtcNow.AddHours(TimeShift);
 
                     if (!CheckTradingReady())
                     {
@@ -1518,7 +1519,7 @@ namespace OsEngine.OsTrader.Iceberg
             get { return _isNonTradePeriod; }
         }
 
-        public int ShiftTime = 0;
+        public int TimeShift = 0;
 
         public DateTime CurrentTimeServer
         {
@@ -1554,8 +1555,6 @@ namespace OsEngine.OsTrader.Iceberg
         private DateTime _currentTimeServer;
 
         private bool _stopTradeOnFailOrders;
-
-        private bool _allPositionsFilled;
 
         private readonly object _fileLock = new object();
 

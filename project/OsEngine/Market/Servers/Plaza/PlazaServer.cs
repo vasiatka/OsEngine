@@ -34,6 +34,14 @@ namespace OsEngine.Market.Servers.Plaza
 
         public PlazaServerRealization()
         {
+            try
+            {
+                System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+            }
+            catch (InvalidOperationException)
+            {
+            }
+
             ServerStatus = ServerConnectStatus.Disconnect;
             _statusNeeded = ServerConnectStatus.Disconnect;
 
@@ -299,24 +307,28 @@ namespace OsEngine.Market.Servers.Plaza
 
                 if (_publisher != null)
                 {
-                    try
+                    //bug-0343: teardown under the usage locker, so in-flight readers finish first
+                    lock (_publisherLocker)
                     {
-                        if (_publisher.State == State.Active)
+                        try
                         {
-                            _publisher.Close();
-                            _publisher.Dispose();
+                            if (_publisher.State == State.Active)
+                            {
+                                _publisher.Close();
+                                _publisher.Dispose();
+                            }
+                            else
+                            {
+                                _publisher.Dispose();
+                            }
                         }
-                        else
+                        catch (Exception error)
                         {
-                            _publisher.Dispose();
+                            SendLogMessage(error.ToString(), LogMessageType.Error);
                         }
-                    }
-                    catch (Exception error)
-                    {
-                        SendLogMessage(error.ToString(), LogMessageType.Error);
-                    }
 
-                    _publisher = null;
+                        _publisher = null;
+                    }
                 }
 
                 _marketDepths = new List<MarketDepth>();
@@ -1254,54 +1266,61 @@ namespace OsEngine.Market.Servers.Plaza
         {
             try
             {
-                if (_publisher == null)
+                //bug-0343: publisher lifecycle is serialized with publisher usage. Lock order: _ConnectionLocker -> _publisherLocker
+                lock (_publisherLocker)
                 {
-                    _publisher = new Publisher(Connection, PublisherOrdersString);
-                }
-
-                if (_publisher.State == State.Closed)
-                {
-                    if (_publisherDateTime.AddSeconds(1) > DateTime.Now)
+                    if (_publisher == null)
                     {
-                        return;
-                    }
-                    _publisherDateTime = DateTime.Now;
-
-                    _publisher.Open();
-                }
-
-                if (_publisher.State == State.Error)
-                {
-                    SendLogMessage("Publisher error. Subscribe again", LogMessageType.System);
-
-                    try
-                    {
-                        _publisher.Close();
-                        _publisher.Dispose();
-                    }
-                    catch (Exception error)
-                    {
-                        SendLogMessage(error.Message, LogMessageType.Error);
+                        _publisher = new Publisher(Connection, PublisherOrdersString);
                     }
 
-                    _publisher = null;
+                    if (_publisher.State == State.Closed)
+                    {
+                        if (_publisherDateTime.AddSeconds(1) > DateTime.Now)
+                        {
+                            return;
+                        }
+                        _publisherDateTime = DateTime.Now;
+
+                        _publisher.Open();
+                    }
+
+                    if (_publisher.State == State.Error)
+                    {
+                        SendLogMessage("Publisher error. Subscribe again", LogMessageType.System);
+
+                        try
+                        {
+                            _publisher.Close();
+                            _publisher.Dispose();
+                        }
+                        catch (Exception error)
+                        {
+                            SendLogMessage(error.Message, LogMessageType.Error);
+                        }
+
+                        _publisher = null;
+                    }
                 }
             }
             catch
             {
-                if (_publisher != null)
+                lock (_publisherLocker)
                 {
-                    try
+                    if (_publisher != null)
                     {
-                        _publisher.Dispose();
+                        try
+                        {
+                            _publisher.Dispose();
+                        }
+                        catch
+                        {
+                            // ignore
+                        }
                     }
-                    catch
-                    {
-                        // ignore
-                    }
-                }
 
-                _publisher = null;
+                    _publisher = null;
+                }
 
                 SendLogMessage($"Publisher error. Reconnect.", LogMessageType.System);
 
@@ -2969,24 +2988,25 @@ namespace OsEngine.Market.Servers.Plaza
 
         public bool CancelOrder(Order order)
         {
+            // bug-0339: сон штрафа и ожидание слота — вне _publisherLocker (иначе снащий держит все пути заявок и heartbeat); порядок: сначала сон, слот — непосредственно перед локом.
+            lock (_penaltyRemainLock)
+            {
+                if (_penaltyRemain != 0)
+                {
+                    Thread.Sleep(_penaltyRemain);
+                    _penaltyRemain = 0;
+                }
+            }
+
+            _rateGate.WaitToProceed();
+
             lock (_publisherLocker)
             {
-                _rateGate.WaitToProceed();
-
                 try
                 {
                     if (_publisher == null)
                     {
                         return false;
-                    }
-
-                    if (_penaltyRemain != 0)
-                    {
-                        lock (_penaltyRemainLock)
-                        {
-                            Thread.Sleep(_penaltyRemain);
-                            _penaltyRemain = 0;
-                        }
                     }
 
                     Message sendMessage = _publisher.NewMessage(MessageKeyType.KeyName, "DelOrder");
@@ -3018,24 +3038,25 @@ namespace OsEngine.Market.Servers.Plaza
 
         public void ChangeOrderPrice(Order order, decimal newPrice)
         {
+            // bug-0339: сон штрафа и ожидание слота — вне _publisherLocker (конвой, см. CancelOrder)
+            lock (_penaltyRemainLock)
+            {
+                if (_penaltyRemain != 0)
+                {
+                    Thread.Sleep(_penaltyRemain);
+                    _penaltyRemain = 0;
+                }
+            }
+
+            _rateGate.WaitToProceed();
+
             lock (_publisherLocker)
             {
-                _rateGate.WaitToProceed();
-
                 try
                 {
                     if (_publisher == null)
                     {
                         return;
-                    }
-
-                    if (_penaltyRemain != 0)
-                    {
-                        lock (_penaltyRemainLock)
-                        {
-                            Thread.Sleep(_penaltyRemain);
-                            _penaltyRemain = 0;
-                        }
                     }
 
                     Message sendMessage = _publisher.NewMessage(MessageKeyType.KeyName, "MoveOrder");
@@ -3096,24 +3117,28 @@ namespace OsEngine.Market.Servers.Plaza
 
         public void SendOrder(Order order)
         {
+            // bug-0339: сон штрафа и ожидание слота — вне _publisherLocker, иначе сон держит все пути заявок и heartbeat (конвой).
+            // Порядок W-1: сначала сон штрафа, слот гейта — непосредственно перед локом, чтобы не сжигать слоты во время сна.
+            // Остаточный риск W-3: между слотом гейта и Post держится только _publisherLocker.
+            // При Post дольше окна гейта (33 мс @30/с) в одно окно может пройти два Post; ограничено длительностью Post и принято.
+            lock (_penaltyRemainLock)
+            {
+                if (_penaltyRemain != 0)
+                {
+                    Thread.Sleep(_penaltyRemain);
+                    _penaltyRemain = 0;
+                }
+            }
+
+            _rateGate.WaitToProceed();
+
             lock (_publisherLocker)
             {
-                _rateGate.WaitToProceed();
-
                 try
                 {
                     if (_publisher == null)
                     {
                         return;
-                    }
-
-                    if (_penaltyRemain != 0)
-                    {
-                        lock (_penaltyRemainLock)
-                        {
-                            Thread.Sleep(_penaltyRemain);
-                            _penaltyRemain = 0;
-                        }
                     }
 
                     Message sendMessage = _publisher.NewMessage(MessageKeyType.KeyName, "AddOrder");
